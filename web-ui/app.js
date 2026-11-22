@@ -673,6 +673,7 @@
   // ---------- now strip + notices ----------
 
   function stateOf(s) {
+    if (s.viewer) return ["paused", "Read-only view"];
     if (s.paused) return ["paused", s.paused_until_ms ? `Paused until ${hm(s.paused_until_ms)}` : "Paused"];
     if (s.locked) return ["locked", "Locked"];
     if (s.idle && s.idle.input_idle && (s.media_visible || []).length) return ["watching", "Watching"];
@@ -699,7 +700,8 @@
       return;
     }
     const [s, label] = stateOf(status);
-    nowEl.innerHTML = `<span class="state" data-s="${s}">${esc(label)}</span><span class="what" title="${esc(describe(status.focus))}">${esc(describe(status.focus))}</span>${
+    const what = status.viewer ? "Saved data, nothing is being tracked" : describe(status.focus);
+    nowEl.innerHTML = `<span class="state" data-s="${s}">${esc(label)}</span><span class="what" title="${esc(what)}">${esc(what)}</span>${
       status.paused ? '<button type="button" class="btn" id="nowresume">Resume</button>' : ""
     }`;
     const r = document.getElementById("nowresume");
