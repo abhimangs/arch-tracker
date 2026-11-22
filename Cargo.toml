@@ -5,7 +5,6 @@ edition = "2024"
 description = "Local screen-time and activity tracker for KDE Plasma on Wayland"
 license = "MIT"
 repository = "https://github.com/abhimangs/arch-tracker"
-homepage = "https://github.com/abhimangs/arch-tracker"
 readme = "README.md"
 keywords = ["screen-time", "kde", "wayland", "time-tracking", "productivity"]
 categories = ["command-line-utilities"]
