@@ -1,0 +1,45 @@
+name: Bug report
+description: Something is recorded wrong, missing, or the daemon misbehaves
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please remove page titles, hosts or project names you don't want to share before posting.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you see, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce
+      placeholder: |
+        1. Focus a Brave window with two tabs titled the same
+        2. Switch between them
+        3. The dashboard shows ...
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `arch-tracker doctor`
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "`journalctl --user -u arch-tracker -n 100 --no-pager`"
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: "arch-tracker 0.1.1, Plasma 6.8.3, Brave 1.101"
+    validations:
+      required: true
