@@ -28,6 +28,9 @@ pub struct Web {
     shared: SharedRef,
     tx: UnboundedSender<Event>,
     token: String,
+    db: std::path::PathBuf,
+    /// Read-only dashboard (arch-tracker serve): no settings writes, no pause.
+    viewer: bool,
     current: Mutex<Option<(u16, oneshot::Sender<()>)>>,
 }
 
@@ -47,11 +50,18 @@ fn random_token() -> String {
 }
 
 impl Web {
-    pub fn new(shared: SharedRef, tx: UnboundedSender<Event>) -> Arc<Web> {
+    pub fn new(
+        shared: SharedRef,
+        tx: UnboundedSender<Event>,
+        db: std::path::PathBuf,
+        viewer: bool,
+    ) -> Arc<Web> {
         Arc::new(Web {
             shared,
             tx,
             token: random_token(),
+            db,
+            viewer,
             current: Mutex::new(None),
         })
     }
@@ -269,8 +279,15 @@ async fn blocking<T: serde::Serialize + Send + 'static>(
     }
 }
 
-fn db() -> Result<rusqlite::Connection> {
-    let c = rusqlite::Connection::open(util::db_path())?;
+/// Read-write when possible (the rollup cache is written), read-only otherwise.
+fn db(path: &std::path::Path) -> Result<rusqlite::Connection> {
+    let c = match rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    ) {
+        Ok(c) => c,
+        Err(_) => crate::store::open_readonly(path)?,
+    };
     c.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(c)
 }
@@ -278,7 +295,8 @@ fn db() -> Result<rusqlite::Connection> {
 async fn api_day(State(ctx): State<Ctx>, Query(q): Query<DayQ>) -> Response {
     let cfg = ctx.web.config();
     let date = q.date.unwrap_or_else(|| util::local_date(util::now_ms()));
-    blocking(move || report::day_cached(&db()?, &cfg, &date)).await
+    let path = ctx.web.db.clone();
+    blocking(move || report::day_cached(&db(&path)?, &cfg, &date)).await
 }
 
 #[derive(Deserialize)]
@@ -289,7 +307,8 @@ struct RangeQ {
 
 async fn api_range(State(ctx): State<Ctx>, Query(q): Query<RangeQ>) -> Response {
     let cfg = ctx.web.config();
-    blocking(move || report::range(&db()?, &cfg, &q.from, &q.to)).await
+    let path = ctx.web.db.clone();
+    blocking(move || report::range(&db(&path)?, &cfg, &q.from, &q.to)).await
 }
 
 async fn api_settings(State(ctx): State<Ctx>) -> Response {
@@ -311,6 +330,9 @@ struct SettingsBody {
 }
 
 async fn api_settings_put(State(ctx): State<Ctx>, Json(body): Json<SettingsBody>) -> Response {
+    if ctx.web.viewer {
+        return err(StatusCode::FORBIDDEN, VIEWER_MSG);
+    }
     let cfg = body.config.sanitized();
     let old = ctx.web.config();
     let mut redirect = None;
@@ -343,7 +365,12 @@ async fn api_settings_put(State(ctx): State<Ctx>, Json(body): Json<SettingsBody>
     Json(json!({"ok": true, "redirect": redirect})).into_response()
 }
 
+const VIEWER_MSG: &str = "This is a read-only view (arch-tracker serve). Change settings in the tracker's own dashboard.";
+
 async fn control(ctx: &Ctx, req: Request) -> Response {
+    if ctx.web.viewer {
+        return err(StatusCode::FORBIDDEN, VIEWER_MSG);
+    }
     let (otx, orx) = oneshot::channel();
     if ctx.web.tx.send(Event::Control(req, otx)).is_err() {
         return err(StatusCode::SERVICE_UNAVAILABLE, "Daemon is stopping");
@@ -377,11 +404,13 @@ struct ExportQ {
     format: Option<String>,
 }
 
-async fn api_export(Query(q): Query<ExportQ>) -> Response {
+async fn api_export(State(ctx): State<Ctx>, Query(q): Query<ExportQ>) -> Response {
     let format = q.format.unwrap_or_else(|| "csv".into());
-    let res =
-        tokio::task::spawn_blocking(move || crate::export::export(&db()?, &q.from, &q.to, &format))
-            .await;
+    let path = ctx.web.db.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        crate::export::export(&db(&path)?, &q.from, &q.to, &format)
+    })
+    .await;
     match res {
         Ok(Ok((ct, body))) => {
             let name = if ct.contains("csv") {

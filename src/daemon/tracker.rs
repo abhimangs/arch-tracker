@@ -996,10 +996,7 @@ mod tests {
             strip_browser_suffix("Instagram - Brave Origin"),
             "Instagram"
         );
-        assert_eq!(
-            strip_browser_suffix("A - B - Brave Origin - Work"),
-            "A - B"
-        );
+        assert_eq!(strip_browser_suffix("A - B - Brave Origin - Work"), "A - B");
         assert_eq!(strip_browser_suffix("plain"), "plain");
     }
 
