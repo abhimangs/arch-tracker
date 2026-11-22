@@ -1,0 +1,112 @@
+// Sources are added milestone by milestone; remove once everything is wired up.
+#![allow(dead_code)]
+
+mod config;
+mod daemon;
+mod ipc;
+mod model;
+mod store;
+mod util;
+
+use anyhow::{Result, bail};
+use clap::{Parser, Subcommand};
+
+/// Local screen-time and activity tracker for KDE Plasma (Wayland).
+#[derive(Parser)]
+#[command(name = "arch-tracker", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run the tracker (normally started by systemd: arch-tracker.service).
+    Daemon,
+    /// Show what is being tracked right now and which sources work.
+    Status {
+        /// Print raw JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pause tracking, e.g. "pause 1h", "pause 30m"; no duration = until "resume".
+    Pause { duration: Option<String> },
+    /// Resume tracking after a pause.
+    Resume,
+}
+
+fn main() {
+    if let Err(e) = real_main() {
+        eprintln!("arch-tracker: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn init_logging(daemon: bool) {
+    use tracing_subscriber::prelude::*;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("arch_tracker=info,warn"));
+    let journald = daemon && std::env::var_os("JOURNAL_STREAM").is_some();
+    if journald && let Ok(layer) = tracing_journald::layer() {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(layer)
+            .init();
+        return;
+    }
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .init();
+}
+
+fn real_main() -> Result<()> {
+    let cli = Cli::parse();
+    match cli.cmd {
+        Cmd::Daemon => {
+            init_logging(true);
+            daemon::run()
+        }
+        Cmd::Status { json } => {
+            let v = block_on(ipc::call(&ipc::Request::Status))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                print_status(&v);
+            }
+            Ok(())
+        }
+        Cmd::Pause { duration } => {
+            let until_ms = match duration.as_deref() {
+                None => None,
+                Some(d) => match util::parse_duration(d) {
+                    Some(ms) => Some(util::now_ms() + ms),
+                    None => bail!("can't read duration {d:?} (try 30m, 1h, 1h30m)"),
+                },
+            };
+            block_on(ipc::call(&ipc::Request::Pause { until_ms }))?;
+            match duration {
+                Some(d) => println!("Paused for {d}."),
+                None => println!("Paused until you run: arch-tracker resume"),
+            }
+            Ok(())
+        }
+        Cmd::Resume => {
+            block_on(ipc::call(&ipc::Request::Resume))?;
+            println!("Tracking resumed.");
+            Ok(())
+        }
+    }
+}
+
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(f)
+}
+
+fn print_status(v: &serde_json::Value) {
+    println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+}
