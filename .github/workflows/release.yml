@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install build tools
+        run: pacman -Syu --noconfirm --needed git rust sqlite github-cli
+      - uses: actions/checkout@v7
+      - name: Check that versions match the tag
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          grep -q "^version = \"$v\"" Cargo.toml || { echo "Cargo.toml version is not $v"; exit 1; }
+          grep -q "^pkgver=$v$" packaging/PKGBUILD || { echo "PKGBUILD pkgver is not $v"; exit 1; }
+          grep -q "^## \[$v\]" CHANGELOG.md || { echo "CHANGELOG.md has no section for $v"; exit 1; }
+      - name: Build with makepkg
+        run: |
+          useradd -m builder
+          chown -R builder: "$GITHUB_WORKSPACE"
+          sudo -u builder bash -c 'cd packaging && makepkg --noconfirm --cleanbuild'
+      - name: Assemble release files
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          name="arch-tracker-$v-x86_64-linux"
+          mkdir -p "dist/$name"
+          install -m755 packaging/src/target/release/arch-tracker "dist/$name/"
+          cp -r extension "dist/$name/"
+          cp packaging/arch-tracker.service README.md LICENSE CHANGELOG.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          cp packaging/*.pkg.tar.zst dist/
+          cd dist && sha256sum ./*.tar.gz ./*.pkg.tar.zst > SHA256SUMS && cat SHA256SUMS
+      - name: Release notes from CHANGELOG.md
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" 'index($0, "## [" v "]") == 1 {f=1; next} f && /^## \[/ {exit} f' CHANGELOG.md > notes.md
+          test -s notes.md
+          cat notes.md
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.pkg.tar.zst dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "arch-tracker $GITHUB_REF_NAME" --notes-file notes.md
