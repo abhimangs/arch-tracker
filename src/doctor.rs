@@ -111,12 +111,18 @@ pub async fn run() -> anyhow::Result<()> {
             "Run: arch-tracker setup",
         );
     }
-    let pbi = !src["plasma_browser_integration"].is_null();
     if !ext_alive {
+        // Queried lazily (only when a browser window is on screen), so ask the bus directly.
+        let pbi = sh(
+            "busctl",
+            &["--user", "status", "org.kde.plasma.browser_integration"],
+        )
+        .map(|o| o.contains("PID="))
+        .unwrap_or(false);
         r.line(
             pbi,
             "Plasma Browser Integration fallback available",
-            "Install plasma-browser-integration and its browser extension",
+            "Install plasma-browser-integration and enable its browser extension",
         );
     }
 
