@@ -7,3 +7,7 @@
 *.db-shm
 .env
 .claude/settings.local.json
+
+# Private notes, kept out of the public repo
+/CLAUDE.md
+/docs/PLAN.md
