@@ -5,6 +5,7 @@ pub mod tracker;
 
 use crate::config::Config;
 use crate::ipc::Request;
+use crate::sources::kwin;
 use crate::store::Store;
 use crate::util;
 use anyhow::{Context, Result, bail};
@@ -19,6 +20,7 @@ use tracker::Tracker;
 pub enum Event {
     Control(Request, oneshot::Sender<serde_json::Value>),
     ConfigChanged(Box<Config>),
+    Kwin(Box<kwin::Snapshot>),
 }
 
 /// State shared with the web server.
@@ -53,7 +55,17 @@ async fn run_async() -> Result<()> {
 
     control::spawn(tx.clone())?;
 
-    let mut tracker = Tracker::new(store, cfg.clone(), shared.clone());
+    let conn = zbus::connection::Builder::session()
+        .name(kwin::BUS_NAME)
+        .serve_at(kwin::OBJECT_PATH, kwin::KwinIface { tx: tx.clone() })
+        .build()
+        .await
+        .context("connecting to the session bus")?;
+    if let Err(e) = kwin::load_script(&conn).await {
+        tracing::warn!("could not load the KWin script: {e:#}");
+    }
+
+    let mut tracker = Tracker::new(store, cfg.clone(), shared.clone(), conn.clone());
     tracker.start();
 
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.general.sample_interval_secs));
@@ -81,6 +93,7 @@ async fn run_async() -> Result<()> {
     }
     let _ = sd_notify::notify(&[sd_notify::NotifyState::Stopping]);
     tracker.shutdown();
+    kwin::unload_script(&conn).await;
     tracing::info!("arch-tracker daemon stopped");
     Ok(())
 }

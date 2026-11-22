@@ -1,0 +1,4 @@
+//! Event sources. Each desktop-specific source sits behind plain data types, so other
+//! desktops (GNOME, Hyprland, Sway) can be added as new modules producing the same events.
+
+pub mod kwin;

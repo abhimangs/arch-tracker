@@ -3,8 +3,10 @@
 
 mod config;
 mod daemon;
+mod desktop;
 mod ipc;
 mod model;
+mod sources;
 mod store;
 mod util;
 
@@ -46,7 +48,7 @@ fn init_logging(daemon: bool) {
     use tracing_subscriber::prelude::*;
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("arch_tracker=info,warn"));
-    let journald = daemon && std::env::var_os("JOURNAL_STREAM").is_some();
+    let journald = daemon && stderr_is_journal();
     if journald && let Ok(layer) = tracing_journald::layer() {
         tracing_subscriber::registry()
             .with(filter)
@@ -58,6 +60,23 @@ fn init_logging(daemon: bool) {
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
+}
+
+/// systemd sets JOURNAL_STREAM=dev:ino for the stream it connected; only trust it if stderr is
+/// still that stream (a terminal launched from a systemd scope inherits the variable).
+fn stderr_is_journal() -> bool {
+    let Some(v) = std::env::var_os("JOURNAL_STREAM") else {
+        return false;
+    };
+    let v = v.to_string_lossy();
+    let Some((dev, ino)) = v.split_once(':') else {
+        return false;
+    };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(2, &mut st) } != 0 {
+        return false;
+    }
+    dev.parse::<u64>().ok() == Some(st.st_dev) && ino.parse::<u64>().ok() == Some(st.st_ino)
 }
 
 fn real_main() -> Result<()> {
