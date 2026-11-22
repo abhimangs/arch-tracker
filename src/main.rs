@@ -7,6 +7,7 @@ mod desktop;
 mod ipc;
 mod model;
 mod native_host;
+mod report;
 mod setup;
 mod sources;
 mod store;
