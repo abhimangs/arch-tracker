@@ -5,7 +5,7 @@ pub mod tracker;
 
 use crate::config::Config;
 use crate::ipc::Request;
-use crate::sources::kwin;
+use crate::sources::{idle, kwin, media, session};
 use crate::store::Store;
 use crate::util;
 use anyhow::{Context, Result, bail};
@@ -21,6 +21,22 @@ pub enum Event {
     Control(Request, oneshot::Sender<serde_json::Value>),
     ConfigChanged(Box<Config>),
     Kwin(Box<kwin::Snapshot>),
+    /// input: true = pure input-idle notification; false = inhibitor-respecting one.
+    Idle {
+        input: bool,
+        idle: bool,
+        at: i64,
+    },
+    IdleReady {
+        version: u32,
+    },
+    IdleUnavailable(String),
+    Locked(bool),
+    Sleep {
+        going: bool,
+        done: Option<oneshot::Sender<()>>,
+    },
+    Media(Vec<media::Player>),
 }
 
 /// State shared with the web server.
@@ -64,6 +80,10 @@ async fn run_async() -> Result<()> {
     if let Err(e) = kwin::load_script(&conn).await {
         tracing::warn!("could not load the KWin script: {e:#}");
     }
+
+    idle::spawn(tx.clone());
+    session::spawn(conn.clone(), tx.clone()).await;
+    media::spawn(conn.clone(), tx.clone()).await;
 
     let mut tracker = Tracker::new(store, cfg.clone(), shared.clone(), conn.clone());
     tracker.start();

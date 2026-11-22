@@ -187,6 +187,24 @@ pub fn normalize_title(raw: &str, extra: &[regex_lite::Regex], max_len: usize) -
     out
 }
 
+/// Loose title equality: media sessions drop site suffixes ("Video" vs "Video - YouTube").
+pub fn titles_match(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim().to_lowercase(), b.trim().to_lowercase());
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let (short, long) = if a.len() <= b.len() {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+    short.chars().count() >= 8
+        && (long.starts_with(short.as_str()) || long.contains(short.as_str()))
+}
+
 fn is_status_glyph(c: char) -> bool {
     matches!(c as u32,
         0x2800..=0x28FF   // braille spinners
@@ -219,6 +237,17 @@ mod tests {
         assert_eq!(parse_duration("2d"), Some(2 * 86_400_000));
         assert_eq!(parse_duration("1x"), None);
         assert_eq!(parse_duration("1h3"), None);
+    }
+
+    #[test]
+    fn title_matching() {
+        assert!(titles_match(
+            "Borrow checker in five minutes",
+            "Borrow checker in five minutes - YouTube"
+        ));
+        assert!(titles_match("Instagram", "instagram"));
+        assert!(!titles_match("Home", "Home Depot deals - Brave"));
+        assert!(!titles_match("", "x"));
     }
 
     #[test]

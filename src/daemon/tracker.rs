@@ -6,6 +6,8 @@ use crate::desktop::DesktopIndex;
 use crate::ipc::Request;
 use crate::model::{Kind, Subject};
 use crate::sources::kwin::{self, Win};
+use crate::sources::media::{self, Player};
+use crate::sources::{idle, session};
 use crate::store::Store;
 use crate::store::ledger::Ledger;
 use crate::util::{self, now_ms};
@@ -103,6 +105,20 @@ pub struct Tracker {
     kwin_reloading: bool,
     focus: Option<Subject>,
     visible: Vec<Subject>,
+    media_visible: Vec<Subject>,
+    bg_audio: Vec<Subject>,
+    /// No keyboard/mouse input (inhibitors ignored).
+    input_idle: bool,
+    /// Idle as the compositor sees it (inhibitors respected).
+    session_idle: bool,
+    idle_version: u32,
+    idle_error: Option<String>,
+    screensaver_locked: bool,
+    logind_locked: bool,
+    suspended: bool,
+    players: Vec<Player>,
+    mic: bool,
+    sys_conn: Option<zbus::Connection>,
     last_flush: Instant,
     last_wall: i64,
     last_mono: Instant,
@@ -124,10 +140,23 @@ impl Tracker {
             started_ms: now,
             paused: None,
             kwin: None,
-            kwin_last: 0,
+            // Grace period: the first snapshot arrives right after the script loads.
+            kwin_last: now,
             kwin_reloading: false,
             focus: None,
             visible: vec![],
+            media_visible: vec![],
+            bg_audio: vec![],
+            input_idle: false,
+            session_idle: false,
+            idle_version: 0,
+            idle_error: None,
+            screensaver_locked: false,
+            logind_locked: false,
+            suspended: false,
+            players: vec![],
+            mic: false,
+            sys_conn: None,
             last_flush: Instant::now(),
             last_wall: now,
             last_mono: Instant::now(),
@@ -155,8 +184,60 @@ impl Tracker {
                 self.kwin_last = now;
                 self.kwin_reloading = false;
             }
+            Event::Idle {
+                input,
+                idle: is_idle,
+                at,
+            } => {
+                if input {
+                    self.input_idle = is_idle;
+                    // The notification fires GAP_MS after the last input: start the gap there.
+                    let start = if is_idle {
+                        at - idle::GAP_MS as i64
+                    } else {
+                        at
+                    };
+                    self.ledger.set_flag(Kind::InputIdle, is_idle, start);
+                } else {
+                    self.session_idle = is_idle;
+                }
+            }
+            Event::IdleReady { version } => {
+                self.idle_version = version;
+                self.idle_error = None;
+            }
+            Event::IdleUnavailable(e) => self.idle_error = Some(e),
+            Event::Locked(l) => {
+                tracing::info!("screen {}", if l { "locked" } else { "unlocked" });
+                self.screensaver_locked = l;
+                if !l {
+                    self.logind_locked = false;
+                }
+            }
+            Event::Sleep { going, done } => {
+                tracing::info!("{}", if going { "going to sleep" } else { "woke up" });
+                self.suspended = going;
+                if !going {
+                    // Restart the clock-jump baseline so the sleep gap is not seen as a jump.
+                    self.last_wall = now;
+                    self.last_mono = Instant::now();
+                }
+                self.reconcile(now);
+                if going {
+                    self.flush(now);
+                }
+                if let Some(d) = done {
+                    let _ = d.send(());
+                }
+                return;
+            }
+            Event::Media(players) => self.players = players,
         }
         self.reconcile(now);
+    }
+
+    fn locked(&self) -> bool {
+        self.screensaver_locked || self.logind_locked
     }
 
     fn set_config(&mut self, cfg: Config) {
@@ -172,7 +253,7 @@ impl Tracker {
         let now = now_ms();
         let mono_elapsed = self.last_mono.elapsed().as_millis() as i64;
         let expected = self.last_wall + mono_elapsed;
-        if (now - expected).abs() > 5_000 {
+        if (now - expected).abs() > 5_000 && !self.suspended {
             // Wall clock jumped (a suspend we missed, NTP, manual change): don't let open spans
             // stretch across the jump.
             tracing::info!("clock jump of {} s detected", (now - expected) / 1000);
@@ -191,6 +272,15 @@ impl Tracker {
         if now >= self.next_midnight {
             self.ledger.split_all(self.next_midnight);
             self.next_midnight = next_local_midnight(now);
+        }
+        self.mic = media::mic_active();
+        if self.sys_conn.is_none() {
+            self.sys_conn = zbus::Connection::system().await.ok();
+        }
+        if let Some(sys) = &self.sys_conn
+            && let Some(hint) = session::locked_hint(sys).await
+        {
+            self.logind_locked = hint;
         }
         if self.desktop_loaded.elapsed().as_secs() > 600 {
             self.desktop = DesktopIndex::load();
@@ -300,34 +390,127 @@ impl Tracker {
         out
     }
 
+    /// Subject for media that plays without being on screen.
+    fn player_subject(&self, p: &Player) -> Option<Subject> {
+        let win = self.kwin.as_ref().and_then(|k| {
+            k.windows
+                .iter()
+                .find(|w| w.pid as u32 == p.pid && p.pid != 0)
+        });
+        let (app, app_name) = match win {
+            Some(w) => self.desktop.identify(&w.df, &w.cls, w.pid),
+            None if !p.identity.is_empty() => (
+                p.bus
+                    .trim_start_matches("org.mpris.MediaPlayer2.")
+                    .to_string(),
+                p.identity.clone(),
+            ),
+            None => (p.bus.clone(), p.bus.clone()),
+        };
+        let browser = p.is_browser_bridge() || app_kind(&app, "") == AppKind::Browser;
+        let s = Subject {
+            host: if browser {
+                media::url_host(&p.url)
+            } else {
+                String::new()
+            },
+            title: util::normalize_title(&p.title, &self.title_res, self.cfg.titles.max_len),
+            app,
+            app_name,
+            ..Default::default()
+        };
+        self.apply_privacy(s)
+    }
+
+    /// Splits playing media into "in a window you can see" and "background".
+    fn split_media(&self, shown: &[(&Win, Subject)]) -> (Vec<Subject>, Vec<Subject>) {
+        let mut vis = vec![];
+        let mut bg = vec![];
+        for p in self.players.iter().filter(|p| p.playing) {
+            let hit = shown.iter().find(|(w, s)| {
+                if w.pid as u32 != p.pid || p.pid == 0 {
+                    return false;
+                }
+                if p.is_browser_bridge() {
+                    // The bridge reports the tab title; only the window's active tab counts.
+                    let t =
+                        util::normalize_title(&p.title, &self.title_res, self.cfg.titles.max_len);
+                    return util::titles_match(&t, &s.title)
+                        || (!s.host.is_empty() && media::url_host(&p.url) == s.host);
+                }
+                true
+            });
+            match hit {
+                Some((_, s)) => vis.push(s.clone()),
+                None => bg.extend(self.player_subject(p)),
+            }
+        }
+        vis.dedup();
+        bg.dedup();
+        (vis, bg)
+    }
+
     /// Recomputes which spans should be open right now.
     fn reconcile(&mut self, now: i64) {
         let paused = self.paused.is_some();
+        let locked = self.locked();
+        let suspended = self.suspended;
+        let blocked = paused || locked || suspended;
         self.ledger.set_flag(Kind::Paused, paused, now);
+        self.ledger
+            .set_flag(Kind::Locked, locked && !suspended, now);
+        self.ledger.set_flag(Kind::Suspended, suspended, now);
+        self.ledger.set_flag(
+            Kind::Inhibited,
+            self.input_idle && !self.session_idle && !suspended,
+            now,
+        );
+        self.ledger
+            .set_flag(Kind::Mic, self.mic && !suspended && !paused, now);
 
-        let (focus, visible) = match (&self.kwin, paused) {
-            (Some(snap), false) => {
-                let focus = snap.focused().and_then(|w| self.window_subject(w));
-                let mut visible: Vec<Subject> = snap
-                    .visible(
-                        self.cfg.visibility.min_fraction,
-                        self.cfg.visibility.min_pixels,
-                    )
-                    .into_iter()
-                    .filter_map(|w| self.window_subject(w))
-                    .collect();
-                visible.retain(|v| Some(v) != focus.as_ref());
-                visible.dedup();
-                (focus, visible)
+        let mut shown: Vec<(&Win, Subject)> = vec![];
+        let mut focus = None;
+        if let (Some(snap), false) = (&self.kwin, blocked) {
+            if let Some(w) = snap.focused()
+                && let Some(s) = self.window_subject(w)
+            {
+                focus = Some(s.clone());
+                shown.push((w, s));
             }
-            _ => (None, vec![]),
+            for w in snap.visible(
+                self.cfg.visibility.min_fraction,
+                self.cfg.visibility.min_pixels,
+            ) {
+                if let Some(s) = self.window_subject(w) {
+                    shown.push((w, s));
+                }
+            }
+        }
+        let mut visible: Vec<Subject> = shown
+            .iter()
+            .skip(usize::from(focus.is_some()))
+            .map(|(_, s)| s.clone())
+            .collect();
+        visible.retain(|v| Some(v) != focus.as_ref());
+        visible.dedup();
+        let (media_visible, bg_audio) = if paused || suspended {
+            (vec![], vec![])
+        } else {
+            self.split_media(&shown)
         };
+
         let focus_ids = self.ids(focus.as_slice());
         let visible_ids = self.ids(&visible);
+        let media_ids = self.ids(&media_visible);
+        let bg_ids = self.ids(&bg_audio);
         self.ledger.reconcile(Kind::Focus, &focus_ids, now);
         self.ledger.reconcile(Kind::Visible, &visible_ids, now);
+        self.ledger.reconcile(Kind::MediaVisible, &media_ids, now);
+        self.ledger.reconcile(Kind::BgAudio, &bg_ids, now);
         self.focus = focus;
         self.visible = visible;
+        self.media_visible = media_visible;
+        self.bg_audio = bg_audio;
 
         let status = self.status_json(now);
         if let Ok(mut s) = self.shared.lock() {
@@ -344,10 +527,21 @@ impl Tracker {
             "paused_until_ms": self.paused.flatten(),
             "focus": self.focus,
             "visible": self.visible,
+            "media_visible": self.media_visible,
+            "background_audio": self.bg_audio,
+            "idle": {"input_idle": self.input_idle, "session_idle": self.session_idle,
+                     "inhibited": self.input_idle && !self.session_idle},
+            "locked": self.locked(),
+            "suspended": self.suspended,
+            "mic": self.mic,
+            "players": self.players.iter().map(|p| json!({"name": if p.identity.is_empty() { &p.bus } else { &p.identity },
+                "playing": p.playing, "pid": p.pid, "host": media::url_host(&p.url), "title": p.title})).collect::<Vec<_>>(),
             "open_spans": self.ledger.open_count(),
             "sources": {
                 "kwin": {"ok": now - self.kwin_last < 150_000, "last_ms": self.kwin_last,
                          "windows": self.kwin.as_ref().map(|k| k.windows.len()).unwrap_or(0)},
+                "idle": {"ok": self.idle_version > 0, "protocol_version": self.idle_version, "error": self.idle_error},
+                "logind": {"ok": self.sys_conn.is_some()},
             },
         })
     }
