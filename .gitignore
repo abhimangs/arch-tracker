@@ -1,0 +1,9 @@
+/target
+/packaging/*.pkg.tar.*
+/packaging/src/
+/packaging/pkg/
+*.db
+*.db-wal
+*.db-shm
+.env
+.claude/settings.local.json
