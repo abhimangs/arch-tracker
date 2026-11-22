@@ -42,6 +42,15 @@ enum Cmd {
     Setup,
     /// Check every data source and explain how to fix problems.
     Doctor,
+    /// Read-only dashboard for a database, without tracking (e.g. a copied tracker.db).
+    Serve {
+        /// Database to show (default: your own tracker.db).
+        #[arg(long)]
+        db: Option<std::path::PathBuf>,
+        /// Port on 127.0.0.1 (default: dashboard port + 1).
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Export raw recorded intervals, e.g. "export --from 2026-11-01 --to 2026-11-22 --format csv".
     Export {
         #[arg(long)]
@@ -135,6 +144,10 @@ fn real_main() -> Result<()> {
         }
         Cmd::Setup => setup::run(),
         Cmd::Doctor => block_on(doctor::run()),
+        Cmd::Serve { db, port } => {
+            init_logging(false);
+            block_on(serve(db.unwrap_or_else(util::db_path), port))
+        }
         Cmd::Export { from, to, format } => {
             let to = to.unwrap_or_else(|| from.clone());
             let conn = store::open_readonly(&util::db_path())?;
@@ -148,6 +161,29 @@ fn real_main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+async fn serve(db: std::path::PathBuf, port: Option<u16>) -> Result<()> {
+    if !db.exists() {
+        bail!("no database at {}", db.display());
+    }
+    let cfg = config::Config::load().unwrap_or_default();
+    let port = port.unwrap_or(cfg.dashboard.port.saturating_add(1));
+    let status =
+        serde_json::json!({"viewer": true, "version": env!("CARGO_PKG_VERSION"), "db": db});
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(daemon::Shared {
+        status,
+        config: cfg,
+    }));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let web = web::Web::new(shared, tx, db.clone(), true);
+    web.listen(port).await?;
+    println!(
+        "Read-only dashboard for {} at http://127.0.0.1:{port}/ (Ctrl+C to stop)",
+        db.display()
+    );
+    tokio::signal::ctrl_c().await?;
+    Ok(())
 }
 
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
