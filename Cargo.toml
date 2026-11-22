@@ -2,6 +2,14 @@
 name = "arch-tracker"
 version = "0.1.0"
 edition = "2024"
+description = "Local screen-time and activity tracker for KDE Plasma on Wayland"
+license = "MIT"
+repository = "https://github.com/abhimangs/arch-tracker"
+homepage = "https://github.com/abhimangs/arch-tracker"
+readme = "README.md"
+keywords = ["screen-time", "kde", "wayland", "time-tracking", "productivity"]
+categories = ["command-line-utilities"]
+exclude = ["docs/screenshots", ".github"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -27,3 +35,8 @@ url = "2.5.9"
 wayland-client = "0.31.15"
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 zbus = { version = "6.5.0", default-features = false, features = ["tokio", "proxy", "service"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
