@@ -6,6 +6,8 @@ mod daemon;
 mod desktop;
 mod ipc;
 mod model;
+mod native_host;
+mod setup;
 mod sources;
 mod store;
 mod util;
@@ -35,6 +37,8 @@ enum Cmd {
     Pause { duration: Option<String> },
     /// Resume tracking after a pause.
     Resume,
+    /// Unpack the Brave extension and register the native-messaging host.
+    Setup,
 }
 
 fn main() {
@@ -80,6 +84,13 @@ fn stderr_is_journal() -> bool {
 }
 
 fn real_main() -> Result<()> {
+    // Browsers start native hosts as "<path> chrome-extension://<id>/".
+    if let Some(origin) = std::env::args()
+        .nth(1)
+        .filter(|a| a.starts_with("chrome-extension://"))
+    {
+        return native_host::run(&origin);
+    }
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Daemon => {
@@ -110,6 +121,7 @@ fn real_main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Setup => setup::run(),
         Cmd::Resume => {
             block_on(ipc::call(&ipc::Request::Resume))?;
             println!("Tracking resumed.");

@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::desktop::DesktopIndex;
 use crate::ipc::Request;
 use crate::model::{Kind, Subject};
+use crate::sources::browser::{self, ExtMsg, ExtTab, ExtWindow, pbi::PbiTab, snss};
 use crate::sources::kwin::{self, Win};
 use crate::sources::media::{self, Player};
 use crate::sources::terminal::{self, TermInfo, agents, tools::Projects};
@@ -90,6 +91,35 @@ pub fn strip_browser_suffix(caption: &str) -> String {
     }
 }
 
+/// One connected browser instance (through our extension).
+struct ExtConn {
+    pid: u32,
+    last: i64,
+    windows: Vec<ExtWindow>,
+}
+
+struct PbiState {
+    pid: u32,
+    at: i64,
+    tabs: Vec<PbiTab>,
+}
+
+/// What we know about the tab a browser window shows.
+#[derive(Clone, Debug, Default)]
+struct TabPick {
+    host: String,
+    title: String,
+    private: bool,
+    audible: bool,
+    conn: Option<u64>,
+    tab_id: Option<i64>,
+    /// Other tabs shown in the same window (Chromium split view).
+    split: Vec<(String, String)>,
+}
+
+/// An extension connection is alive while it keeps sending (heartbeat every 20 s).
+const EXT_ALIVE_MS: i64 = 60_000;
+
 pub struct Tracker {
     store: Store,
     ledger: Ledger,
@@ -126,6 +156,11 @@ pub struct Tracker {
     projects: Projects,
     agent_scanner: agents::Scanner,
     agents: Vec<agents::AgentState>,
+    ext: HashMap<u64, ExtConn>,
+    pbi: Option<PbiState>,
+    pbi_caption: String,
+    snss: snss::Cache,
+    snss_selected: std::collections::HashSet<i64>,
     last_flush: Instant,
     last_wall: i64,
     last_mono: Instant,
@@ -168,6 +203,11 @@ impl Tracker {
             projects: Projects::default(),
             agent_scanner: agents::Scanner::default(),
             agents: vec![],
+            ext: HashMap::new(),
+            pbi: None,
+            pbi_caption: String::new(),
+            snss: snss::Cache::default(),
+            snss_selected: Default::default(),
             last_flush: Instant::now(),
             last_wall: now,
             last_mono: Instant::now(),
@@ -195,6 +235,7 @@ impl Tracker {
                 self.kwin_last = now;
                 self.kwin_reloading = false;
                 self.refresh_terminals(now, false).await;
+                self.refresh_pbi(now, false).await;
             }
             Event::Idle {
                 input,
@@ -244,6 +285,26 @@ impl Tracker {
                 return;
             }
             Event::Media(players) => self.players = players,
+            Event::BrowserExt { conn, msg } => {
+                let c = self.ext.entry(conn).or_insert(ExtConn {
+                    pid: 0,
+                    last: now,
+                    windows: vec![],
+                });
+                c.last = now;
+                match msg {
+                    ExtMsg::Hello { browser_pid } => {
+                        tracing::info!("browser extension connected (browser pid {browser_pid})");
+                        c.pid = browser_pid;
+                    }
+                    ExtMsg::Snapshot { windows } => c.windows = windows,
+                }
+            }
+            Event::BrowserGone(conn) => {
+                if self.ext.remove(&conn).is_some() {
+                    tracing::info!("browser extension disconnected");
+                }
+            }
         }
         self.reconcile(now);
     }
@@ -299,6 +360,8 @@ impl Tracker {
             self.desktop_loaded = Instant::now();
         }
         self.refresh_terminals(now, true).await;
+        self.refresh_pbi(now, true).await;
+        self.ext.retain(|_, c| now - c.last < EXT_ALIVE_MS * 5);
         self.agents = if self.paused.is_some() || self.suspended {
             vec![]
         } else {
@@ -405,8 +468,179 @@ impl Tracker {
         }
     }
 
-    /// Subject for a window: app identity + normalized title (+ enrichment), after privacy rules.
-    fn window_subject(&self, w: &Win) -> Option<Subject> {
+    fn norm(&self, t: &str) -> String {
+        util::normalize_title(t, &self.title_res, self.cfg.titles.max_len)
+    }
+
+    fn ext_conns(&self, pid: i64, now: i64) -> Vec<(u64, &ExtConn)> {
+        self.ext
+            .iter()
+            .filter(|(_, c)| now - c.last < EXT_ALIVE_MS && (c.pid == 0 || c.pid as i64 == pid))
+            .map(|(id, c)| (*id, c))
+            .collect()
+    }
+
+    /// The tab a browser window shows. Exact with the extension; PBI + session file otherwise.
+    fn browser_pick(&self, w: &Win, focused: bool, caption: &str, now: i64) -> Option<TabPick> {
+        let want_app = w.cls.to_lowercase().starts_with("crx_");
+        let conns = self.ext_conns(w.pid, now);
+        if !conns.is_empty() {
+            let wins: Vec<(u64, &ExtWindow)> = conns
+                .iter()
+                .flat_map(|(id, c)| c.windows.iter().map(move |x| (*id, x)))
+                .filter(|(_, x)| (x.kind == "app") == want_app)
+                .collect();
+            let fits = |t: &ExtTab| {
+                let n = self.norm(&t.title);
+                caption.is_empty() || n == caption || util::titles_match(&n, caption)
+            };
+            let make = |cid: u64, x: &ExtWindow, t: &ExtTab| TabPick {
+                host: t.host.clone(),
+                title: self.norm(&t.title),
+                private: x.incognito,
+                audible: t.audible && !t.muted,
+                conn: Some(cid),
+                tab_id: Some(t.id),
+                split: match t.split {
+                    Some(sid) => x
+                        .tabs
+                        .iter()
+                        .filter(|o| o.id != t.id && o.split == Some(sid))
+                        .map(|o| (o.host.clone(), self.norm(&o.title)))
+                        .collect(),
+                    None => vec![],
+                },
+            };
+            if focused && let Some((cid, x)) = wins.iter().find(|(_, x)| x.focused) {
+                if x.incognito {
+                    return Some(TabPick {
+                        private: true,
+                        ..Default::default()
+                    });
+                }
+                if let Some(t) = x.active_tab()
+                    && fits(t)
+                {
+                    return Some(make(*cid, x, t));
+                }
+            }
+            if let Some((cid, x, t)) = wins
+                .iter()
+                .filter(|(_, x)| !x.incognito)
+                .find_map(|(cid, x)| x.active_tab().filter(|t| fits(t)).map(|t| (*cid, *x, t)))
+            {
+                return Some(make(cid, x, t));
+            }
+            if caption.starts_with("DevTools") {
+                return Some(TabPick {
+                    host: "devtools".into(),
+                    title: caption.into(),
+                    ..Default::default()
+                });
+            }
+            if focused && !wins.iter().any(|(_, x)| x.focused) {
+                // Browser has focus, but no window the extension can see: incognito.
+                return Some(TabPick {
+                    private: true,
+                    ..Default::default()
+                });
+            }
+            return None;
+        }
+        let p = self.pbi.as_ref()?;
+        if (p.pid != 0 && p.pid as i64 != w.pid) || now - p.at > 30_000 {
+            return None;
+        }
+        let exact: Vec<&PbiTab> = p
+            .tabs
+            .iter()
+            .filter(|t| self.norm(&t.title) == caption)
+            .collect();
+        let t = match exact.len() {
+            0 => p
+                .tabs
+                .iter()
+                .find(|t| util::titles_match(&self.norm(&t.title), caption))?,
+            1 => exact[0],
+            _ => exact
+                .iter()
+                .find(|t| self.snss_selected.contains(&t.id))
+                .copied()
+                .or_else(|| {
+                    exact
+                        .iter()
+                        .all(|t| t.host == exact[0].host)
+                        .then(|| exact[0])
+                })?,
+        };
+        Some(TabPick {
+            host: t.host.clone(),
+            title: caption.to_string(),
+            audible: t.audible,
+            tab_id: Some(t.id),
+            ..Default::default()
+        })
+    }
+
+    /// Re-queries Plasma Browser Integration when a browser window on screen has no extension.
+    async fn refresh_pbi(&mut self, now: i64, periodic: bool) {
+        let Some(snap) = &self.kwin else { return };
+        let mut need = None;
+        let mut on_screen: Vec<&Win> = snap.focused().into_iter().collect();
+        on_screen.extend(snap.visible(
+            self.cfg.visibility.min_fraction,
+            self.cfg.visibility.min_pixels,
+        ));
+        for w in on_screen {
+            let (app, _) = self.desktop.identify(&w.df, &w.cls, w.pid);
+            if app_kind(&app, &w.cls) == AppKind::Browser && self.ext_conns(w.pid, now).is_empty() {
+                need = Some((w.pid, w.cap.clone()));
+                break;
+            }
+        }
+        let Some((pid, cap)) = need else { return };
+        let age = self.pbi.as_ref().map(|p| now - p.at).unwrap_or(i64::MAX);
+        let changed = cap != self.pbi_caption;
+        if !(changed || periodic || age > 10_000) || age < 1_000 {
+            return;
+        }
+        self.pbi_caption = cap;
+        match browser::pbi::query(&self.conn).await {
+            Some((bpid, tabs)) => {
+                let mut seen = std::collections::HashSet::new();
+                let dupes = tabs.iter().any(|t| !seen.insert(self.norm(&t.title)));
+                if dupes
+                    && let Some(path) =
+                        snss::open_session_file(if bpid != 0 { bpid } else { pid as u32 })
+                {
+                    self.snss_selected = self
+                        .snss
+                        .get(&path)
+                        .map(|s| s.selected.clone())
+                        .unwrap_or_default();
+                }
+                self.pbi = Some(PbiState {
+                    pid: bpid,
+                    at: now,
+                    tabs,
+                });
+            }
+            None => self.pbi = None,
+        }
+    }
+
+    fn window_subject(&self, w: &Win, focused: bool, now: i64) -> Option<Subject> {
+        self.window_subject_ex(w, focused, now).map(|(s, _)| s)
+    }
+
+    /// Subject for a window: app identity + normalized title (+ browser/terminal details),
+    /// after privacy rules. Also returns the browser tab it shows, if any.
+    fn window_subject_ex(
+        &self,
+        w: &Win,
+        focused: bool,
+        now: i64,
+    ) -> Option<(Subject, Option<TabPick>)> {
         let (app, app_name) = self.desktop.identify(&w.df, &w.cls, w.pid);
         let kind = app_kind(&app, &w.cls);
         let raw = match kind {
@@ -416,16 +650,52 @@ impl Tracker {
         let mut s = Subject {
             app,
             app_name,
-            title: util::normalize_title(&raw, &self.title_res, self.cfg.titles.max_len),
+            title: self.norm(&raw),
             ..Default::default()
         };
-        if kind == AppKind::Terminal
-            && let Some((_, _, info)) = self.term_cache.get(&w.id)
-        {
-            s.program = info.program.clone();
-            s.project = info.project.clone();
+        let mut pick = None;
+        match kind {
+            AppKind::Browser | AppKind::WebApp => {
+                let p = self.browser_pick(w, focused, &s.title, now);
+                match &p {
+                    Some(p) if p.private => {
+                        s.private = true;
+                        s.title.clear();
+                    }
+                    Some(p) => {
+                        s.host = p.host.clone();
+                        if !p.title.is_empty() {
+                            s.title = p.title.clone();
+                        }
+                    }
+                    // A tab we cannot attribute might be incognito: keep no title.
+                    None if kind == AppKind::Browser => s.title.clear(),
+                    None => {}
+                }
+                pick = p;
+            }
+            AppKind::Terminal => {
+                if let Some((_, _, info)) = self.term_cache.get(&w.id) {
+                    s.program = info.program.clone();
+                    s.project = info.project.clone();
+                }
+            }
+            AppKind::Other => {}
         }
-        self.apply_privacy(s)
+        self.apply_privacy(s).map(|s| (s, pick))
+    }
+
+    /// The browser app identity for a browser process (for tabs that are not on screen).
+    fn browser_app(&self, pid: u32) -> (String, String) {
+        self.kwin
+            .as_ref()
+            .and_then(|k| {
+                k.windows
+                    .iter()
+                    .find(|w| w.pid as u32 == pid && !w.cls.starts_with("crx_"))
+            })
+            .map(|w| self.desktop.identify(&w.df, &w.cls, w.pid))
+            .unwrap_or_else(|| ("browser".into(), "Browser".into()))
     }
 
     /// Exclude list: "hide" keeps the time as "Hidden" with no details, "drop" records nothing.
@@ -496,25 +766,68 @@ impl Tracker {
     }
 
     /// Splits playing media into "in a window you can see" and "background".
-    fn split_media(&self, shown: &[(&Win, Subject)]) -> (Vec<Subject>, Vec<Subject>) {
+    fn split_media(
+        &self,
+        shown: &[(&Win, Subject, Option<TabPick>)],
+        now: i64,
+    ) -> (Vec<Subject>, Vec<Subject>) {
         let mut vis = vec![];
         let mut bg = vec![];
+        // Audible tabs the extension reports.
+        for (_, s, p) in shown {
+            if p.as_ref().map(|p| p.audible).unwrap_or(false) {
+                vis.push(s.clone());
+            }
+        }
+        let shown_tabs: Vec<(u64, i64)> = shown
+            .iter()
+            .filter_map(|(_, _, p)| p.as_ref().and_then(|p| Some((p.conn?, p.tab_id?))))
+            .collect();
+        for (cid, c) in self.ext.iter().filter(|(_, c)| now - c.last < EXT_ALIVE_MS) {
+            let (app, app_name) = self.browser_app(c.pid);
+            for x in &c.windows {
+                for t in x.tabs.iter().filter(|t| t.audible && !t.muted) {
+                    if shown_tabs.contains(&(*cid, t.id)) {
+                        continue;
+                    }
+                    let s = Subject {
+                        app: app.clone(),
+                        app_name: app_name.clone(),
+                        host: if x.incognito {
+                            String::new()
+                        } else {
+                            t.host.clone()
+                        },
+                        title: if x.incognito {
+                            String::new()
+                        } else {
+                            self.norm(&t.title)
+                        },
+                        private: x.incognito,
+                        ..Default::default()
+                    };
+                    bg.extend(self.apply_privacy(s));
+                }
+            }
+        }
+        // MPRIS players (non-browser apps, and browsers without the extension).
         for p in self.players.iter().filter(|p| p.playing) {
-            let hit = shown.iter().find(|(w, s)| {
+            let ext_covers = p.is_browser_bridge() && !self.ext_conns(p.pid as i64, now).is_empty();
+            let hit = shown.iter().find(|(w, s, _)| {
                 if w.pid as u32 != p.pid || p.pid == 0 {
                     return false;
                 }
                 if p.is_browser_bridge() {
-                    // The bridge reports the tab title; only the window's active tab counts.
-                    let t =
-                        util::normalize_title(&p.title, &self.title_res, self.cfg.titles.max_len);
+                    // The bridge reports the playing tab; only a window's active tab counts.
+                    let t = self.norm(&p.title);
                     return util::titles_match(&t, &s.title)
                         || (!s.host.is_empty() && media::url_host(&p.url) == s.host);
                 }
                 true
             });
             match hit {
-                Some((_, s)) => vis.push(s.clone()),
+                Some((_, s, _)) => vis.push(s.clone()),
+                None if ext_covers => {}
                 None => bg.extend(self.player_subject(p)),
             }
         }
@@ -541,35 +854,44 @@ impl Tracker {
         self.ledger
             .set_flag(Kind::Mic, self.mic && !suspended && !paused, now);
 
-        let mut shown: Vec<(&Win, Subject)> = vec![];
+        let mut shown: Vec<(&Win, Subject, Option<TabPick>)> = vec![];
         let mut focus = None;
         if let (Some(snap), false) = (&self.kwin, blocked) {
             if let Some(w) = snap.focused()
-                && let Some(s) = self.window_subject(w)
+                && let Some((s, p)) = self.window_subject_ex(w, true, now)
             {
                 focus = Some(s.clone());
-                shown.push((w, s));
+                shown.push((w, s, p));
             }
             for w in snap.visible(
                 self.cfg.visibility.min_fraction,
                 self.cfg.visibility.min_pixels,
             ) {
-                if let Some(s) = self.window_subject(w) {
-                    shown.push((w, s));
+                if let Some((s, p)) = self.window_subject_ex(w, false, now) {
+                    shown.push((w, s, p));
                 }
             }
         }
         let mut visible: Vec<Subject> = shown
             .iter()
             .skip(usize::from(focus.is_some()))
-            .map(|(_, s)| s.clone())
+            .map(|(_, s, _)| s.clone())
             .collect();
+        // Split view: the other tab(s) of a shown window are visible too.
+        for (_, s, p) in &shown {
+            for (host, title) in p.iter().flat_map(|p| p.split.iter()) {
+                let mut o = s.clone();
+                o.host = host.clone();
+                o.title = title.clone();
+                visible.extend(self.apply_privacy(o));
+            }
+        }
         visible.retain(|v| Some(v) != focus.as_ref());
         visible.dedup();
         let (media_visible, bg_audio) = if paused || suspended {
             (vec![], vec![])
         } else {
-            self.split_media(&shown)
+            self.split_media(&shown, now)
         };
 
         let focus_ids = self.ids(focus.as_slice());
@@ -625,6 +947,10 @@ impl Tracker {
                          "windows": self.kwin.as_ref().map(|k| k.windows.len()).unwrap_or(0)},
                 "idle": {"ok": self.idle_version > 0, "protocol_version": self.idle_version, "error": self.idle_error},
                 "logind": {"ok": self.sys_conn.is_some()},
+                "browser_extension": self.ext.values().map(|c| json!({"browser_pid": c.pid,
+                    "alive": now - c.last < EXT_ALIVE_MS, "last_ms": c.last, "windows": c.windows.len(),
+                    "tabs": c.windows.iter().map(|w| w.tabs.len()).sum::<usize>()})).collect::<Vec<_>>(),
+                "plasma_browser_integration": self.pbi.as_ref().map(|p| json!({"browser_pid": p.pid, "tabs": p.tabs.len(), "at_ms": p.at})),
             },
         })
     }

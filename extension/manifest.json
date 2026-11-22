@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "arch-tracker",
+  "version": "0.1.0",
+  "description": "Tells the local arch-tracker daemon which tab is active: host and title only, never paths, queries or incognito details.",
+  "permissions": [
+    "tabs",
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu5lcN0eg7NGQs6SfQb8M7bo1XRwzhXrIJqtJ7hK3RZnJQlHYxJcYb2wd0S2dO3eoGaPalf/SAzfIT2qKfhCLKLUCXq9IOQIa1uQ407bTrTOqUwd06Azq7V5nEU4IMsrk5AOMKLdRcfXdUPOrj87ibBI1Z3Opy6cZvlzjXdW/Jy5iDu69aRmXjL1fBYFfPJ/79gMFQccxBzlE0TDzwkados67yn8DgieGfH2EY1lnwKmpykH3B680QBTHlgUA9f9Iqy08OpcIeLnOKikS+Mn822cc4zrafj0yQrGcJ9LTHaI5jkn7lZSZciOLIV1oysHetFs2DgQsaGHWCID+JdFQrQIDAQAB"
+}

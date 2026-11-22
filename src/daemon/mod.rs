@@ -5,7 +5,7 @@ pub mod tracker;
 
 use crate::config::Config;
 use crate::ipc::Request;
-use crate::sources::{idle, kwin, media, session};
+use crate::sources::{browser, idle, kwin, media, session};
 use crate::store::Store;
 use crate::util;
 use anyhow::{Context, Result, bail};
@@ -37,6 +37,11 @@ pub enum Event {
         done: Option<oneshot::Sender<()>>,
     },
     Media(Vec<media::Player>),
+    BrowserExt {
+        conn: u64,
+        msg: browser::ExtMsg,
+    },
+    BrowserGone(u64),
 }
 
 /// State shared with the web server.
@@ -70,6 +75,14 @@ async fn run_async() -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
 
     control::spawn(tx.clone())?;
+    browser::spawn_ingest(tx.clone())?;
+    match crate::setup::register_native_host() {
+        Ok(paths) => tracing::info!(
+            "native messaging host registered in {} browser profile dir(s)",
+            paths.len()
+        ),
+        Err(e) => tracing::warn!("could not register the native messaging host: {e:#}"),
+    }
 
     let conn = zbus::connection::Builder::session()
         .name(kwin::BUS_NAME)
