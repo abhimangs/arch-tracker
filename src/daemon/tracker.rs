@@ -156,6 +156,7 @@ pub struct Tracker {
     projects: Projects,
     agent_scanner: agents::Scanner,
     agents: Vec<agents::AgentState>,
+    running: Vec<Subject>,
     ext: HashMap<u64, ExtConn>,
     pbi: Option<PbiState>,
     pbi_caption: String,
@@ -203,6 +204,7 @@ impl Tracker {
             projects: Projects::default(),
             agent_scanner: agents::Scanner::default(),
             agents: vec![],
+            running: vec![],
             ext: HashMap::new(),
             pbi: None,
             pbi_caption: String::new(),
@@ -367,6 +369,19 @@ impl Tracker {
         } else {
             self.agent_scanner
                 .scan(&self.cfg.agents, &mut self.projects)
+        };
+        self.running = if self.cfg.general.track_running
+            && self.paused.is_none()
+            && !self.suspended
+            && self.kwin.is_some()
+        {
+            crate::sources::running::scan(&self.conn, &self.desktop, self.kwin.as_ref())
+                .await
+                .into_iter()
+                .filter_map(|(k, n)| self.apply_privacy(Subject::app(&k, &n)))
+                .collect()
+        } else {
+            vec![]
         };
         // The KWin script re-sends every 60 s; silence means KWin restarted or dropped it.
         if now - self.kwin_last > 150_000 && !self.kwin_reloading {
@@ -910,6 +925,9 @@ impl Tracker {
             .collect();
         let busy_ids = self.ids(&busy);
         self.ledger.reconcile(Kind::AgentBusy, &busy_ids, now);
+        let running = self.running.clone();
+        let running_ids = self.ids(&running);
+        self.ledger.reconcile(Kind::Running, &running_ids, now);
         self.focus = focus;
         self.visible = visible;
         self.media_visible = media_visible;
@@ -938,6 +956,7 @@ impl Tracker {
             "suspended": self.suspended,
             "mic": self.mic,
             "agents": self.agents,
+            "running": self.running.iter().map(|s| &s.app_name).collect::<Vec<_>>(),
             "terminals": self.term_cache.values().map(|(_, _, i)| i).collect::<Vec<_>>(),
             "players": self.players.iter().map(|p| json!({"name": if p.identity.is_empty() { &p.bus } else { &p.identity },
                 "playing": p.playing, "pid": p.pid, "host": media::url_host(&p.url), "title": p.title})).collect::<Vec<_>>(),

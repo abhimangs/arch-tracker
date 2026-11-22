@@ -5,5 +5,6 @@ pub mod browser;
 pub mod idle;
 pub mod kwin;
 pub mod media;
+pub mod running;
 pub mod session;
 pub mod terminal;
