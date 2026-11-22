@@ -5,3 +5,4 @@ pub mod idle;
 pub mod kwin;
 pub mod media;
 pub mod session;
+pub mod terminal;

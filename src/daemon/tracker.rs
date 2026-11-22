@@ -7,11 +7,13 @@ use crate::ipc::Request;
 use crate::model::{Kind, Subject};
 use crate::sources::kwin::{self, Win};
 use crate::sources::media::{self, Player};
+use crate::sources::terminal::{self, TermInfo, agents, tools::Projects};
 use crate::sources::{idle, session};
 use crate::store::Store;
 use crate::store::ledger::Ledger;
 use crate::util::{self, now_ms};
 use serde_json::json;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Instant;
 
@@ -119,6 +121,11 @@ pub struct Tracker {
     players: Vec<Player>,
     mic: bool,
     sys_conn: Option<zbus::Connection>,
+    /// Per KWin window: (caption when inspected, when, what runs inside).
+    term_cache: HashMap<String, (String, i64, TermInfo)>,
+    projects: Projects,
+    agent_scanner: agents::Scanner,
+    agents: Vec<agents::AgentState>,
     last_flush: Instant,
     last_wall: i64,
     last_mono: Instant,
@@ -157,6 +164,10 @@ impl Tracker {
             players: vec![],
             mic: false,
             sys_conn: None,
+            term_cache: HashMap::new(),
+            projects: Projects::default(),
+            agent_scanner: agents::Scanner::default(),
+            agents: vec![],
             last_flush: Instant::now(),
             last_wall: now,
             last_mono: Instant::now(),
@@ -183,6 +194,7 @@ impl Tracker {
                 self.kwin = Some(*snap);
                 self.kwin_last = now;
                 self.kwin_reloading = false;
+                self.refresh_terminals(now, false).await;
             }
             Event::Idle {
                 input,
@@ -286,6 +298,13 @@ impl Tracker {
             self.desktop = DesktopIndex::load();
             self.desktop_loaded = Instant::now();
         }
+        self.refresh_terminals(now, true).await;
+        self.agents = if self.paused.is_some() || self.suspended {
+            vec![]
+        } else {
+            self.agent_scanner
+                .scan(&self.cfg.agents, &mut self.projects)
+        };
         // The KWin script re-sends every 60 s; silence means KWin restarted or dropped it.
         if now - self.kwin_last > 150_000 && !self.kwin_reloading {
             self.kwin_reloading = true;
@@ -338,6 +357,54 @@ impl Tracker {
         }
     }
 
+    /// Looks inside focused/visible terminal windows. Cached per window; refreshed when the
+    /// caption changes, and on the periodic tick for windows on screen.
+    async fn refresh_terminals(&mut self, now: i64, periodic: bool) {
+        let Some(snap) = &self.kwin else { return };
+        let focused_id = snap.focused().map(|w| w.id.clone());
+        let mut targets: Vec<(String, String, i64, bool, String)> = vec![];
+        let mut on_screen: Vec<&Win> = snap.focused().into_iter().collect();
+        on_screen.extend(snap.visible(
+            self.cfg.visibility.min_fraction,
+            self.cfg.visibility.min_pixels,
+        ));
+        for w in on_screen {
+            let (app, _) = self.desktop.identify(&w.df, &w.cls, w.pid);
+            if app_kind(&app, &w.cls) != AppKind::Terminal {
+                continue;
+            }
+            let stale = match self.term_cache.get(&w.id) {
+                None => true,
+                Some((cap, at, _)) => {
+                    *cap != w.cap
+                        || (periodic
+                            && now - at
+                                >= self.cfg.general.sample_interval_secs as i64 * 1000 - 500)
+                }
+            };
+            if stale {
+                let focused = focused_id.as_deref() == Some(w.id.as_str());
+                targets.push((w.id.clone(), w.cls.clone(), w.pid, focused, w.cap.clone()));
+            }
+        }
+        let alive: std::collections::HashSet<String> =
+            snap.windows.iter().map(|w| w.id.clone()).collect();
+        self.term_cache.retain(|id, _| alive.contains(id));
+        for (id, cls, pid, focused, cap) in targets {
+            let info = terminal::inspect(
+                &cls,
+                pid,
+                focused,
+                &cap,
+                &self.cfg.agents.tools,
+                &mut self.projects,
+            )
+            .await
+            .unwrap_or_default();
+            self.term_cache.insert(id, (cap, now, info));
+        }
+    }
+
     /// Subject for a window: app identity + normalized title (+ enrichment), after privacy rules.
     fn window_subject(&self, w: &Win) -> Option<Subject> {
         let (app, app_name) = self.desktop.identify(&w.df, &w.cls, w.pid);
@@ -346,12 +413,18 @@ impl Tracker {
             AppKind::Browser => strip_browser_suffix(&w.cap),
             _ => w.cap.clone(),
         };
-        let s = Subject {
+        let mut s = Subject {
             app,
             app_name,
             title: util::normalize_title(&raw, &self.title_res, self.cfg.titles.max_len),
             ..Default::default()
         };
+        if kind == AppKind::Terminal
+            && let Some((_, _, info)) = self.term_cache.get(&w.id)
+        {
+            s.program = info.program.clone();
+            s.project = info.project.clone();
+        }
         self.apply_privacy(s)
     }
 
@@ -507,6 +580,14 @@ impl Tracker {
         self.ledger.reconcile(Kind::Visible, &visible_ids, now);
         self.ledger.reconcile(Kind::MediaVisible, &media_ids, now);
         self.ledger.reconcile(Kind::BgAudio, &bg_ids, now);
+        let busy: Vec<Subject> = self
+            .agents
+            .iter()
+            .filter(|a| a.busy)
+            .filter_map(|a| self.apply_privacy(a.subject.clone()))
+            .collect();
+        let busy_ids = self.ids(&busy);
+        self.ledger.reconcile(Kind::AgentBusy, &busy_ids, now);
         self.focus = focus;
         self.visible = visible;
         self.media_visible = media_visible;
@@ -534,6 +615,8 @@ impl Tracker {
             "locked": self.locked(),
             "suspended": self.suspended,
             "mic": self.mic,
+            "agents": self.agents,
+            "terminals": self.term_cache.values().map(|(_, _, i)| i).collect::<Vec<_>>(),
             "players": self.players.iter().map(|p| json!({"name": if p.identity.is_empty() { &p.bus } else { &p.identity },
                 "playing": p.playing, "pid": p.pid, "host": media::url_host(&p.url), "title": p.title})).collect::<Vec<_>>(),
             "open_spans": self.ledger.open_count(),
