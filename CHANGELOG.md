@@ -6,11 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-22
+
 ### Added
 
 - `arch-tracker serve`: a read-only dashboard for any tracker database, without tracking.
+- Continuous integration on every push: formatting, clippy, tests, a dashboard script check, and an
+  Arch package build in an archlinux container.
+- Tagged releases publish the Arch package, a binary tarball and SHA-256 checksums.
 - README screenshots, security policy, contributing guide, code of conduct, and issue and pull
   request templates.
+
+### Changed
+
+- Release builds use thin LTO and are stripped, for a smaller binary.
 
 ### Fixed
 
@@ -37,5 +46,6 @@ All notable changes to this project are documented here. The format follows
 - Command line: `status`, `pause`, `resume`, `setup`, `doctor` and `export`.
 - Arch PKGBUILD and a systemd user unit.
 
-[Unreleased]: https://github.com/abhimangs/arch-tracker/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/abhimangs/arch-tracker/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/abhimangs/arch-tracker/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/abhimangs/arch-tracker/tree/v0.1.0
