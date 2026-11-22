@@ -150,19 +150,6 @@ pub fn local_date(ms: i64) -> String {
         .unwrap_or_default()
 }
 
-pub fn fmt_secs(secs: i64) -> String {
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    if h > 0 {
-        format!("{h}h {m:02}m")
-    } else if m > 0 {
-        format!("{m}m {s:02}s")
-    } else {
-        format!("{s}s")
-    }
-}
-
 /// Removes noise that changes without the "thing" changing: unread counters like "(3) ",
 /// spinner/status glyphs that agents put in terminal titles, and repeated whitespace.
 pub fn normalize_title(raw: &str, extra: &[regex_lite::Regex], max_len: usize) -> String {

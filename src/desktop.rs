@@ -9,7 +9,6 @@ pub struct Entry {
     pub id: String,
     pub name: String,
     pub wm_class: String,
-    pub exec: String,
 }
 
 #[derive(Default)]
@@ -143,7 +142,7 @@ pub fn pretty(id: &str) -> String {
 fn parse_entry(path: &Path, id: &str) -> Option<Entry> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut in_main = false;
-    let (mut name, mut wm, mut exec) = (String::new(), String::new(), String::new());
+    let (mut name, mut wm) = (String::new(), String::new());
     let mut is_app = true;
     for line in text.lines() {
         let line = line.trim();
@@ -160,7 +159,6 @@ fn parse_entry(path: &Path, id: &str) -> Option<Entry> {
         match k.trim() {
             "Name" => name = v.trim().to_string(),
             "StartupWMClass" => wm = v.trim().to_string(),
-            "Exec" => exec = v.trim().to_string(),
             "Type" => is_app = v.trim() == "Application",
             _ => {}
         }
@@ -172,7 +170,6 @@ fn parse_entry(path: &Path, id: &str) -> Option<Entry> {
         id: id.to_string(),
         name,
         wm_class: wm,
-        exec,
     })
 }
 

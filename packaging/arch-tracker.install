@@ -1,0 +1,13 @@
+post_install() {
+  cat <<'EOF'
+arch-tracker installed. As your user (not root):
+  systemctl --user enable --now arch-tracker
+  arch-tracker setup        # registers the browser bridge, prints extension steps
+  arch-tracker doctor       # checks everything
+Dashboard: http://127.0.0.1:7600/
+EOF
+}
+
+post_upgrade() {
+  echo "arch-tracker upgraded. Restart it: systemctl --user restart arch-tracker"
+}

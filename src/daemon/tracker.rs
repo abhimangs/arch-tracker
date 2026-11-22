@@ -651,10 +651,6 @@ impl Tracker {
         }
     }
 
-    fn window_subject(&self, w: &Win, focused: bool, now: i64) -> Option<Subject> {
-        self.window_subject_ex(w, focused, now).map(|(s, _)| s)
-    }
-
     /// Subject for a window: app identity + normalized title (+ browser/terminal details),
     /// after privacy rules. Also returns the browser tab it shows, if any.
     fn window_subject_ex(

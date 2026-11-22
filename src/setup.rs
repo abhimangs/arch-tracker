@@ -10,7 +10,12 @@ pub const NATIVE_HOST: &str = "dev.archtracker.native";
 const MANIFEST: &str = include_str!("../extension/manifest.json");
 const BACKGROUND: &str = include_str!("../extension/background.js");
 
+/// The packaged copy (updated by pacman) if installed, else a per-user copy.
 pub fn extension_dir() -> PathBuf {
+    let packaged = PathBuf::from("/usr/share/arch-tracker/extension");
+    if packaged.join("manifest.json").exists() {
+        return packaged;
+    }
     util::data_dir().join("extension")
 }
 
@@ -39,6 +44,9 @@ fn browser_dirs() -> Vec<PathBuf> {
 
 pub fn write_extension() -> Result<PathBuf> {
     let dir = extension_dir();
+    if dir.starts_with("/usr") {
+        return Ok(dir);
+    }
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("manifest.json"), MANIFEST)?;
     std::fs::write(dir.join("background.js"), BACKGROUND)?;

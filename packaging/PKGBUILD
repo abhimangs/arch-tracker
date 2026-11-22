@@ -1,0 +1,46 @@
+# Local package for arch-tracker. Build and install from this folder:
+#   makepkg -si
+# For the AUR later, replace the "$startdir/.." source with a release tarball.
+
+pkgname=arch-tracker
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Local screen-time and activity tracker for KDE Plasma on Wayland"
+arch=('x86_64')
+license=('MIT')
+depends=('sqlite' 'gcc-libs' 'glibc')
+makedepends=('cargo')
+optdepends=('plasma-browser-integration: fallback for browser tabs when the extension is not loaded'
+            'kitty: exact terminal tab tracking through remote control'
+            'tmux: see inside tmux panes')
+install=arch-tracker.install
+options=('!lto' '!debug')
+
+_root() { cd "$startdir/.."; }
+
+prepare() {
+  _root
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  _root
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --frozen --release
+}
+
+check() {
+  _root
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo test --frozen --release
+}
+
+package() {
+  _root
+  install -Dm755 "$srcdir/target/release/arch-tracker" "$pkgdir/usr/bin/arch-tracker"
+  install -Dm644 packaging/arch-tracker.service "$pkgdir/usr/lib/systemd/user/arch-tracker.service"
+  install -Dm644 extension/manifest.json "$pkgdir/usr/share/arch-tracker/extension/manifest.json"
+  install -Dm644 extension/background.js "$pkgdir/usr/share/arch-tracker/extension/background.js"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

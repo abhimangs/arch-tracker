@@ -1,9 +1,7 @@
-// Sources are added milestone by milestone; remove once everything is wired up.
-#![allow(dead_code)]
-
 mod config;
 mod daemon;
 mod desktop;
+mod doctor;
 mod export;
 mod ipc;
 mod model;
@@ -42,6 +40,17 @@ enum Cmd {
     Resume,
     /// Unpack the Brave extension and register the native-messaging host.
     Setup,
+    /// Check every data source and explain how to fix problems.
+    Doctor,
+    /// Export raw recorded intervals, e.g. "export --from 2026-11-01 --to 2026-11-22 --format csv".
+    Export {
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long, default_value = "csv")]
+        format: String,
+    },
 }
 
 fn main() {
@@ -125,6 +134,14 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Cmd::Setup => setup::run(),
+        Cmd::Doctor => block_on(doctor::run()),
+        Cmd::Export { from, to, format } => {
+            let to = to.unwrap_or_else(|| from.clone());
+            let conn = store::open_readonly(&util::db_path())?;
+            let (_, body) = export::export(&conn, &from, &to, &format)?;
+            print!("{body}");
+            Ok(())
+        }
         Cmd::Resume => {
             block_on(ipc::call(&ipc::Request::Resume))?;
             println!("Tracking resumed.");

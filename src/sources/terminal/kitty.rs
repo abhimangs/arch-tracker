@@ -23,8 +23,6 @@ pub struct Tab {
     #[serde(default)]
     pub is_active: bool,
     #[serde(default)]
-    pub title: String,
-    #[serde(default)]
     pub windows: Vec<KWindow>,
 }
 

@@ -65,15 +65,6 @@ impl Ledger {
         self.reconcile(kind, &d, now);
     }
 
-    /// Like set_flag but with an explicit start time (e.g. idle starts at the last input).
-    pub fn set_flag_at(&mut self, kind: Kind, on: bool, at: i64) {
-        self.set_flag(kind, on, at);
-    }
-
-    pub fn is_open(&self, kind: Kind) -> bool {
-        self.open.keys().any(|(k, _)| *k == kind)
-    }
-
     fn close(&mut self, key: (Kind, i64), end: i64) {
         let Some(o) = self.open.remove(&key) else {
             return;

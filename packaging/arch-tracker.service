@@ -1,0 +1,17 @@
+[Unit]
+Description=arch-tracker screen-time and activity tracker
+Documentation=man:arch-tracker(1)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/arch-tracker daemon
+Restart=on-failure
+RestartSec=5
+Nice=10
+MemoryMax=64M
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=graphical-session.target

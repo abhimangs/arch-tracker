@@ -28,7 +28,6 @@ pub struct Snapshot {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Screen {
-    pub name: String,
     pub x: i64,
     pub y: i64,
     pub w: i64,
@@ -41,7 +40,6 @@ pub struct Win {
     pub id: String,
     pub pid: i64,
     pub cls: String,
-    pub name: String,
     pub df: String,
     pub cap: String,
     pub min: bool,
@@ -291,7 +289,6 @@ mod tests {
         Snapshot {
             active: Some(active.into()),
             screens: vec![Screen {
-                name: "eDP-1".into(),
                 x: 0,
                 y: 0,
                 w: 1920,
