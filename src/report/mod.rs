@@ -186,7 +186,18 @@ pub fn categorize<'a>(cats: &'a [Category], s: &Subject) -> Option<&'a Category>
     {
         return Some(c);
     }
-    let fallback = if !s.host.is_empty() || s.private {
+    let browser = [
+        "brave",
+        "chrom",
+        "firefox",
+        "vivaldi",
+        "edge",
+        "opera",
+        "librewolf",
+    ]
+    .iter()
+    .any(|b| app.contains(b));
+    let fallback = if !s.host.is_empty() || s.private || browser {
         "Browsing"
     } else {
         "Other"

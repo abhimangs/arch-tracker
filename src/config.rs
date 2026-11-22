@@ -219,7 +219,7 @@ pub fn default_categories() -> Vec<Category> {
     vec![
         cat(
             "AI",
-            "#c084fc",
+            "#b49be8",
             &[
                 "chatgpt.com",
                 "claude.ai",
@@ -251,7 +251,7 @@ pub fn default_categories() -> Vec<Category> {
         ),
         cat(
             "Development",
-            "#60a5fa",
+            "#6f9ee8",
             &[
                 "github.com",
                 "gitlab.com",
@@ -288,7 +288,7 @@ pub fn default_categories() -> Vec<Category> {
         ),
         cat(
             "Social",
-            "#f472b6",
+            "#f08fb0",
             &[
                 "instagram.com",
                 "x.com",
@@ -306,7 +306,7 @@ pub fn default_categories() -> Vec<Category> {
         ),
         cat(
             "Video",
-            "#f87171",
+            "#ef6f5e",
             &[
                 "youtube.com",
                 "netflix.com",
@@ -322,7 +322,7 @@ pub fn default_categories() -> Vec<Category> {
         ),
         cat(
             "Messaging",
-            "#34d399",
+            "#7cc59a",
             &[
                 "web.whatsapp.com",
                 "web.telegram.org",
@@ -344,7 +344,7 @@ pub fn default_categories() -> Vec<Category> {
         ),
         cat(
             "Music",
-            "#fbbf24",
+            "#e8b84a",
             &[
                 "music.youtube.com",
                 "open.spotify.com",
@@ -365,7 +365,7 @@ pub fn default_categories() -> Vec<Category> {
         ),
         cat(
             "Meetings",
-            "#2dd4bf",
+            "#4fc1c0",
             &[
                 "meet.google.com",
                 "zoom.us",
@@ -377,7 +377,7 @@ pub fn default_categories() -> Vec<Category> {
         ),
         cat(
             "Productivity",
-            "#a3e635",
+            "#a9c95a",
             &[
                 "notion.so",
                 "notion.site",
@@ -404,7 +404,7 @@ pub fn default_categories() -> Vec<Category> {
         ),
         cat(
             "Learning",
-            "#fb923c",
+            "#f0955a",
             &[
                 "coursera.org",
                 "udemy.com",
@@ -420,7 +420,7 @@ pub fn default_categories() -> Vec<Category> {
         ),
         cat(
             "System",
-            "#94a3b8",
+            "#9aa3ba",
             &["brave://settings", "brave://extensions"],
             &[
                 "org.kde.dolphin",
@@ -440,8 +440,8 @@ pub fn default_categories() -> Vec<Category> {
             ],
             &["pacman", "paru", "yay", "systemctl", "journalctl"],
         ),
-        cat("Browsing", "#38bdf8", &[], &[], &[]),
-        cat("Other", "#64748b", &[], &[], &[]),
+        cat("Browsing", "#5fb4e0", &[], &[], &[]),
+        cat("Other", "#6b7392", &[], &[], &[]),
     ]
 }
 

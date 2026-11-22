@@ -315,7 +315,14 @@ impl Tracker {
         self.screensaver_locked || self.logind_locked
     }
 
+    pub fn sample_interval_secs(&self) -> u64 {
+        self.cfg.general.sample_interval_secs
+    }
+
     fn set_config(&mut self, cfg: Config) {
+        if cfg == self.cfg {
+            return;
+        }
         self.title_res = cfg.title_regexes();
         self.cfg = cfg;
         if let Ok(mut s) = self.shared.lock() {

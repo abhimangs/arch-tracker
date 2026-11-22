@@ -98,6 +98,15 @@ async fn run_async() -> Result<()> {
     session::spawn(conn.clone(), tx.clone()).await;
     media::spawn(conn.clone(), tx.clone()).await;
 
+    let web = crate::web::Web::new(shared.clone(), tx.clone());
+    if let Err(e) = web.listen(cfg.dashboard.port).await {
+        tracing::warn!(
+            "dashboard could not start on port {}: {e:#}",
+            cfg.dashboard.port
+        );
+    }
+    let _watcher = watch_config(tx.clone());
+
     let mut tracker = Tracker::new(store, cfg.clone(), shared.clone(), conn.clone());
     tracker.start();
 
@@ -110,7 +119,15 @@ async fn run_async() -> Result<()> {
     let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
     tracing::info!("arch-tracker daemon started");
 
+    let mut interval_secs = cfg.general.sample_interval_secs;
     loop {
+        let want = tracker.sample_interval_secs();
+        if want != interval_secs {
+            interval_secs = want;
+            tick = tokio::time::interval(Duration::from_secs(want));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.reset();
+        }
         tokio::select! {
             Some(ev) = rx.recv() => tracker.handle(ev).await,
             _ = tick.tick() => tracker.tick().await,
@@ -129,6 +146,33 @@ async fn run_async() -> Result<()> {
     kwin::unload_script(&conn).await;
     tracing::info!("arch-tracker daemon stopped");
     Ok(())
+}
+
+/// Reloads config.toml when it changes on disk (hand edits and dashboard saves).
+fn watch_config(tx: mpsc::UnboundedSender<Event>) -> Option<notify::RecommendedWatcher> {
+    use notify::Watcher;
+    let path = crate::config::config_path();
+    let dir = path.parent()?.to_path_buf();
+    let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let Ok(ev) = res else { return };
+        if !ev.paths.iter().any(|p| p.file_name() == path.file_name()) {
+            return;
+        }
+        if !(ev.kind.is_modify() || ev.kind.is_create()) {
+            return;
+        }
+        match Config::load() {
+            Ok(c) => {
+                let _ = tx.send(Event::ConfigChanged(Box::new(c)));
+            }
+            Err(e) => {
+                tracing::warn!("config.toml has an error, keeping the previous settings: {e:#}")
+            }
+        }
+    })
+    .ok()?;
+    w.watch(&dir, notify::RecursiveMode::NonRecursive).ok()?;
+    Some(w)
 }
 
 fn set_mode_700(p: &std::path::Path) {

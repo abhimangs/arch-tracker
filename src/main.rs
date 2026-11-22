@@ -4,6 +4,7 @@
 mod config;
 mod daemon;
 mod desktop;
+mod export;
 mod ipc;
 mod model;
 mod native_host;
@@ -12,6 +13,7 @@ mod setup;
 mod sources;
 mod store;
 mod util;
+mod web;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
