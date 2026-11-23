@@ -140,6 +140,9 @@ const RUNNING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// Running apps are rescanned this often (not every tick).
 const RUNNING_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// The status JSON is rebuilt at most this often.
+const STATUS_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// A terminal window whose title keeps changing is inspected at most this often.
 const TERM_MIN_GAP_MS: i64 = 2_000;
 
@@ -237,6 +240,8 @@ pub struct Tracker {
     /// Some(None) = paused until resumed; Some(Some(t)) = paused until t.
     paused: Option<Option<i64>>,
     kwin: Option<kwin::Snapshot>,
+    /// Indices of the snapshot's visible windows (see visible_wins).
+    kwin_vis: Vec<usize>,
     kwin_last: i64,
     /// Next KWin script reload attempt while snapshots are missing, and the delay after it.
     kwin_retry_at: i64,
@@ -244,6 +249,11 @@ pub struct Tracker {
     /// KWin's focused window and its caption, and when either last changed.
     focus_key: Option<(String, String)>,
     focus_changed_at: i64,
+    /// Reconcile again when the focus grace period ends.
+    regrace: bool,
+    /// The published status is out of date; when it was last published.
+    status_dirty: bool,
+    status_at: Option<Instant>,
     focus: Option<Subject>,
     visible: Vec<Subject>,
     media_visible: Vec<Subject>,
@@ -302,12 +312,16 @@ impl Tracker {
             started_ms: now,
             paused,
             kwin: None,
+            kwin_vis: vec![],
             // Grace period: the first snapshot arrives right after the script loads.
             kwin_last: now,
             kwin_retry_at: 0,
             kwin_backoff_ms: KWIN_RETRY_MIN_MS,
             focus_key: None,
             focus_changed_at: 0,
+            regrace: false,
+            status_dirty: false,
+            status_at: None,
             focus: None,
             visible: vec![],
             media_visible: vec![],
@@ -360,8 +374,10 @@ impl Tracker {
                 if key != self.focus_key {
                     self.focus_key = key;
                     self.focus_changed_at = now;
+                    self.regrace = true;
                 }
                 self.kwin = Some(*snap);
+                self.update_visible();
                 self.kwin_last = now;
                 self.kwin_retry_at = 0;
                 self.kwin_backoff_ms = KWIN_RETRY_MIN_MS;
@@ -457,15 +473,34 @@ impl Tracker {
 
     /// When the tracker wants to be woken without an event (see on_deadline).
     pub fn deadline(&self) -> Option<tokio::time::Instant> {
+        let now = tokio::time::Instant::now();
         // Re-decide a focused browser window once the extension's grace period is over.
-        let grace_left = self.focus_changed_at + FOCUS_GRACE_MS - now_ms();
-        (grace_left > 0).then(|| {
-            tokio::time::Instant::now() + std::time::Duration::from_millis(grace_left as u64 + 50)
-        })
+        let grace = self.regrace.then(|| {
+            let left = (self.focus_changed_at + FOCUS_GRACE_MS - now_ms()).clamp(0, FOCUS_GRACE_MS);
+            now + std::time::Duration::from_millis(left as u64 + 50)
+        });
+        // Publish a status change that was held back by the once-a-second limit.
+        let status = self.status_dirty.then(|| match self.status_at {
+            Some(t) => tokio::time::Instant::from_std(t + STATUS_EVERY),
+            None => now,
+        });
+        match (grace, status) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     pub fn on_deadline(&mut self) {
-        self.reconcile(now_ms());
+        let now = now_ms();
+        let grace_over =
+            now >= self.focus_changed_at + FOCUS_GRACE_MS || now < self.focus_changed_at;
+        if self.regrace && grace_over {
+            self.regrace = false;
+            self.reconcile(now);
+        }
+        if self.status_dirty && self.status_due() {
+            self.publish_status(now);
+        }
     }
 
     pub fn sample_interval_secs(&self) -> u64 {
@@ -477,7 +512,11 @@ impl Tracker {
             return;
         }
         self.title_res = cfg.title_regexes();
+        let vis_changed = cfg.visibility != self.cfg.visibility;
         self.cfg = cfg;
+        if vis_changed {
+            self.update_visible();
+        }
         if let Ok(mut s) = self.shared.lock() {
             s.config = self.cfg.clone();
         }
@@ -594,7 +633,7 @@ impl Tracker {
 
     fn control(&mut self, req: Request, now: i64) -> serde_json::Value {
         match req {
-            Request::Status => self.status_json(now),
+            Request::Status => self.publish_status(now),
             Request::Pause { until_ms } => {
                 self.set_paused(Some(until_ms));
                 tracing::info!("paused until {:?}", until_ms);
@@ -671,17 +710,22 @@ impl Tracker {
         }
     }
 
-    /// Visible (not focused) windows of the current snapshot.
+    /// Visible (not focused) windows of the current snapshot, computed once per snapshot.
     fn visible_wins(&self) -> Vec<&Win> {
-        self.kwin
+        let Some(k) = &self.kwin else { return vec![] };
+        self.kwin_vis
+            .iter()
+            .filter_map(|i| k.windows.get(*i))
+            .collect()
+    }
+
+    fn update_visible(&mut self) {
+        let v = &self.cfg.visibility;
+        self.kwin_vis = self
+            .kwin
             .as_ref()
-            .map(|k| {
-                k.visible(
-                    self.cfg.visibility.min_fraction,
-                    self.cfg.visibility.min_pixels,
-                )
-            })
-            .unwrap_or_default()
+            .map(|k| k.visible_indices(v.min_fraction, v.min_pixels))
+            .unwrap_or_default();
     }
 
     fn norm(&self, t: &str) -> String {
@@ -755,12 +799,7 @@ impl Tracker {
         }
         let Some(snap) = &self.kwin else { return };
         let mut need = None;
-        let mut on_screen: Vec<&Win> = snap.focused().into_iter().collect();
-        on_screen.extend(snap.visible(
-            self.cfg.visibility.min_fraction,
-            self.cfg.visibility.min_pixels,
-        ));
-        for w in on_screen {
+        for w in snap.focused().into_iter().chain(self.visible_wins()) {
             let (app, _) = self.desktop.identify(&w.df, &w.cls, w.pid);
             if app_kind(&app, &w.cls) == AppKind::Browser && self.ext_conns(w.pid, now).is_empty() {
                 need = Some((w.pid, w.cap.clone()));
@@ -1076,10 +1115,7 @@ impl Tracker {
                 focus = Some(s.clone());
                 shown.push((w, s, p));
             }
-            for w in snap.visible(
-                self.cfg.visibility.min_fraction,
-                self.cfg.visibility.min_pixels,
-            ) {
+            for w in self.visible_wins() {
                 if let Some((s, p)) = self.window_subject_ex(w, false, now) {
                     shown.push((w, s, p));
                 }
@@ -1139,10 +1175,27 @@ impl Tracker {
         self.media_visible = media_visible;
         self.bg_audio = bg_audio;
 
+        // The status is for people (dashboard, CLI): rebuilt at most once a second; a change
+        // in between is published by on_deadline.
+        self.status_dirty = true;
+        if self.status_due() {
+            self.publish_status(now);
+        }
+    }
+
+    fn status_due(&self) -> bool {
+        self.status_at.is_none_or(|t| t.elapsed() >= STATUS_EVERY)
+    }
+
+    /// Rebuilds the status for the dashboard; returns it.
+    fn publish_status(&mut self, now: i64) -> serde_json::Value {
         let status = self.status_json(now);
         if let Ok(mut s) = self.shared.lock() {
-            s.status = status;
+            s.status = status.clone();
         }
+        self.status_at = Some(Instant::now());
+        self.status_dirty = false;
+        status
     }
 
     fn status_json(&self, now: i64) -> serde_json::Value {
@@ -1309,6 +1362,25 @@ mod tests {
         assert_eq!(at(&t), now + 3_500, "at most once per 2 s");
         t.refresh_terminals(now + 5_600, false, None).await;
         assert_eq!(at(&t), now + 5_600, "the pending change is picked up later");
+    }
+
+    #[test]
+    fn status_is_rebuilt_at_most_once_a_second() {
+        let mut t = test_tracker();
+        let published = |t: &Tracker| t.shared.lock().unwrap().status["now_ms"].as_i64();
+        t.reconcile(1_000);
+        assert_eq!(published(&t), Some(1_000));
+        t.reconcile(2_000);
+        assert_eq!(published(&t), Some(1_000), "held back");
+        assert!(t.deadline().is_some());
+        t.status_at = Instant::now().checked_sub(STATUS_EVERY * 2);
+        t.on_deadline();
+        assert_ne!(published(&t), Some(1_000));
+        assert!(t.deadline().is_none());
+        // A control request always gets (and publishes) a fresh status.
+        let v = t.control(Request::Status, 3_000);
+        assert_eq!(v["now_ms"], 3_000);
+        assert_eq!(published(&t), Some(3_000));
     }
 
     #[tokio::test(flavor = "current_thread")]

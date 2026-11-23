@@ -88,13 +88,22 @@ impl Snapshot {
 
     /// Windows a person can see right now (excluding the focused one), top-most first.
     /// A window is visible if enough of it is not covered by windows stacked above it.
+    #[cfg(test)]
     pub fn visible(&self, min_fraction: f64, min_pixels: i64) -> Vec<&Win> {
+        self.visible_indices(min_fraction, min_pixels)
+            .into_iter()
+            .map(|i| &self.windows[i])
+            .collect()
+    }
+
+    /// Like visible, as indices into windows.
+    pub fn visible_indices(&self, min_fraction: f64, min_pixels: i64) -> Vec<usize> {
         let bounds = self.screen_rects();
         let focused = self.focused().map(|w| w.id.clone());
         let active = self.active.clone();
         let mut covered: Vec<Rect> = vec![];
         let mut out = vec![];
-        for w in self.windows.iter().rev() {
+        for (i, w) in self.windows.iter().enumerate().rev() {
             let eligible = !w.min
                 && !w.hidden
                 && !w.dock
@@ -125,7 +134,7 @@ impl Snapshot {
                 || active.as_deref() == Some(w.id.as_str())
                 || (w.tf.is_some() && w.tf == focused);
             if !is_focused && vis >= min_pixels && (vis as f64) >= min_fraction * total as f64 {
-                out.push(w);
+                out.push(i);
             }
         }
         out
