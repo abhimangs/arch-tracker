@@ -2,11 +2,16 @@
 
 use super::Event;
 use crate::ipc::Request;
+use crate::sources::browser::{Line, read_line_capped};
 use crate::util;
 use anyhow::Result;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::time::Duration;
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
+
+/// Requests are a line of JSON; nothing legitimate comes close to this.
+const MAX_REQUEST: usize = 64 << 10;
 
 /// Requests the control socket answers itself, without the tracker.
 #[derive(serde::Deserialize)]
@@ -35,14 +40,30 @@ pub fn spawn(tx: mpsc::UnboundedSender<Event>) -> Result<()> {
     let listener = UnixListener::bind(&path)?;
     tokio::spawn(async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                continue;
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(e) => {
+                    // E.g. EMFILE: retrying at once would spin a core.
+                    tracing::warn!("control socket: accept failed: {e}");
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
             };
             let tx = tx.clone();
             tokio::spawn(async move {
                 let (r, mut w) = stream.into_split();
-                let mut lines = BufReader::new(r).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
+                let mut reader = BufReader::new(r);
+                let mut buf = Vec::new();
+                loop {
+                    match read_line_capped(&mut reader, &mut buf, MAX_REQUEST).await {
+                        Ok(Line::Full) => {}
+                        Ok(Line::TooLong) => {
+                            let _ = w.write_all(b"{\"error\":\"request too long\"}\n").await;
+                            continue;
+                        }
+                        _ => break,
+                    }
+                    let line = String::from_utf8_lossy(&buf).into_owned();
                     if let Some(resp) = local(&line) {
                         let mut out = resp.to_string();
                         out.push('\n');

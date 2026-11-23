@@ -111,7 +111,7 @@ pub fn spawn_ingest(tx: UnboundedSender<Event>) -> Result<()> {
 }
 
 #[derive(Debug, PartialEq)]
-enum Line {
+pub(crate) enum Line {
     /// `buf` holds one line, without its newline.
     Full,
     /// The line was longer than the cap and was skipped; `buf` is empty.
@@ -121,7 +121,7 @@ enum Line {
 
 /// Reads one '\n'-terminated line into `buf`, holding at most `max` bytes in memory: a longer
 /// line is consumed and dropped. A last line without a newline still counts.
-async fn read_line_capped<R: AsyncBufRead + Unpin>(
+pub(crate) async fn read_line_capped<R: AsyncBufRead + Unpin>(
     r: &mut R,
     buf: &mut Vec<u8>,
     max: usize,
