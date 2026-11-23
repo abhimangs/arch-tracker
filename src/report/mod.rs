@@ -154,6 +154,32 @@ pub struct DayReport {
     pub timeline: Vec<Bucket>,
 }
 
+/// A request the caller got wrong (a bad date, a reversed range): the dashboard answers 400.
+#[derive(Debug)]
+pub struct BadRequest(pub String);
+
+impl std::fmt::Display for BadRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BadRequest {}
+
+/// Parses a local date written exactly like 2026-11-22; returns it and its [start, end) in ms.
+pub fn parse_date(date: &str) -> Result<(jiff::civil::Date, i64, i64)> {
+    let shaped = date.len() == 10
+        && date.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            _ => b.is_ascii_digit(),
+        });
+    let parsed = shaped
+        .then(|| date.parse::<jiff::civil::Date>().ok())
+        .flatten()
+        .and_then(|d| crate::util::date_bounds(date).map(|(s, e)| (d, s, e)));
+    parsed.ok_or_else(|| BadRequest(format!("{date:?} is not a date like 2026-11-22")).into())
+}
+
 /// Category of a subject: program rules, then the most specific host rule, then app rules.
 pub fn categorize<'a>(cats: &'a [Category], s: &Subject) -> Option<&'a Category> {
     let lc = |x: &str| x.to_lowercase();
@@ -337,9 +363,7 @@ fn rows(map: HashMap<String, Acc>, max_titles: usize) -> Vec<Row> {
 }
 
 pub fn build_day(conn: &Connection, cfg: &Config, date: &str) -> Result<DayReport> {
-    let Some((ds, de)) = crate::util::date_bounds(date) else {
-        anyhow::bail!("bad date {date:?}");
-    };
+    let (_, ds, de) = parse_date(date)?;
     build(conn, cfg, date, ds, de)
 }
 
@@ -710,8 +734,11 @@ fn finish(map: HashMap<String, Row>, max_titles: usize) -> Vec<Row> {
 
 /// Inclusive date range (at most ~3 years).
 pub fn range(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<RangeReport> {
-    let mut d: jiff::civil::Date = from.parse()?;
-    let end: jiff::civil::Date = to.parse()?;
+    let (mut d, _, _) = parse_date(from)?;
+    let (end, _, _) = parse_date(to)?;
+    if end < d {
+        return Err(BadRequest("'to' must not be before 'from'".into()).into());
+    }
     let mut out = RangeReport {
         from: from.into(),
         to: to.into(),
@@ -788,7 +815,7 @@ pub fn settings_hash(cfg: &Config) -> String {
 
 /// Day report, served from the rollup cache for days that are over.
 pub fn day_cached(conn: &Connection, cfg: &Config, date: &str) -> Result<DayReport> {
-    let (_, de) = crate::util::date_bounds(date).unwrap_or((0, i64::MAX));
+    let (_, _, de) = parse_date(date)?;
     // A no-input gap that started before midnight is judged with the part after it.
     let pad = cfg.idle.threshold_secs.max(cfg.idle.call_threshold_secs) as i64 * 1000;
     let finished = crate::util::now_ms() > de.saturating_add(pad + 10 * 60_000);
@@ -1052,6 +1079,25 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(categorize(&cats, &s).unwrap().name, "Development");
+    }
+
+    #[test]
+    fn bad_dates_are_rejected_not_panics() {
+        let st = temp_store();
+        let cfg = Config::default();
+        for bad in [
+            "",
+            "yesterday",
+            "2026-13-01",
+            "2026-02-30",
+            "99999-01-01",
+            "2026-1-1",
+        ] {
+            let e = day_cached(&st.conn, &cfg, bad).unwrap_err();
+            assert!(e.downcast_ref::<BadRequest>().is_some(), "{bad}");
+        }
+        assert!(range(&st.conn, &cfg, "2026-11-02", "2026-11-01").is_err());
+        assert!(day_cached(&st.conn, &cfg, "2026-11-01").is_ok());
     }
 
     #[test]

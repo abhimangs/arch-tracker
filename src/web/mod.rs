@@ -321,6 +321,25 @@ async fn login(State(ctx): State<Ctx>, Query(q): Query<LoginQ>, req: HttpRequest
     )
 }
 
+/// An error about one input, named so the page can point at it.
+fn err_field(status: StatusCode, msg: impl ToString, field: &str) -> Response {
+    (
+        status,
+        Json(json!({"error": msg.to_string(), "field": field})),
+    )
+        .into_response()
+}
+
+/// 400 for requests the caller got wrong, 500 for everything else.
+fn report_err(e: anyhow::Error) -> Response {
+    if e.downcast_ref::<report::BadRequest>().is_some() {
+        err(StatusCode::BAD_REQUEST, format!("{e:#}"))
+    } else {
+        tracing::warn!("dashboard request failed: {e:#}");
+        err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))
+    }
+}
+
 async fn index(State(ctx): State<Ctx>) -> Response {
     let Some(f) = Assets::get("index.html") else {
         return err(StatusCode::NOT_FOUND, "missing index.html");
@@ -399,7 +418,7 @@ async fn blocking<T: serde::Serialize + Send + 'static>(
 ) -> Response {
     match tokio::task::spawn_blocking(f).await {
         Ok(Ok(v)) => Json(v).into_response(),
-        Ok(Err(e)) => err(StatusCode::BAD_REQUEST, format!("{e:#}")),
+        Ok(Err(e)) => report_err(e),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
@@ -420,6 +439,9 @@ fn db(path: &std::path::Path) -> Result<rusqlite::Connection> {
 async fn api_day(State(ctx): State<Ctx>, Query(q): Query<DayQ>) -> Response {
     let cfg = ctx.web.config();
     let date = q.date.unwrap_or_else(|| util::local_date(util::now_ms()));
+    if let Err(e) = report::parse_date(&date) {
+        return err_field(StatusCode::BAD_REQUEST, format!("{e:#}"), "date");
+    }
     let path = ctx.web.db.clone();
     blocking(move || report::day_cached(&db(&path)?, &cfg, &date)).await
 }
