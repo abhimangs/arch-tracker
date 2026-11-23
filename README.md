@@ -6,8 +6,8 @@
 
 Screen time for KDE Plasma on Wayland. arch-tracker records which app has your focus, which sites
 you use (with subdomains kept apart), what runs in your terminal, and how long your AI coding agents
-work, then shows it all in a local dashboard. It runs as a small user service (about 12 MB of memory)
-and nothing leaves your computer.
+work, then shows it all in a local dashboard with a tray icon. It runs as a small user service (about
+12 MB of memory, close to 0 % CPU) and nothing leaves your computer.
 
 ![The Today view: the day as five-minute bars, with apps, sites, categories and AI agents](docs/screenshots/today-dark.png)
 
@@ -16,7 +16,7 @@ and nothing leaves your computer.
 | Source | What you get | How |
 | --- | --- | --- |
 | Windows | The focused app and window title, to the second; windows that sit visible beside it | A KWin script, loaded at runtime (your `kwinrc` is not touched) |
-| Browser | The active tab's host and page title; each subdomain separate | A small Brave/Chromium extension over native messaging. Plasma Browser Integration and Chromium's session file are fallbacks |
+| Browser | The active tab's host and page title; each subdomain separate | A small extension for Chromium-based browsers (Brave, Chrome, Chromium, Helium, Vivaldi, Edge, Opera…) and Firefox-based ones (Firefox, Zen, LibreWolf, Floorp, Waterfox), over native messaging. Plasma Browser Integration and Chromium's session file are fallbacks |
 | Incognito | Time only, counted as "Private browsing" | Hosts and titles from private windows are never stored |
 | Terminals | The program in front of you and its project (git root) | kitty remote control (exact tab); `/proc` for ghostty and others; tmux panes |
 | AI agents | Per tool and project: time you watched it, and time it was working | Claude Code, Codex, opencode, Antigravity, Cursor Agent, Hermes, Gemini CLI, Aider and more, matched by name |
@@ -73,18 +73,40 @@ arch-tracker setup     # registers the browser bridge and prints the extension s
 arch-tracker doctor    # checks every source and says how to fix problems
 ```
 
-Open the dashboard at http://127.0.0.1:7600/.
+Open the dashboard from the tray icon, or run `arch-tracker open`. It lives at
+http://arch-tracker.localhost:7600/ and is locked to you: the tray icon and `arch-tracker open` sign
+your browser in once, after which bookmarks work too. Other programs on the computer can't read it.
 
 ### Browser extension
 
-For exact tabs, load the extension once:
+For exact tabs, add the extension once to each browser you use. `arch-tracker setup` registers the
+bridge in every installed browser and prints these steps.
 
-1. Open `brave://extensions` (or `chrome://extensions`) and switch on **Developer mode**.
+**Chromium-based** (Brave, Chrome, Chromium, Helium, Vivaldi, Edge, Opera, Thorium):
+
+1. Open `brave://extensions` or `chrome://extensions` and switch on **Developer mode**.
 2. Click **Load unpacked** and choose `/usr/share/arch-tracker/extension`.
 3. The extension ID must be `ofgofljkhfmjkgklekeiajnkplaldokg`.
 
-Without it, tabs are matched by window title through Plasma Browser Integration, which can mix up
-two tabs with the same title.
+**Firefox-based** (Firefox, Zen, LibreWolf, Floorp, Waterfox): Firefox and Zen keep only add-ons
+signed by Mozilla. Sign your own copy once, privately (nothing is published):
+
+1. Create an API key at <https://addons.mozilla.org/developers/addon/api/key/> and save it in
+   `~/.config/arch-tracker/amo.env` (then `chmod 600` it):
+   ```
+   AMO_JWT_ISSUER=user:12345:67
+   AMO_JWT_SECRET=…
+   ```
+2. Run `scripts/sign-firefox.sh` from a checkout, and open the `.xpi` it prints in your browser.
+
+LibreWolf, Floorp, Waterfox and Firefox Developer Edition also accept the unsigned add-on after
+setting `xpinstall.signatures.required` to `false` in `about:config`. For a quick test in any
+of them, `about:debugging` → **Load Temporary Add-on** → `/usr/share/arch-tracker/extension-firefox/manifest.json`
+works until the browser restarts.
+
+Flatpak and Snap browsers can't start the bridge from their sandbox; their windows are still tracked
+through the fallbacks. Without the extension, tabs are matched by window title through Plasma
+Browser Integration, which can mix up two tabs with the same title.
 
 ### kitty
 
@@ -99,12 +121,13 @@ listen_on unix:/tmp/kitty.sock
 
 | Command | What it does |
 | --- | --- |
+| `arch-tracker open [page]` | Open the dashboard in your browser, signed in (`today`, `apps`, `agents`, `trends`, `settings`) |
 | `arch-tracker status` | What is tracked right now and which sources work |
 | `arch-tracker pause 1h` / `arch-tracker resume` | Pause recording; no duration pauses until you resume |
 | `arch-tracker doctor` | Check every source, with fixes |
 | `arch-tracker export --from 2026-11-01 --to 2026-11-22 --format csv` | Every recorded interval, as CSV or JSON |
 | `arch-tracker serve --db copy.db` | A read-only dashboard for any database, without tracking |
-| `arch-tracker setup` | Unpack the extension and register the native-messaging host |
+| `arch-tracker setup` | Unpack the extensions and register the bridge in every installed browser |
 
 ## Configuration
 
@@ -115,18 +138,32 @@ are picked up live. You can change:
 - categories (sites, apps and programs; the most specific site wins)
 - AI agent names to recognise, and when an agent counts as working
 - apps and sites never to record
-- the dashboard port, theme (system, dark, light) and your own CSS
+- the dashboard port (applied at once, whichever way you change it), your own CSS and the tray icon
+- the look: Catppuccin (Mocha, Macchiato, Frappé, Latte), Rosé Pine (Main, Moon, Dawn) or the
+  original Aizome, any of their accents, following the system or fixed dark or light. Category
+  colours follow the theme unless you switch that off. The palette button in the header switches
+  it instantly.
 
 ## Privacy
 
 - Data lives in `~/.local/share/arch-tracker/tracker.db` and is never sent anywhere.
-- The dashboard answers only on `127.0.0.1`, refuses other host names, and needs a per-run token
-  for every change.
-- Browsers send host and title only: no paths, no query strings, nothing from incognito.
-- Terminals give program name and project only: never arguments or environment variables.
+- The dashboard answers only on `127.0.0.1` as `arch-tracker.localhost`, refuses other host
+  names, and is locked: without the sign-in cookie it shows nothing, so other programs and other
+  users can't read your history. Every change also needs a per-run token.
+- Browsers send host and title only: no paths, no query strings (untitled pages that show their
+  URL are reduced to the host), and from private windows only that time was spent.
+- Terminals give program name and project only: never arguments, window titles (which shells set
+  to the running command) or environment variables.
 - `arch-tracker pause` stops recording; the exclude list hides chosen apps and sites.
 
 See [SECURITY.md](SECURITY.md) for the threat model and how to report a problem.
+
+## Resource use
+
+Measured on a running daemon: about 11.5 MB resident, of which about 2 MB is its own memory (the
+rest is the shared executable), and about 0.1 % of one core. The dashboard server idles inside the
+same process at no measurable cost, and the tray icon uses the existing D-Bus connection. The
+systemd unit caps memory at 64 MB.
 
 ## How it works
 

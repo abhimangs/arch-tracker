@@ -14,17 +14,26 @@ Do not open a public issue for security problems. You will get an answer within 
 
 - **Local data only.** Everything is stored in `~/.local/share/arch-tracker/tracker.db`. Nothing is
   sent over the network.
-- **Dashboard.** It listens on `127.0.0.1` only, refuses requests whose Host header is not
-  `127.0.0.1` or `localhost` (blocking DNS rebinding), requires a per-run token on every write, and
-  sends a strict Content-Security-Policy. Page titles and other recorded text are escaped before
-  they are shown.
+- **Dashboard.** It listens on `127.0.0.1` only and answers as `arch-tracker.localhost`; other Host
+  headers are refused (blocking DNS rebinding) and old `127.0.0.1` links are redirected. It is
+  locked: everything but static assets needs a session cookie holding a per-user key
+  (`~/.local/share/arch-tracker/dashboard.key`, mode 0600). The tray icon and `arch-tracker open`
+  sign a browser in with one-time codes (60 s, single use) handed out over the 0700 control socket,
+  so the key never appears in a URL. The cookie is host-only on `arch-tracker.localhost`, so it is
+  not sent to other local servers on 127.0.0.1. Every write also needs a per-run token and a
+  matching Origin, and pages get a strict Content-Security-Policy. Recorded text is escaped before
+  it is shown.
 - **Browser extension.** It sends the host and title of tabs, never paths or query strings, and
-  nothing from incognito windows. It talks only to the local native-messaging host.
+  from private windows only that a private window is in use. It talks only to the local
+  native-messaging host. The Firefox signing key (`amo.env`) is read from your config folder, never
+  stored in the repository, and passed to Mozilla's tool through the environment.
 - **Terminals.** Only the program name and project folder are stored, never arguments or
   environment variables (which can hold secrets).
 - **Sockets.** Control and ingest sockets live in `$XDG_RUNTIME_DIR/arch-tracker` with mode 0700.
 
 ## Out of scope
 
-Programs running as your own user can read your files, including the database. arch-tracker does
-not defend against them, just as it cannot protect any other file in your home directory.
+Programs running as your own user without a sandbox can read your files, including the database and
+the dashboard key. arch-tracker does not defend against them, just as it cannot protect any other
+file in your home directory. The dashboard lock keeps out programs that can only reach the network
+(sandboxed apps, other users).

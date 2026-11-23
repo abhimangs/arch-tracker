@@ -6,6 +6,46 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- System-tray icon: today's screen time in the tooltip, click to open the dashboard, pause and
+  resume from the menu or with a middle click.
+- Dashboard themes: Catppuccin (Mocha, Macchiato, Frappé, Latte) and Rosé Pine (Main, Moon, Dawn)
+  besides the original, with every accent, a header palette picker, and category colours that
+  follow the theme.
+- `arch-tracker open` opens the dashboard signed in.
+- Firefox-family browsers (Firefox, Zen, LibreWolf, Floorp, Waterfox): a Firefox build of the
+  extension, bridge registration, `scripts/sign-firefox.sh` for private Mozilla signing, and a
+  system-wide bridge in the package. Chromium-family browsers are found by their profile files, so
+  Helium and others work without a list.
+- A man page.
+
+### Changed
+
+- The dashboard is locked to you and served as `http://arch-tracker.localhost:<port>/`.
+- A dashboard port change applies however the config changes, not only from Settings.
+- A broken `config.toml` no longer stops the daemon: it starts with defaults and says why.
+- Agent "working" time ignores long-running helpers (MCP, language and dev servers), counts
+  wrapped agent processes, and measures output per 10 seconds.
+- Exports stream instead of being built in memory; ranges use a small per-day cache.
+- `arch-tracker status` prints a readable summary (`--json` for the raw status).
+
+### Fixed
+
+- The Today page multiplied its refresh timer every minute.
+- Agent and running-app time kept counting while suspended or paused.
+- A failed database write could lose spans or overwrite another span's end.
+- Spans could cross midnight; idle gaps across midnight were split before the threshold.
+- Terminal titles (which hold command lines) and rewritten process titles stored arguments; untitled
+  pages stored their URL; a private window the extension couldn't see could be recorded as a normal
+  tab.
+- Browser audio was counted twice without Plasma Browser Integration.
+- Lost KWin, idle and D-Bus connections now recover instead of stopping a source for good.
+- "Pause until resumed" survives a restart.
+- Settings saves no longer undo hand edits, and invalid fields are named.
+- `brave://` category rules, CSV formula escaping, daylight-saving hours, and keyboard access to
+  the day chart.
+
 ## [0.1.1] - 2026-11-22
 
 ### Added
