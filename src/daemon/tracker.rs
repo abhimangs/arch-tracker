@@ -214,7 +214,8 @@ pub struct Tracker {
     cfg: Config,
     title_res: Vec<regex_lite::Regex>,
     shared: SharedRef,
-    conn: zbus::Connection,
+    /// Session bus (None in tests).
+    conn: Option<zbus::Connection>,
     desktop: DesktopIndex,
     desktop_loaded: Instant,
     started_ms: i64,
@@ -260,6 +261,10 @@ pub struct Tracker {
 
 impl Tracker {
     pub fn new(store: Store, cfg: Config, shared: SharedRef, conn: zbus::Connection) -> Self {
+        Self::build(store, cfg, shared, Some(conn))
+    }
+
+    fn build(store: Store, cfg: Config, shared: SharedRef, conn: Option<zbus::Connection>) -> Self {
         let now = now_ms();
         let paused = stored_pause(&store, now);
         if paused.is_some() {
@@ -490,12 +495,13 @@ impl Tracker {
             self.agent_scanner
                 .scan(&self.cfg.agents, &mut self.projects)
         };
-        self.running = if self.cfg.general.track_running
+        self.running = if let Some(conn) = &self.conn
+            && self.cfg.general.track_running
             && self.paused.is_none()
             && !self.suspended
             && self.kwin.is_some()
         {
-            crate::sources::running::scan(&self.conn, &self.desktop, self.kwin.as_ref())
+            crate::sources::running::scan(conn, &self.desktop, self.kwin.as_ref())
                 .await
                 .into_iter()
                 .filter_map(|(k, n)| self.apply_privacy(Subject::app(&k, &n)))
@@ -504,9 +510,11 @@ impl Tracker {
             vec![]
         };
         // The KWin script re-sends every 60 s; silence means KWin restarted or dropped it.
-        if now - self.kwin_last > 150_000 && !self.kwin_reloading {
+        if now - self.kwin_last > 150_000
+            && !self.kwin_reloading
+            && let Some(conn) = self.conn.clone()
+        {
             self.kwin_reloading = true;
-            let conn = self.conn.clone();
             tokio::spawn(async move {
                 if let Err(e) = kwin::load_script(&conn).await {
                     tracing::warn!("KWin script reload failed: {e:#}");
@@ -699,7 +707,8 @@ impl Tracker {
             return;
         }
         self.pbi_caption = cap;
-        match browser::pbi::query(&self.conn).await {
+        let Some(conn) = &self.conn else { return };
+        match browser::pbi::query(conn).await {
             Some((bpid, tabs)) => {
                 let mut seen = std::collections::HashSet::new();
                 let dupes = tabs.iter().any(|t| !seen.insert(self.norm(&t.title)));
@@ -765,6 +774,9 @@ impl Tracker {
                 pick = p;
             }
             AppKind::Terminal => {
+                // Shells and terminals put the running command line (with its arguments) in the
+                // window title: terminal data is program + project only, never the caption.
+                s.title.clear();
                 if let Some((_, _, info)) = self.term_cache.get(&w.id) {
                     s.program = info.program.clone();
                     s.project = info.project.clone();
@@ -1097,6 +1109,67 @@ impl Tracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sources::kwin::{Screen, Snapshot};
+
+    /// A tracker without D-Bus, on a scratch database.
+    fn test_tracker() -> Tracker {
+        let dir = std::env::temp_dir().join(format!(
+            "at-tracker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Store::open(&dir.join("t.db")).unwrap();
+        Tracker::build(store, Config::default(), Default::default(), None)
+    }
+
+    fn one_window(cls: &str, cap: &str) -> Snapshot {
+        Snapshot {
+            active: Some("w1".into()),
+            screens: vec![Screen {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1200,
+            }],
+            windows: vec![Win {
+                id: "w1".into(),
+                cls: cls.into(),
+                cap: cap.into(),
+                w: 1920,
+                h: 1200,
+                normal: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_titles_are_never_stored() {
+        let mut t = test_tracker();
+        let cap = "sudo sed -i s/old/new/ /etc/example.conf";
+        t.handle(Event::Kwin(Box::new(one_window("foot", cap))))
+            .await;
+        let focus = t.focus.clone().expect("terminal focused");
+        assert_eq!(focus.app, "foot");
+        assert!(focus.title.is_empty());
+        let status = t.status_json(now_ms()).to_string();
+        assert!(!status.contains("sed -i"), "{status}");
+        t.shutdown();
+        let n: i64 = t
+            .store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM subjects WHERE title LIKE '%sed%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
 
     #[test]
     fn midnight_is_in_the_future_and_within_a_day() {
