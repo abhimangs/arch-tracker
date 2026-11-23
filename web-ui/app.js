@@ -10,8 +10,12 @@
   const NB = " ";
   let status = null;
   let firstRibbon = true;
-  let refreshTimer = null;
+  let refreshTimer = null; // the one Today refresh; only route() and a full Today render touch it
   let currentDay = null;
+  // Bumped on every navigation. A page render that awaited something checks it afterwards and
+  // drops its result if the user has moved on, so a slow reply can't overwrite a newer page.
+  let renderGen = 0;
+  const stale = (gen) => gen !== renderGen;
   const openRows = new Set();
 
   // ---------- helpers ----------
@@ -228,17 +232,17 @@
     });
   }
 
-  async function pageDay(date, quiet) {
+  async function pageDay(date, quiet, gen) {
     currentDay = date;
     const isToday = date === today();
     let d;
     try {
       d = await get(`/api/day?date=${encodeURIComponent(date)}`);
     } catch (e) {
-      view.innerHTML = errorHtml(e);
+      if (!stale(gen) && !quiet) view.innerHTML = errorHtml(e);
       return;
     }
-    if (currentDay !== date) return;
+    if (stale(gen) || currentDay !== date) return;
     const usedNames = new Set(d.apps.filter((a) => a.total >= 60).map((a) => a.name));
     const unused = d.running.filter((r) => !usedNames.has(r.name));
     const t = d.totals;
@@ -283,11 +287,17 @@
         location.hash = go === today() ? "#/today" : `#/day/${go}`;
       }),
     );
-    if (isToday) {
-      refreshTimer = setInterval(() => {
-        if (!document.hidden && currentDay === date && date === today()) pageDay(date, true);
-      }, 60000);
+    if (isToday && !quiet) {
+      clearInterval(refreshTimer);
+      refreshTimer = setInterval(refreshToday, 60000);
     }
+  }
+
+  function refreshToday() {
+    if (document.hidden || !currentDay) return;
+    // Past midnight the page for "today" is yesterday's: route again to show the new day.
+    if (currentDay !== today()) route();
+    else pageDay(currentDay, true, renderGen);
   }
 
   // ---------- ranges ----------
@@ -321,16 +331,17 @@
     return get(`/api/range?from=${from}&to=${to}`);
   }
 
-  async function pageApps(n) {
+  async function pageApps(n, gen) {
     view.innerHTML = `<div class="toolbar"><h1>Apps and sites</h1>${rangeBar("apps", n)}</div><p class="empty">Loading…</p>`;
     bindRange("apps");
     let r;
     try {
       r = await loadRange(n);
     } catch (e) {
-      view.innerHTML = errorHtml(e);
+      if (!stale(gen)) view.innerHTML = errorHtml(e);
       return;
     }
+    if (stale(gen)) return;
     view.innerHTML = `<div class="toolbar"><h1>Apps and sites</h1>${rangeBar("apps", n)}</div>
       <p class="sub">Screen time is focus time. A row's second number, when shown, is time it sat beside other windows.</p>
       <div class="cols">
@@ -345,16 +356,17 @@
     bindRange("apps");
   }
 
-  async function pageAgents(n) {
+  async function pageAgents(n, gen) {
     view.innerHTML = `<div class="toolbar"><h1>AI agents</h1>${rangeBar("agents", n)}</div><p class="empty">Loading…</p>`;
     bindRange("agents");
     let r;
     try {
       r = await loadRange(n);
     } catch (e) {
-      view.innerHTML = errorHtml(e);
+      if (!stale(gen)) view.innerHTML = errorHtml(e);
       return;
     }
+    if (stale(gen)) return;
     const busy = (r.agents || []).reduce((a, x) => a + x.busy, 0);
     const focus = (r.agents || []).reduce((a, x) => a + x.focus, 0);
     view.innerHTML = `<div class="toolbar"><h1>AI agents</h1>${rangeBar("agents", n)}</div>
@@ -423,7 +435,7 @@
     return `<div class="heat-wrap"><div class="heat" role="img" aria-label="Screen time per day for the last year, one column per week starting ${weekStart === "sunday" ? "Sunday" : "Monday"}">${cells.join("")}</div></div>`;
   }
 
-  async function pageTrends(n) {
+  async function pageTrends(n, gen) {
     const ranges = RANGES.filter(([v]) => v !== "1");
     view.innerHTML = `<div class="toolbar"><h1>Trends</h1>${rangeBar("trends", n, ranges)}</div><p class="empty">Loading…</p>`;
     bindRange("trends");
@@ -431,9 +443,10 @@
     try {
       r = await loadRange(n);
     } catch (e) {
-      view.innerHTML = errorHtml(e);
+      if (!stale(gen)) view.innerHTML = errorHtml(e);
       return;
     }
+    if (stale(gen)) return;
     const tracked = r.days.filter((d) => d.totals.screen > 0);
     const avg = tracked.length ? r.totals.screen / tracked.length : 0;
     const busiest = tracked.reduce((a, d) => (!a || d.totals.screen > a.totals.screen ? d : a), null);
@@ -482,14 +495,15 @@
       <button type="button" class="btn" data-delcat="${i}" ${fixed ? "disabled title='Fallback category'" : ""}>Remove</button>`;
   }
 
-  async function pageSettings() {
+  async function pageSettings(gen) {
     let s;
     try {
       s = await get("/api/settings");
     } catch (e) {
-      view.innerHTML = errorHtml(e);
+      if (!stale(gen)) view.innerHTML = errorHtml(e);
       return;
     }
+    if (stale(gen)) return;
     const c = s.config;
     let cats = c.categories.map((x) => ({ ...x }));
     const st = status || {};
@@ -615,7 +629,7 @@
         try {
           await send("POST", "/api/pause", { minutes: m ? Number(m) : null });
           await pollStatus();
-          pageSettings();
+          pageSettings(renderGen);
         } catch (e) {
           msg(e.message, "error");
         }
@@ -625,7 +639,7 @@
       try {
         await send("POST", "/api/resume");
         await pollStatus();
-        pageSettings();
+        pageSettings(renderGen);
       } catch (e) {
         msg(e.message, "error");
       }
@@ -751,6 +765,9 @@
 
   function route() {
     clearInterval(refreshTimer);
+    refreshTimer = null;
+    currentDay = null;
+    const gen = ++renderGen;
     const h = location.hash.replace(/^#\/?/, "") || "today";
     const [page, arg] = h.split("/");
     const key = page === "day" ? "today" : page;
@@ -761,17 +778,17 @@
     const valid = (r, list) => (list.some(([v]) => v === r) ? r : null);
     switch (page) {
       case "day":
-        return pageDay(/^\d{4}-\d{2}-\d{2}$/.test(arg || "") ? arg : today());
+        return pageDay(/^\d{4}-\d{2}-\d{2}$/.test(arg || "") ? arg : today(), false, gen);
       case "apps":
-        return pageApps(valid(arg, RANGES) || "1");
+        return pageApps(valid(arg, RANGES) || "1", gen);
       case "agents":
-        return pageAgents(valid(arg, RANGES) || "7");
+        return pageAgents(valid(arg, RANGES) || "7", gen);
       case "trends":
-        return pageTrends(valid(arg, RANGES.slice(1)) || "30");
+        return pageTrends(valid(arg, RANGES.slice(1)) || "30", gen);
       case "settings":
-        return pageSettings();
+        return pageSettings(gen);
       default:
-        return pageDay(today());
+        return pageDay(today(), false, gen);
     }
   }
 
@@ -790,7 +807,9 @@
   bindRows(view);
   window.addEventListener("hashchange", route);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) pollStatus();
+    if (document.hidden) return;
+    pollStatus();
+    if (refreshTimer) refreshToday();
   });
   route();
   pollStatus();
