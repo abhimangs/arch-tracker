@@ -18,7 +18,7 @@ pub enum Request {
     Reload,
 }
 
-pub async fn call(req: &Request) -> Result<serde_json::Value> {
+pub async fn call<T: Serialize>(req: &T) -> Result<serde_json::Value> {
     let path = util::control_socket();
     let stream = UnixStream::connect(&path).await.with_context(|| {
         format!(

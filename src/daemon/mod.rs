@@ -98,7 +98,7 @@ async fn run_async() -> Result<()> {
     session::spawn(conn.clone(), tx.clone()).await;
     media::spawn(conn.clone(), tx.clone()).await;
 
-    let web = crate::web::Web::new(shared.clone(), tx.clone(), util::db_path(), false);
+    let web = crate::web::Web::new(shared.clone(), tx.clone(), util::db_path(), false)?;
     if let Err(e) = web.listen(cfg.dashboard.port).await {
         tracing::warn!(
             "dashboard could not start on port {}: {e:#}",

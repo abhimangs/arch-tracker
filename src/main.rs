@@ -42,6 +42,11 @@ enum Cmd {
     Setup,
     /// Check every data source and explain how to fix problems.
     Doctor,
+    /// Open the dashboard in your browser, signed in (e.g. "open settings").
+    Open {
+        /// Page: today, apps, agents, trends or settings.
+        page: Option<String>,
+    },
     /// Read-only dashboard for a database, without tracking (e.g. a copied tracker.db).
     Serve {
         /// Database to show (default: your own tracker.db).
@@ -143,6 +148,20 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Cmd::Setup => setup::run(),
+        Cmd::Open { page } => {
+            let route = page.unwrap_or_else(|| "today".into());
+            let v = block_on(ipc::call(
+                &serde_json::json!({"cmd": "login_url", "route": route}),
+            ))?;
+            let Some(url) = v["url"].as_str() else {
+                bail!(
+                    "{}",
+                    v["error"].as_str().unwrap_or("the daemon gave no URL")
+                );
+            };
+            println!("Opening the dashboard…");
+            web::auth::open_in_browser(url)
+        }
         Cmd::Doctor => block_on(doctor::run()),
         Cmd::Serve { db, port } => {
             init_logging(false);
@@ -176,11 +195,12 @@ async fn serve(db: std::path::PathBuf, port: Option<u16>) -> Result<()> {
         config: cfg,
     }));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let web = web::Web::new(shared, tx, db.clone(), true);
+    let web = web::Web::new(shared, tx, db.clone(), true)?;
     web.listen(port).await?;
     println!(
-        "Read-only dashboard for {} at http://127.0.0.1:{port}/ (Ctrl+C to stop)",
-        db.display()
+        "Read-only dashboard for {} (Ctrl+C to stop). Sign in once with:\n  {}",
+        db.display(),
+        web.login_url("today")?
     );
     tokio::signal::ctrl_c().await?;
     Ok(())

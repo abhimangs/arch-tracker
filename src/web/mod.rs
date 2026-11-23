@@ -1,6 +1,10 @@
 //! Local dashboard: axum on 127.0.0.1 only, embedded assets, JSON API.
-//! Every write needs the per-run CSRF token; Host headers other than localhost are refused
-//! (stops DNS-rebinding pages from reading your data).
+//! It answers as http://arch-tracker.localhost:<port>/ (old 127.0.0.1 links are redirected there);
+//! other Host headers are refused, which stops DNS-rebinding pages from reading your data.
+//! Everything but static assets needs the session cookie (see auth.rs), and every write also
+//! needs the per-run CSRF token.
+
+pub mod auth;
 
 use crate::config::{self, Config};
 use crate::daemon::{Event, SharedRef};
@@ -11,7 +15,7 @@ use anyhow::Result;
 use axum::extract::{Path, Query, Request as HttpRequest, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -40,30 +44,26 @@ struct Ctx {
     port: u16,
 }
 
-fn random_token() -> String {
-    let mut b = [0u8; 24];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        let _ = f.read_exact(&mut b);
-    }
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
 impl Web {
     pub fn new(
         shared: SharedRef,
         tx: UnboundedSender<Event>,
         db: std::path::PathBuf,
         viewer: bool,
-    ) -> Arc<Web> {
-        Arc::new(Web {
+    ) -> Result<Arc<Web>> {
+        Ok(Arc::new(Web {
             shared,
             tx,
-            token: random_token(),
+            token: auth::random_hex(24)?,
             db,
             viewer,
             current: Mutex::new(None),
-        })
+        }))
+    }
+
+    /// One-time sign-in URL for the dashboard, opening at a hash route ("today", "settings").
+    pub fn login_url(&self, route: &str) -> Result<String> {
+        auth::login_url(self.port().unwrap_or(0), route)
     }
 
     pub fn port(&self) -> Option<u16> {
@@ -103,7 +103,8 @@ impl Web {
                 let _ = old_stop.send(());
             });
         }
-        tracing::info!("dashboard on http://127.0.0.1:{port}/");
+        auth::set_port(port);
+        tracing::info!("dashboard on http://{}/", canonical_host(port));
         Ok(())
     }
 
@@ -118,6 +119,7 @@ impl Web {
 fn router(ctx: Ctx) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/login", get(login))
         .route("/assets/{file}", get(asset))
         .route("/custom.css", get(custom_css))
         .route("/api/status", get(api_status))
@@ -131,22 +133,59 @@ fn router(ctx: Ctx) -> Router {
         .with_state(ctx)
 }
 
-/// Host-header allowlist + CSRF token on every non-GET request.
-async fn guard(State(ctx): State<Ctx>, req: HttpRequest, next: Next) -> Response {
-    let host = req
-        .headers()
-        .get(header::HOST)
+/// The dashboard's own origin host ("arch-tracker.localhost:7600").
+fn canonical_host(port: u16) -> String {
+    format!("{}:{port}", auth::HOST)
+}
+
+fn header_str(req: &HttpRequest, name: header::HeaderName) -> &str {
+    req.headers()
+        .get(name)
         .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    let ok_hosts = [
+        .unwrap_or("")
+}
+
+/// Host check, then the session cookie, then the CSRF token on every non-GET request.
+async fn guard(State(ctx): State<Ctx>, req: HttpRequest, next: Next) -> Response {
+    let host = header_str(&req, header::HOST);
+    let canonical = canonical_host(ctx.port);
+    let loopback = [
         format!("127.0.0.1:{}", ctx.port),
         format!("localhost:{}", ctx.port),
         format!("[::1]:{}", ctx.port),
     ];
-    if !ok_hosts.iter().any(|h| h == host) {
+    if loopback.iter().any(|h| h == host) {
+        // Old links and bookmarks: move to the dashboard's own host name, where its cookie is
+        // not shared with other local servers.
+        if req.method() == axum::http::Method::GET {
+            let pq = req
+                .uri()
+                .path_and_query()
+                .map(|p| p.as_str())
+                .unwrap_or("/");
+            return Redirect::temporary(&format!("http://{canonical}{pq}")).into_response();
+        }
+        return err(
+            StatusCode::FORBIDDEN,
+            format!("Use http://{canonical}/ for the dashboard."),
+        );
+    }
+    if host != canonical {
         return (
             StatusCode::FORBIDDEN,
-            "Blocked: this dashboard only answers on 127.0.0.1",
+            format!("Blocked: this dashboard only answers as http://{canonical}/"),
+        )
+            .into_response();
+    }
+    let path = req.uri().path();
+    let public = path.starts_with("/assets/") || path == "/login";
+    if !public && !auth::cookie_ok(header_str(&req, header::COOKIE)) {
+        if path == "/" {
+            return locked_page(&ctx, None);
+        }
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": LOCKED_MSG, "locked": true})),
         )
             .into_response();
     }
@@ -162,7 +201,7 @@ async fn guard(State(ctx): State<Ctx>, req: HttpRequest, next: Next) -> Response
             .and_then(|h| h.to_str().ok())
         {
             None => true,
-            Some(o) => ok_hosts.iter().any(|h| o == format!("http://{h}")),
+            Some(o) => o == format!("http://{canonical}"),
         };
         if token != ctx.web.token || !origin_ok {
             return (
@@ -196,14 +235,89 @@ fn err(status: StatusCode, msg: impl ToString) -> Response {
     (status, Json(json!({"error": msg.to_string()}))).into_response()
 }
 
+const LOCKED_MSG: &str =
+    "The dashboard is locked. Open it from the arch-tracker tray icon, or run: arch-tracker open";
+
+/// Fills the theme attributes of a page (no flash of the wrong theme before app.js runs).
+fn themed(html: &str, cfg: &Config) -> String {
+    let d = &cfg.dashboard;
+    html.replace("__THEME__", &d.theme)
+        .replace("__PALETTE__", &d.palette)
+        .replace("__DARK__", &d.dark_flavor)
+        .replace("__ACCENT__", &d.accent)
+        .replace(
+            "__THEMECATS__",
+            if d.theme_categories { "on" } else { "off" },
+        )
+        .replace("__VERSION__", env!("CARGO_PKG_VERSION"))
+}
+
+/// What a browser without the session cookie sees.
+fn locked_page(ctx: &Ctx, note: Option<&str>) -> Response {
+    let Some(f) = Assets::get("locked.html") else {
+        return err(StatusCode::UNAUTHORIZED, LOCKED_MSG);
+    };
+    let note = note
+        .map(|n| format!("<p class=\"locked-note\">{n}</p>"))
+        .unwrap_or_default();
+    let html =
+        themed(&String::from_utf8_lossy(&f.data), &ctx.web.config()).replace("__NOTE__", &note);
+    (
+        StatusCode::UNAUTHORIZED,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        html,
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct LoginQ {
+    code: Option<String>,
+    to: Option<String>,
+}
+
+/// Trades a one-time code for the session cookie, then opens the requested page.
+async fn login(State(ctx): State<Ctx>, Query(q): Query<LoginQ>, req: HttpRequest) -> Response {
+    let route: String =
+        q.to.unwrap_or_default()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-'))
+            .take(64)
+            .collect();
+    let to = format!("/#/{}", if route.is_empty() { "today" } else { &route });
+    let fresh = q.code.as_deref().map(auth::redeem).unwrap_or(false);
+    if fresh {
+        return match auth::set_cookie() {
+            Ok(c) => (
+                StatusCode::SEE_OTHER,
+                [
+                    (header::LOCATION, to),
+                    (header::SET_COOKIE, c),
+                    (header::CACHE_CONTROL, "no-store".to_string()),
+                ],
+            )
+                .into_response(),
+            Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        };
+    }
+    if auth::cookie_ok(header_str(&req, header::COOKIE)) {
+        return Redirect::to(&to).into_response();
+    }
+    locked_page(
+        &ctx,
+        Some("That sign-in link has expired or was already used. Open the dashboard again."),
+    )
+}
+
 async fn index(State(ctx): State<Ctx>) -> Response {
     let Some(f) = Assets::get("index.html") else {
         return err(StatusCode::NOT_FOUND, "missing index.html");
     };
-    let html = String::from_utf8_lossy(&f.data)
-        .replace("__TOKEN__", &ctx.web.token)
-        .replace("__THEME__", &ctx.web.config().dashboard.theme)
-        .replace("__VERSION__", env!("CARGO_PKG_VERSION"));
+    let html = themed(&String::from_utf8_lossy(&f.data), &ctx.web.config())
+        .replace("__TOKEN__", &ctx.web.token);
     (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
@@ -344,8 +458,8 @@ async fn api_settings_put(State(ctx): State<Ctx>, Json(body): Json<SettingsBody>
             );
         }
         redirect = Some(format!(
-            "http://127.0.0.1:{}/#/settings",
-            cfg.dashboard.port
+            "http://{}/#/settings",
+            canonical_host(cfg.dashboard.port)
         ));
     }
     if let Err(e) = cfg.save() {
