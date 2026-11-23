@@ -36,6 +36,10 @@ jobs:
         run: cargo test --locked
       - name: Check dashboard script
         run: node --check web-ui/app.js
+      - name: Test the browser extension
+        run: node scripts/test-extension.mjs
+      - name: Lint the Firefox build
+        run: scripts/build-extensions.sh && npx --yes web-ext@latest lint --source-dir dist/firefox
 
   package:
     name: Arch package
