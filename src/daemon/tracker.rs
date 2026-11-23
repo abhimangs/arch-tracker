@@ -1147,6 +1147,38 @@ mod tests {
         }
     }
 
+    fn kinds_in_db(t: &Tracker, kind: Kind) -> Vec<(i64, i64)> {
+        crate::store::spans_in(&t.store.conn, 0, i64::MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.kind == kind)
+            .map(|s| (s.start, s.end))
+            .collect()
+    }
+
+    #[test]
+    fn sleep_and_pause_end_agent_and_running_spans() {
+        let mut t = test_tracker();
+        t.agents = vec![agents::AgentState {
+            subject: Subject::app("agent:test", "Test agent"),
+            pid: 1,
+            busy: true,
+            cpu_percent: 50.0,
+        }];
+        t.running = vec![Subject::app("editor", "Editor")];
+        t.reconcile(1_000);
+        t.suspended = true;
+        t.reconcile(10_000);
+        t.suspended = false;
+        t.reconcile(20_000);
+        t.paused = Some(None);
+        t.reconcile(30_000);
+        t.flush(40_000);
+        let want = vec![(1_000, 10_000), (20_000, 30_000)];
+        assert_eq!(kinds_in_db(&t, Kind::AgentBusy), want);
+        assert_eq!(kinds_in_db(&t, Kind::Running), want);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn terminal_titles_are_never_stored() {
         let mut t = test_tracker();
