@@ -228,9 +228,29 @@ pub struct ProjectRow {
 /// Project grouping rules from the config: aliases, ignored folders, editor apps.
 struct ProjectRules<'a> {
     cfg: &'a crate::config::Projects,
+    /// Whether a folder is a project (checked once per report).
+    seen: std::cell::RefCell<HashMap<String, bool>>,
 }
 
-impl ProjectRules<'_> {
+/// A terminal folder is a project when it is a git repository. Folders that still exist but
+/// aren't one (home, ~/projects, /tmp) are not; a folder that is gone (another machine, deleted
+/// since) keeps counting, since the tracker records the git root when there is one.
+fn is_project_dir(path: &str) -> bool {
+    let p = match path.strip_prefix('~') {
+        Some(rest) => crate::util::home().join(rest.trim_start_matches('/')),
+        None => std::path::PathBuf::from(path),
+    };
+    !p.is_dir() || p.join(".git").exists()
+}
+
+impl<'a> ProjectRules<'a> {
+    fn new(cfg: &'a crate::config::Projects) -> Self {
+        ProjectRules {
+            cfg,
+            seen: Default::default(),
+        }
+    }
+
     fn is_editor(&self, s: &Subject) -> bool {
         self.cfg
             .editors
@@ -238,20 +258,31 @@ impl ProjectRules<'_> {
             .any(|e| e.eq_ignore_ascii_case(&s.app) || e.eq_ignore_ascii_case(&s.app_name))
     }
 
-    /// (key, display name) for a terminal or agent folder; None for ignored folders.
+    /// (key, display name) for a terminal or agent folder; None when it isn't a project.
     fn of_path(&self, path: &str) -> Option<(String, String)> {
         let path = path.trim().trim_end_matches('/');
-        if path.is_empty()
-            || self
-                .cfg
-                .ignore
-                .iter()
-                .any(|i| i.trim().trim_end_matches('/') == path)
-        {
+        if path.is_empty() {
             return None;
         }
         let name = path.rsplit('/').next().unwrap_or(path);
-        Some(self.alias(name, path))
+        // A rename always counts (you named it); otherwise ignored and non-git folders don't.
+        if let Some(hit) = self.aliased(name, path) {
+            return Some(hit);
+        }
+        if self
+            .cfg
+            .ignore
+            .iter()
+            .any(|i| i.trim().trim_end_matches('/') == path)
+        {
+            return None;
+        }
+        let project = *self
+            .seen
+            .borrow_mut()
+            .entry(path.to_string())
+            .or_insert_with(|| is_project_dir(path));
+        project.then(|| (name.to_lowercase(), name.to_string()))
     }
 
     /// (key, display name) for a bare project name (from an editor title).
@@ -264,16 +295,17 @@ impl ProjectRules<'_> {
     }
 
     fn alias(&self, name: &str, path: &str) -> (String, String) {
-        for line in &self.cfg.aliases {
-            if let Some((from, to)) = line.split_once('=') {
-                let from = from.trim().trim_end_matches('/');
-                if from == path || from.eq_ignore_ascii_case(name) {
-                    let to = to.trim();
-                    return (to.to_lowercase(), to.to_string());
-                }
-            }
-        }
-        (name.to_lowercase(), name.to_string())
+        self.aliased(name, path)
+            .unwrap_or_else(|| (name.to_lowercase(), name.to_string()))
+    }
+
+    fn aliased(&self, name: &str, path: &str) -> Option<(String, String)> {
+        self.cfg.aliases.iter().find_map(|line| {
+            let (from, to) = line.split_once('=')?;
+            let from = from.trim().trim_end_matches('/');
+            (from == path || from.eq_ignore_ascii_case(name))
+                .then(|| (to.trim().to_lowercase(), to.trim().to_string()))
+        })
     }
 }
 
@@ -952,7 +984,7 @@ fn sessions_and_stats(
     hourly: &[Times],
     hours: &[Hour],
 ) -> (Vec<Session>, DayStats) {
-    let rules = ProjectRules { cfg: &cfg.projects };
+    let rules = ProjectRules::new(&cfg.projects);
     let known = known_projects(&rules, spans, subjects);
     let gap = cfg.insights.session_gap_secs as i64 * 1000;
     let mut focus: Vec<&Span> = spans.iter().filter(|s| s.kind == Kind::Focus).collect();
@@ -1102,7 +1134,7 @@ fn projects_of(
     subjects: &HashMap<i64, Subject>,
     state: &[State],
 ) -> Vec<ProjectRow> {
-    let rules = ProjectRules { cfg: &cfg.projects };
+    let rules = ProjectRules::new(&cfg.projects);
     let known = known_projects(&rules, spans, subjects);
     let tools: HashSet<&str> = cfg.agents.tools.iter().map(|t| t.id.as_str()).collect();
     let mut rows: HashMap<String, ProjectRow> = HashMap::new();
@@ -1471,7 +1503,7 @@ fn store_rollups(conn: &Connection, hash: &str, rows: &[(String, String)]) -> Re
 }
 
 /// Bump when DayRollup or the classification changes shape.
-const ROLLUP_SCHEMA: u32 = 3;
+const ROLLUP_SCHEMA: u32 = 4;
 
 /// Hash of everything that changes how a day is classified (for the rollup cache). The app
 /// version is part of it: a new release may count differently, so it starts a fresh cache.
@@ -1497,6 +1529,40 @@ pub fn settings_hash(cfg: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_git_folders_are_projects() {
+        let dir = std::env::temp_dir().join(format!("at-proj-{}", std::process::id()));
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let cfg = crate::config::Projects::default();
+        let rules = ProjectRules::new(&cfg);
+        let p = |x: &std::path::Path| x.to_string_lossy().into_owned();
+        assert_eq!(
+            rules.of_path(&p(&repo)).map(|x| x.1).as_deref(),
+            Some("repo")
+        );
+        assert_eq!(
+            rules.of_path(&p(&dir)),
+            None,
+            "a plain folder is not a project"
+        );
+        assert!(
+            rules.of_path("/no/such/place/elsewhere").is_some(),
+            "gone folders still count"
+        );
+        assert_eq!(rules.of_path("~"), None);
+        let named = crate::config::Projects {
+            aliases: vec![format!("{}=Scratch", p(&dir))],
+            ..Default::default()
+        };
+        let rules = ProjectRules::new(&named);
+        assert_eq!(
+            rules.of_path(&p(&dir)).map(|x| x.1).as_deref(),
+            Some("Scratch")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn editor_titles_name_projects() {

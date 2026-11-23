@@ -264,7 +264,7 @@ impl Default for Projects {
                 "helix",
             ]),
             aliases: vec![],
-            ignore: v(&["~", "/", "/tmp"]),
+            ignore: vec![],
         }
     }
 }
