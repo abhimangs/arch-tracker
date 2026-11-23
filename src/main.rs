@@ -170,10 +170,15 @@ fn real_main() -> Result<()> {
         }
         Cmd::Export { from, to, format } => {
             let to = to.unwrap_or_else(|| from.clone());
+            let format = export::Format::parse(&format)?;
+            let range = export::bounds(&from, &to)?;
             let conn = store::open_readonly(&util::db_path())?;
-            let (_, body) = export::export(&conn, &from, &to, &format)?;
-            print!("{body}");
-            Ok(())
+            let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+            match export::write(&conn, range, format, &mut out) {
+                // Piped into head or similar: stopping early is fine.
+                Err(e) if is_broken_pipe(&e) => Ok(()),
+                r => r,
+            }
         }
         Cmd::Resume => {
             block_on(ipc::call(&ipc::Request::Resume))?;
@@ -205,6 +210,13 @@ async fn serve(db: std::path::PathBuf, port: Option<u16>) -> Result<()> {
     );
     tokio::signal::ctrl_c().await?;
     Ok(())
+}
+
+fn is_broken_pipe(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+    })
 }
 
 fn block_on<F: std::future::Future>(f: F) -> F::Output {

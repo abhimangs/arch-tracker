@@ -8,10 +8,12 @@ pub mod auth;
 
 use crate::config::{self, Config};
 use crate::daemon::{Event, SharedRef};
+use crate::export;
 use crate::ipc::Request;
 use crate::report;
 use crate::util;
 use anyhow::Result;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, Request as HttpRequest, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -22,7 +24,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc::UnboundedSender, oneshot};
+use tokio::sync::{mpsc, mpsc::UnboundedSender, oneshot};
 
 #[derive(rust_embed::Embed)]
 #[folder = "web-ui/"]
@@ -563,33 +565,91 @@ struct ExportQ {
 }
 
 async fn api_export(State(ctx): State<Ctx>, Query(q): Query<ExportQ>) -> Response {
-    let format = q.format.unwrap_or_else(|| "csv".into());
+    let format = match export::Format::parse(q.format.as_deref().unwrap_or("csv")) {
+        Ok(f) => f,
+        Err(e) => return err_field(StatusCode::BAD_REQUEST, format!("{e:#}"), "format"),
+    };
+    let range = match export::bounds(&q.from, &q.to) {
+        Ok(r) => r,
+        Err(e) => return err_field(StatusCode::BAD_REQUEST, format!("{e:#}"), "from"),
+    };
     let path = ctx.web.db.clone();
     let viewer = ctx.web.viewer;
-    let res = tokio::task::spawn_blocking(move || {
-        crate::export::export(&db(&path, viewer)?, &q.from, &q.to, &format)
-    })
-    .await;
-    match res {
-        Ok(Ok((ct, body))) => {
-            let name = if ct.contains("csv") {
-                "arch-tracker.csv"
-            } else {
-                "arch-tracker.json"
-            };
-            (
-                [
-                    (header::CONTENT_TYPE, ct.to_string()),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        format!("attachment; filename=\"{name}\""),
-                    ),
-                ],
-                body,
-            )
-                .into_response()
+    // Rows travel from a blocking task to the response through a small bounded channel, so a
+    // year of data is never held in memory (the unit's MemoryMax is 64 MB).
+    let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(4);
+    let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
+    tokio::task::spawn_blocking(move || {
+        let conn = match db(&path, viewer) {
+            Ok(c) => {
+                let _ = ready_tx.send(Ok(()));
+                c
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(format!("{e:#}")));
+                return;
+            }
+        };
+        let mut out = ChunkWriter {
+            tx: tx.clone(),
+            buf: Vec::with_capacity(CHUNK),
+        };
+        if let Err(e) = export::write(&conn, range, format, &mut out) {
+            // Ends the download as failed (unless the browser already went away).
+            let _ = tx.blocking_send(Err(std::io::Error::other(format!("{e:#}"))));
         }
-        Ok(Err(e)) => err(StatusCode::BAD_REQUEST, format!("{e:#}")),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    });
+    match ready_rx.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "The export stopped."),
+    }
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|chunk| (chunk, rx))
+    });
+    (
+        [
+            (header::CONTENT_TYPE, format.content_type().to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", format.file_name()),
+            ),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response()
+}
+
+const CHUNK: usize = 64 * 1024;
+
+/// io::Write that hands 64 KiB chunks to the response stream, waiting while the channel is full.
+struct ChunkWriter {
+    tx: mpsc::Sender<std::io::Result<Bytes>>,
+    buf: Vec<u8>,
+}
+
+impl ChunkWriter {
+    fn send(&mut self) -> std::io::Result<()> {
+        let chunk = std::mem::replace(&mut self.buf, Vec::with_capacity(CHUNK));
+        self.tx
+            .blocking_send(Ok(Bytes::from(chunk)))
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "download cancelled"))
+    }
+}
+
+impl std::io::Write for ChunkWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        if self.buf.len() >= CHUNK {
+            self.send()?;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        self.send()
     }
 }
