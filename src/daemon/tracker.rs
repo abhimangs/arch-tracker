@@ -912,15 +912,23 @@ impl Tracker {
         self.ledger.reconcile(Kind::Visible, &visible_ids, now);
         self.ledger.reconcile(Kind::MediaVisible, &media_ids, now);
         self.ledger.reconcile(Kind::BgAudio, &bg_ids, now);
-        let busy: Vec<Subject> = self
-            .agents
-            .iter()
-            .filter(|a| a.busy)
-            .filter_map(|a| self.apply_privacy(a.subject.clone()))
-            .collect();
+        // Nothing works or runs while the machine sleeps, and a pause stops all recording.
+        let busy: Vec<Subject> = if paused || suspended {
+            vec![]
+        } else {
+            self.agents
+                .iter()
+                .filter(|a| a.busy)
+                .filter_map(|a| self.apply_privacy(a.subject.clone()))
+                .collect()
+        };
         let busy_ids = self.ids(&busy);
         self.ledger.reconcile(Kind::AgentBusy, &busy_ids, now);
-        let running = self.running.clone();
+        let running = if paused || suspended {
+            vec![]
+        } else {
+            self.running.clone()
+        };
         let running_ids = self.ids(&running);
         self.ledger.reconcile(Kind::Running, &running_ids, now);
         self.focus = focus;
