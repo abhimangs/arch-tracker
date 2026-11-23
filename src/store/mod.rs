@@ -4,6 +4,7 @@ pub mod ledger;
 
 use crate::model::{Kind, Span, Subject};
 use anyhow::{Context, Result};
+use ledger::Ledger;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::collections::HashMap;
 use std::path::Path;
@@ -13,6 +14,10 @@ const SCHEMA_VERSION: i64 = 1;
 pub struct Store {
     pub conn: Connection,
     subjects: HashMap<Subject, i64>,
+    /// Subjects that already have an id but are written by the next flush, in the same
+    /// transaction as the spans that use them (the daemon is the only writer of subjects).
+    new_subjects: Vec<(i64, Subject)>,
+    next_id: i64,
 }
 
 impl Store {
@@ -25,38 +30,76 @@ impl Store {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&conn)?;
+        let max: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM subjects", [], |r| {
+            r.get(0)
+        })?;
         Ok(Store {
             conn,
             subjects: HashMap::new(),
+            new_subjects: vec![],
+            next_id: max + 1,
         })
     }
 
-    /// Returns the id of a subject, inserting it the first time it is seen.
+    /// Returns the id of a subject. A subject seen for the first time gets the next free id
+    /// right away and is written by the next flush (no write on the hot path).
     pub fn subject_id(&mut self, s: &Subject) -> Result<i64> {
         if let Some(id) = self.subjects.get(s) {
             return Ok(*id);
         }
-        let conn = &self.conn;
-        conn.execute(
-            "INSERT OR IGNORE INTO subjects(app, app_name, title, host, private, program, project)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                s.app, s.app_name, s.title, s.host, s.private, s.program, s.project
-            ],
-        )?;
-        let id: i64 = conn.query_row(
-            "SELECT id FROM subjects WHERE app=?1 AND app_name=?2 AND title=?3 AND host=?4
-             AND private=?5 AND program=?6 AND project=?7",
-            params![
-                s.app, s.app_name, s.title, s.host, s.private, s.program, s.project
-            ],
-            |r| r.get(0),
-        )?;
+        let found: Option<i64> = self
+            .conn
+            .prepare_cached(
+                "SELECT id FROM subjects WHERE app=?1 AND app_name=?2 AND title=?3 AND host=?4
+                 AND private=?5 AND program=?6 AND project=?7",
+            )?
+            .query_row(
+                params![
+                    s.app, s.app_name, s.title, s.host, s.private, s.program, s.project
+                ],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let id = match found {
+            Some(id) => id,
+            None => {
+                let id = self.next_id;
+                self.next_id += 1;
+                self.new_subjects.push((id, s.clone()));
+                id
+            }
+        };
         if self.subjects.len() > 20_000 {
             self.subjects.clear();
+            // Unwritten subjects must stay findable: they are not in the database yet.
+            for (id, s) in &self.new_subjects {
+                self.subjects.insert(s.clone(), *id);
+            }
         }
         self.subjects.insert(s.clone(), id);
         Ok(id)
+    }
+
+    /// Writes new subjects and the ledger's spans in one transaction.
+    pub fn flush(&mut self, ledger: &mut Ledger, now: i64) -> Result<()> {
+        let new = &self.new_subjects;
+        ledger.flush_with(&mut self.conn, now, |tx| {
+            let mut ins = tx.prepare_cached(
+                "INSERT OR IGNORE INTO subjects(id, app, app_name, title, host, private, program,
+                 project) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for (id, s) in new {
+                let n = ins.execute(params![
+                    id, s.app, s.app_name, s.title, s.host, s.private, s.program, s.project
+                ])?;
+                if n == 0 {
+                    tracing::warn!("subject {id} was already stored by someone else");
+                }
+            }
+            Ok(())
+        })?;
+        self.new_subjects.clear();
+        Ok(())
     }
 }
 
@@ -162,4 +205,50 @@ pub fn subjects_by_id(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Sub
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path() -> std::path::PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("at-store-{}-{n}", std::process::id()))
+            .join("t.db")
+    }
+
+    #[test]
+    fn new_subjects_are_written_with_the_flush() {
+        let p = path();
+        let mut st = Store::open(&p).unwrap();
+        let a = Subject::app("editor", "Editor");
+        let b = Subject::app("viewer", "Viewer");
+        let ia = st.subject_id(&a).unwrap();
+        let ib = st.subject_id(&b).unwrap();
+        assert_ne!(ia, ib);
+        assert_eq!(st.subject_id(&a).unwrap(), ia);
+        let count = |st: &Store| -> i64 {
+            st.conn
+                .query_row("SELECT COUNT(*) FROM subjects", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(count(&st), 0, "nothing written before the flush");
+        let mut l = Ledger::default();
+        l.reconcile(Kind::Focus, &[ia].into_iter().collect(), 1_000);
+        st.flush(&mut l, 5_000).unwrap();
+        assert_eq!(count(&st), 2);
+        let got = subjects_by_id(&st.conn, &[ia, ib]).unwrap();
+        assert_eq!(got[&ia], a);
+        assert_eq!(got[&ib], b);
+        drop(st);
+        // A restarted daemon finds stored subjects and continues after the highest id.
+        let mut st = Store::open(&p).unwrap();
+        assert_eq!(st.subject_id(&b).unwrap(), ib);
+        let c = st.subject_id(&Subject::app("other", "Other")).unwrap();
+        assert!(c > ia.max(ib));
+    }
 }

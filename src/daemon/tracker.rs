@@ -405,7 +405,7 @@ impl Tracker {
     }
 
     fn flush(&mut self, now: i64) {
-        if let Err(e) = self.ledger.flush(&mut self.store.conn, now) {
+        if let Err(e) = self.store.flush(&mut self.ledger, now) {
             tracing::error!("database write failed: {e:#}");
         }
         self.last_flush = Instant::now();

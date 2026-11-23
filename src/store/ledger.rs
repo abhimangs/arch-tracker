@@ -168,9 +168,21 @@ impl Ledger {
     }
 
     /// Writes closed spans and refreshes open ones in one transaction.
+    #[cfg(test)]
     pub fn flush(&mut self, conn: &mut Connection, now: i64) -> Result<()> {
+        self.flush_with(conn, now, |_| Ok(()))
+    }
+
+    /// Like flush, running before (e.g. subject inserts) first inside the same transaction.
+    pub fn flush_with(
+        &mut self,
+        conn: &mut Connection,
+        now: i64,
+        before: impl FnOnce(&Transaction) -> Result<()>,
+    ) -> Result<()> {
         self.split_due(now);
         let tx = conn.transaction()?;
+        before(&tx)?;
         let rows = self.write(&tx, now)?;
         tx.commit()?;
         self.committed(rows);
@@ -180,7 +192,7 @@ impl Ledger {
     /// Writes pending spans and open rows inside tx. Nothing in the ledger changes here: the
     /// row ids of newly inserted open spans are returned and only applied (with the pending list
     /// cleared) by committed(), so a failed commit loses nothing and leaves no stale row ids.
-    pub fn write(&self, tx: &Transaction, now: i64) -> Result<Vec<((Kind, i64), i64)>> {
+    fn write(&self, tx: &Transaction, now: i64) -> Result<Vec<((Kind, i64), i64)>> {
         let mut ins = tx.prepare_cached(
             "INSERT INTO spans(kind, subject_id, start_ms, end_ms) VALUES (?1, ?2, ?3, ?4)",
         )?;
@@ -217,7 +229,7 @@ impl Ledger {
     }
 
     /// Call after the transaction given to write() committed.
-    pub fn committed(&mut self, rows: Vec<((Kind, i64), i64)>) {
+    fn committed(&mut self, rows: Vec<((Kind, i64), i64)>) {
         self.pending.clear();
         for (key, row) in rows {
             if let Some(o) = self.open.get_mut(&key) {
