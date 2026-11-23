@@ -115,6 +115,17 @@ struct TabPick {
     split: Vec<(String, String)>,
 }
 
+/// Meta key holding an active pause: "indefinite" or the end in ms.
+const PAUSE_KEY: &str = "paused_until";
+
+/// Reads a persisted pause (dropping one that has already ended).
+fn stored_pause(store: &Store, now: i64) -> Option<Option<i64>> {
+    match store.meta(PAUSE_KEY)?.as_str() {
+        "indefinite" => Some(None),
+        v => v.parse::<i64>().ok().filter(|t| *t > now).map(Some),
+    }
+}
+
 /// An extension connection is alive while it keeps sending (heartbeat every 20 s).
 const EXT_ALIVE_MS: i64 = 60_000;
 
@@ -168,6 +179,10 @@ pub struct Tracker {
 impl Tracker {
     pub fn new(store: Store, cfg: Config, shared: SharedRef, conn: zbus::Connection) -> Self {
         let now = now_ms();
+        let paused = stored_pause(&store, now);
+        if paused.is_some() {
+            tracing::info!("still paused (until {:?})", paused.flatten());
+        }
         Tracker {
             store,
             ledger: Ledger::default(),
@@ -178,7 +193,7 @@ impl Tracker {
             desktop: DesktopIndex::load(),
             desktop_loaded: Instant::now(),
             started_ms: now,
-            paused: None,
+            paused,
             kwin: None,
             // Grace period: the first snapshot arrives right after the script loads.
             kwin_last: now,
@@ -345,7 +360,7 @@ impl Tracker {
             && now >= until
         {
             tracing::info!("pause expired");
-            self.paused = None;
+            self.set_paused(None);
         }
         self.mic = media::mic_active();
         if self.sys_conn.is_none() {
@@ -411,16 +426,25 @@ impl Tracker {
         self.last_flush = Instant::now();
     }
 
+    /// Changes the pause state and persists it, so "pause until resumed" survives restarts.
+    fn set_paused(&mut self, p: Option<Option<i64>>) {
+        self.paused = p;
+        let v = p.map(|u| u.map_or("indefinite".to_string(), |t| t.to_string()));
+        if let Err(e) = self.store.set_meta(PAUSE_KEY, v.as_deref()) {
+            tracing::warn!("could not save the pause state: {e:#}");
+        }
+    }
+
     fn control(&mut self, req: Request, now: i64) -> serde_json::Value {
         match req {
             Request::Status => self.status_json(now),
             Request::Pause { until_ms } => {
-                self.paused = Some(until_ms);
+                self.set_paused(Some(until_ms));
                 tracing::info!("paused until {:?}", until_ms);
                 json!({"ok": true, "paused_until": until_ms})
             }
             Request::Resume => {
-                self.paused = None;
+                self.set_paused(None);
                 tracing::info!("resumed");
                 json!({"ok": true})
             }
@@ -988,6 +1012,21 @@ mod tests {
         let m = util::next_local_midnight(now);
         assert!(m > now);
         assert!(m - now <= 25 * 3_600_000);
+    }
+
+    #[test]
+    fn pause_survives_restart() {
+        let dir =
+            std::env::temp_dir().join(format!("at-pause-{}-{}", std::process::id(), now_ms()));
+        let st = Store::open(&dir.join("t.db")).unwrap();
+        assert_eq!(stored_pause(&st, 1_000), None);
+        st.set_meta(PAUSE_KEY, Some("indefinite")).unwrap();
+        assert_eq!(stored_pause(&st, 1_000), Some(None));
+        st.set_meta(PAUSE_KEY, Some("5000")).unwrap();
+        assert_eq!(stored_pause(&st, 1_000), Some(Some(5_000)));
+        assert_eq!(stored_pause(&st, 6_000), None, "an ended pause is dropped");
+        st.set_meta(PAUSE_KEY, None).unwrap();
+        assert_eq!(stored_pause(&st, 1_000), None);
     }
 
     #[test]

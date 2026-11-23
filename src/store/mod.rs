@@ -80,6 +80,31 @@ impl Store {
         Ok(id)
     }
 
+    /// A value from the meta table.
+    pub fn meta(&self, key: &str) -> Option<String> {
+        self.conn
+            .query_row("SELECT value FROM meta WHERE key=?1", params![key], |r| {
+                r.get(0)
+            })
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// Sets (Some) or removes (None) a meta value.
+    pub fn set_meta(&self, key: &str, value: Option<&str>) -> Result<()> {
+        match value {
+            Some(v) => self.conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+                params![key, v],
+            )?,
+            None => self
+                .conn
+                .execute("DELETE FROM meta WHERE key=?1", params![key])?,
+        };
+        Ok(())
+    }
+
     /// Writes new subjects and the ledger's spans in one transaction.
     pub fn flush(&mut self, ledger: &mut Ledger, now: i64) -> Result<()> {
         let new = &self.new_subjects;
