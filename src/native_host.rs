@@ -3,6 +3,7 @@
 //! Firefox-family ones as "arch-tracker <manifest path> <add-on id>". Each message is forwarded
 //! as one JSON line to the daemon's ingest socket.
 
+use crate::setup::{GECKO_ID, NATIVE_HOST};
 use crate::sources::browser::MAX_MESSAGE;
 use crate::util;
 use anyhow::Result;
@@ -40,6 +41,20 @@ impl Daemon {
             self.sock = None;
         }
     }
+}
+
+/// The caller's origin if a browser started us as a native host: "chrome-extension://<id>/"
+/// (Chromium family) or the add-on ID (Firefox family, after the manifest path).
+pub fn origin_from_args(args: &[String]) -> Option<String> {
+    let first = args.get(1)?;
+    if first.starts_with("chrome-extension://") {
+        return Some(first.clone());
+    }
+    let second = args.get(2);
+    if second.is_some_and(|id| id == GECKO_ID) || first.ends_with(&format!("/{NATIVE_HOST}.json")) {
+        return Some(second.cloned().unwrap_or_default());
+    }
+    None
 }
 
 pub fn run(origin: &str) -> Result<()> {
@@ -93,6 +108,29 @@ mod tests {
             })
             .collect();
         (s, lines)
+    }
+
+    #[test]
+    fn origins() {
+        let o = |a: &[&str]| origin_from_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let chromium = "chrome-extension://ofgofljkhfmjkgklekeiajnkplaldokg/";
+        assert_eq!(o(&["arch-tracker", chromium]).as_deref(), Some(chromium));
+        let manifest = "/usr/lib/mozilla/native-messaging-hosts/dev.archtracker.native.json";
+        assert_eq!(
+            o(&["arch-tracker", manifest, GECKO_ID]).as_deref(),
+            Some(GECKO_ID)
+        );
+        assert_eq!(
+            o(&["arch-tracker", "/elsewhere/host.json", GECKO_ID]).as_deref(),
+            Some(GECKO_ID)
+        );
+        assert_eq!(
+            o(&["arch-tracker", manifest, "other@addon"]).as_deref(),
+            Some("other@addon")
+        );
+        assert_eq!(o(&["arch-tracker"]), None);
+        assert_eq!(o(&["arch-tracker", "status", "--json"]), None);
+        assert_eq!(o(&["arch-tracker", "export", "--from", "2026-01-01"]), None);
     }
 
     #[test]

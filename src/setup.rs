@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 pub const EXTENSION_ID: &str = "ofgofljkhfmjkgklekeiajnkplaldokg";
 pub const NATIVE_HOST: &str = "dev.archtracker.native";
+/// The Firefox add-on ID (browser_specific_settings.gecko.id in extension/manifest.firefox.json).
+pub const GECKO_ID: &str = "arch-tracker@abhimangs.github.io";
 const MANIFEST: &str = include_str!("../extension/manifest.json");
 const BACKGROUND: &str = include_str!("../extension/background.js");
 

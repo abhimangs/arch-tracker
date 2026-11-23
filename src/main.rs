@@ -111,11 +111,12 @@ fn stderr_is_journal() -> bool {
 }
 
 fn real_main() -> Result<()> {
-    // Browsers start native hosts as "<path> chrome-extension://<id>/".
-    if let Some(origin) = std::env::args()
-        .nth(1)
-        .filter(|a| a.starts_with("chrome-extension://"))
-    {
+    // Browsers start native hosts as "<path> chrome-extension://<id>/" (Chromium family) or
+    // "<path> <manifest path> <add-on id>" (Firefox family).
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    if let Some(origin) = native_host::origin_from_args(&args) {
         return native_host::run(&origin);
     }
     let cli = Cli::parse();
