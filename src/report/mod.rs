@@ -137,6 +137,14 @@ pub struct Totals {
     pub agent_busy: i64,
 }
 
+/// One hour of the local clock. A day has 24, or 23 / 25 when the clocks change.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Hour {
+    pub start_ms: i64,
+    /// Local time it starts at, "HH:MM".
+    pub label: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct DayReport {
     pub date: String,
@@ -150,8 +158,31 @@ pub struct DayReport {
     pub agents: Vec<AgentRow>,
     pub background_audio: Vec<SimpleRow>,
     pub running: Vec<SimpleRow>,
+    /// Time per local hour; hourly[i] belongs to hours[i].
     pub hourly: Vec<Times>,
+    pub hours: Vec<Hour>,
     pub timeline: Vec<Bucket>,
+}
+
+/// The local clock hours in [ds, de). Steps to the next hour boundary on the local clock, so a
+/// DST change skips or repeats an hour (and a half-hour shift yields a short hour).
+pub fn hour_marks(ds: i64, de: i64, tz: &jiff::tz::TimeZone) -> Vec<Hour> {
+    let mut out = Vec::new();
+    let mut t = ds;
+    while t < de && out.len() < 50 {
+        let Ok(ts) = jiff::Timestamp::from_millisecond(t) else {
+            break;
+        };
+        let dt = tz.to_datetime(ts);
+        out.push(Hour {
+            start_ms: t,
+            label: format!("{:02}:{:02}", dt.hour(), dt.minute()),
+        });
+        let into_hour =
+            (dt.minute() as i64 * 60 + dt.second() as i64) * 1000 + dt.millisecond() as i64;
+        t += 3_600_000 - into_hour;
+    }
+    out
 }
 
 /// A request the caller got wrong (a bad date, a reversed range): the dashboard answers 400.
@@ -424,6 +455,19 @@ pub fn compute(
     spans: &[Span],
     subjects: &HashMap<i64, Subject>,
 ) -> DayReport {
+    let tz = jiff::tz::TimeZone::system();
+    compute_in(cfg, date, ds, de, spans, subjects, &tz)
+}
+
+fn compute_in(
+    cfg: &Config,
+    date: &str,
+    ds: i64,
+    de: i64,
+    spans: &[Span],
+    subjects: &HashMap<i64, Subject>,
+    tz: &jiff::tz::TimeZone,
+) -> DayReport {
     let rules = Rules::from(cfg);
     let state = classify(spans, ds, de, &rules);
     let n = state.len();
@@ -447,7 +491,13 @@ pub fn compute(
     let mut agents: HashMap<(String, String), AgentRow> = HashMap::new();
     let mut bg: HashMap<(String, String), i64> = HashMap::new();
     let mut running: HashMap<String, i64> = HashMap::new();
-    let mut hourly = vec![Times::default(); 24];
+    let hours = hour_marks(ds, de, tz);
+    let hour_secs: Vec<usize> = hours
+        .iter()
+        .map(|h| ((h.start_ms - ds) / 1000) as usize)
+        .collect();
+    let hour_of = |i: usize| hour_secs.partition_point(|&s| s <= i).saturating_sub(1);
+    let mut hourly = vec![Times::default(); hours.len().max(1)];
     // timeline: per bucket, counted seconds per subject and state counts
     let nb = n.div_ceil(BUCKET_SECS);
     let mut bucket_subj: Vec<HashMap<i64, i64>> = vec![HashMap::new(); nb];
@@ -471,7 +521,7 @@ pub fn compute(
                     match st {
                         State::Idle => totals.idle_removed += 1,
                         State::Active | State::Passive | State::Call => {
-                            hourly[(i / 3600).min(23)].add(*st, 1);
+                            hourly[hour_of(i)].add(*st, 1);
                             *bucket_subj[i / BUCKET_SECS].entry(s.subject).or_default() += 1;
                         }
                         _ => {}
@@ -677,6 +727,7 @@ pub fn compute(
         background_audio,
         running,
         hourly,
+        hours,
         timeline,
     }
 }
@@ -1079,6 +1130,57 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(categorize(&cats, &s).unwrap().name, "Development");
+    }
+
+    fn local_day(tz: &jiff::tz::TimeZone, y: i16, m: i8, d: i8) -> (i64, i64) {
+        let day = jiff::civil::date(y, m, d);
+        let ms = |d: jiff::civil::Date| {
+            d.to_zoned_datetime(tz.clone())
+                .unwrap()
+                .timestamp()
+                .as_millisecond()
+        };
+        (ms(day), ms(day.tomorrow().unwrap()))
+    }
+
+    #[test]
+    fn hours_follow_the_local_clock_on_dst_days() {
+        let tz = jiff::tz::TimeZone::posix("CET-1CEST,M3.5.0,M10.5.0/3").unwrap();
+        let labels = |(ds, de): (i64, i64)| -> Vec<String> {
+            hour_marks(ds, de, &tz)
+                .into_iter()
+                .map(|h| h.label)
+                .collect()
+        };
+        let normal = labels(local_day(&tz, 2026, 6, 1));
+        assert_eq!(normal.len(), 24);
+        assert_eq!(
+            (normal[0].as_str(), normal[23].as_str()),
+            ("00:00", "23:00")
+        );
+        let spring = labels(local_day(&tz, 2026, 3, 29));
+        assert_eq!(spring.len(), 23);
+        assert_eq!(&spring[..3], ["00:00", "01:00", "03:00"]);
+        let autumn = labels(local_day(&tz, 2026, 10, 25));
+        assert_eq!(autumn.len(), 25);
+        assert_eq!(&autumn[1..5], ["01:00", "02:00", "02:00", "03:00"]);
+
+        // Focus from 03:00 to 04:00 on the short day lands in the "03:00" hour.
+        let (ds, de) = local_day(&tz, 2026, 3, 29);
+        let mut subjects = HashMap::new();
+        subjects.insert(1, Subject::app("editor", "Editor"));
+        let three = hour_marks(ds, de, &tz)[2].start_ms;
+        let spans = vec![Span {
+            kind: Kind::Focus,
+            subject: 1,
+            start: three,
+            end: three + H,
+        }];
+        let r = compute_in(&Config::default(), "x", ds, de, &spans, &subjects, &tz);
+        assert_eq!(r.hourly.len(), 23);
+        assert_eq!(r.hours[2].label, "03:00");
+        assert_eq!(r.hourly[2].active, 3600);
+        assert_eq!(r.hourly.iter().map(|t| t.total()).sum::<i64>(), 3600);
     }
 
     #[test]

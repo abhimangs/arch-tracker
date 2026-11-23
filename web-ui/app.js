@@ -173,10 +173,13 @@
       const pct = ((Date.now() - d.start_ms) / span) * 100;
       if (pct >= 0 && pct <= 100) needle = `<span class="needle" style="left:${pct.toFixed(2)}%" title="Now"></span>`;
     }
-    const hours = [];
-    for (let h = 0; h <= 24; h += 3) {
-      hours.push(`<span style="left:${((h * 3600000) / span) * 100}%">${pad(h % 24 === 0 && h ? 24 : h)}:00</span>`);
-    }
+    // Labels come from the server's local-clock hours: a day when the clocks change has 23 or 25.
+    const marks = d.hours && d.hours.length ? d.hours : Array.from({ length: 24 }, (_, h) => ({ start_ms: d.start_ms + h * 3600000, label: `${pad(h)}:00` }));
+    const seen = new Set();
+    const hours = marks
+      .filter((h) => /^\d\d:00$/.test(h.label) && Number(h.label.slice(0, 2)) % 3 === 0 && !seen.has(h.label) && seen.add(h.label))
+      .map((h) => `<span style="left:${(((h.start_ms - d.start_ms) / span) * 100).toFixed(3)}%">${esc(h.label)}</span>`);
+    hours.push('<span style="left:100%">24:00</span>');
     const label = `Day ribbon: ${dur(d.totals.screen)} on screen, in five-minute bars.`;
     const rise = firstRibbon ? " rise" : "";
     firstRibbon = false;
