@@ -125,8 +125,21 @@
     });
     signedOut(r);
     const body = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(body.error || `The tracker answered ${r.status}.`);
+    if (!r.ok) {
+      const err = new Error(body.error || `The tracker answered ${r.status}.`);
+      err.field = body.field;
+      throw err;
+    }
     return body;
+  }
+
+  /** A selector that finds the focused element again after a redraw. */
+  function focusKey() {
+    const a = document.activeElement;
+    if (!a || !view.contains(a)) return null;
+    if (a.id) return `#${CSS.escape(a.id)}`;
+    const row = a.closest(".row[data-id]");
+    return row ? `.row[data-id="${CSS.escape(row.dataset.id)}"] .rh` : null;
   }
 
   const errorHtml = (e) =>
@@ -239,7 +252,7 @@
     const label = `Day ribbon: ${dur(d.totals.screen)} on screen, in five-minute bars.`;
     const rise = firstRibbon ? " rise" : "";
     firstRibbon = false;
-    return `<div class="ribbon${rise}" id="ribbon" role="img" aria-label="${esc(label)}">${bars}${needle}</div>
+    return `<div class="ribbon${rise}" id="ribbon" role="slider" tabindex="0" aria-label="${esc(label)} Use the arrow keys to read each bar." aria-valuemin="0" aria-valuemax="${d.timeline.length - 1}" aria-valuenow="0">${bars}${needle}</div>
       <div class="hours" aria-hidden="true">${hours.join("")}</div>
       <p class="readout" id="readout" aria-live="polite">Point at a bar to see what you were doing.</p>`;
   }
@@ -263,6 +276,26 @@
     rib.addEventListener("pointermove", (e) => {
       const t = e.target.closest("i[data-i]");
       if (t) show(Number(t.dataset.i));
+    });
+    // Keyboard: arrows step through five-minute bars, Home/End jump; the readout is announced.
+    let cur = null;
+    rib.addEventListener("keydown", (e) => {
+      const n = d.timeline.length;
+      if (!n) return;
+      const nowIdx = Math.min(n - 1, Math.max(0, Math.floor((Date.now() - d.start_ms) / 300000)));
+      const from = cur ?? nowIdx;
+      const to = { ArrowLeft: from - 1, ArrowRight: from + 1, Home: 0, End: n - 1, PageUp: from - 12, PageDown: from + 12 }[e.key];
+      if (to === undefined) return;
+      e.preventDefault();
+      cur = Math.max(0, Math.min(n - 1, to));
+      rib.setAttribute("aria-valuenow", String(cur));
+      show(cur);
+      rib.setAttribute("aria-valuetext", out.textContent);
+    });
+    rib.addEventListener("blur", () => {
+      cur = null;
+      if (last) last.classList.remove("hover");
+      last = null;
     });
     rib.addEventListener("pointerleave", () => {
       if (last) last.classList.remove("hover");
@@ -301,6 +334,7 @@
     const t = d.totals;
     const nothing = t.screen === 0;
     const y = window.scrollY;
+    const keep = focusKey();
     view.innerHTML = `
       <div class="dayhead">
         <h1>${isToday ? "Today, " : ""}${esc(dayLabel(date))}</h1>
@@ -334,6 +368,7 @@
       </div>`;
     if (quiet) window.scrollTo(0, y);
     bindRibbon(d);
+    if (keep) view.querySelector(keep)?.focus({ preventScroll: true });
     view.querySelectorAll("[data-go]").forEach((b) =>
       b.addEventListener("click", () => {
         const go = b.dataset.go;
@@ -532,11 +567,18 @@
       .map((x) => x.trim())
       .filter(Boolean);
 
+  /** A labelled row; the label points at the first form control and the hint describes it. */
   function field(label, hint, control) {
-    return `<div class="field"><label>${esc(label)}${hint ? `<span class="hint">${esc(hint)}</span>` : ""}</label><div>${control}</div></div>`;
+    const m = control.match(/<(?:input|select|textarea)\b[^>]*\bid="([^"]+)"/);
+    if (!m) {
+      return `<div class="field"><span class="flabel">${esc(label)}${hint ? `<span class="hint">${esc(hint)}</span>` : ""}</span><div>${control}</div></div>`;
+    }
+    const id = m[1];
+    const described = hint ? control.replace(`id="${id}"`, `id="${id}" aria-describedby="${id}-hint"`) : control;
+    return `<div class="field"><label for="${id}">${esc(label)}${hint ? `<span class="hint" id="${id}-hint">${esc(hint)}</span>` : ""}</label><div>${described}</div></div>`;
   }
   const num = (id, v, unit, min, max, step = 1) =>
-    `<div class="inline"><input type="number" id="${id}" value="${esc(v)}" min="${min}" max="${max}" step="${step}"><span class="unit">${esc(unit)}</span></div>`;
+    `<div class="inline"><input type="number" id="${id}" value="${esc(v)}" min="${min}" max="${max}" step="${step}" required><span class="unit">${esc(unit)}</span></div>`;
   const check = (id, v, text) => `<label class="check"><input type="checkbox" id="${id}" ${v ? "checked" : ""}>${esc(text)}</label>`;
 
   function catRow(c, i) {
@@ -690,8 +732,26 @@
     $("sform").addEventListener("submit", async (e) => {
       e.preventDefault();
       readCats();
+      // Check every number field in the page first, and say which one is wrong.
+      view.querySelectorAll("[aria-invalid]").forEach((x) => x.removeAttribute("aria-invalid"));
+      view.querySelectorAll(".ferr").forEach((x) => x.remove());
+      const bad = [...view.querySelectorAll('#sform input[type="number"]')].filter((x) => !x.checkValidity());
+      for (const x of bad) markInvalid(x, x.validationMessage);
+      if (bad.length) {
+        msg(`Fix ${bad.length === 1 ? "the highlighted field" : `the ${bad.length} highlighted fields`} first.`, "error");
+        bad[0].focus();
+        return;
+      }
       const n = (id) => Number($(id).value);
-      const next = structuredClone(c);
+      // Start from the config as it is now, so hand edits to settings this form doesn't show
+      // (title patterns, minimum pixels…) are kept.
+      let fresh = c;
+      try {
+        fresh = (await get("/api/settings")).config;
+      } catch {
+        // Keep the copy loaded with the page.
+      }
+      const next = structuredClone(fresh);
       next.idle.threshold_secs = Math.round(n("idle") * 60);
       next.idle.call_threshold_secs = Math.round(n("call") * 60);
       next.idle.media_keeps_active = $("media").checked;
@@ -729,8 +789,38 @@
         msg("Saved.");
       } catch (err) {
         msg(err.message, "error");
+        const el = err.field && FIELD_INPUT[err.field] && $(FIELD_INPUT[err.field]);
+        if (el) {
+          markInvalid(el, err.message);
+          el.focus();
+        }
       }
     });
+  }
+
+  // Server field names (config paths) to the inputs that edit them.
+  const FIELD_INPUT = {
+    "dashboard.port": "port",
+    "idle.threshold_secs": "idle",
+    "idle.call_threshold_secs": "call",
+    "general.sample_interval_secs": "sample",
+    "general.flush_interval_secs": "flush",
+    "visibility.min_fraction": "visfrac",
+    "agents.busy_cpu_percent": "acpu",
+    "agents.busy_child_cpu_percent": "akid",
+    "agents.busy_write_bytes": "awrite",
+    custom_css: "css",
+  };
+
+  function markInvalid(el, text) {
+    el.setAttribute("aria-invalid", "true");
+    const id = `${el.id}-err`;
+    const span = document.createElement("span");
+    span.className = "ferr";
+    span.id = id;
+    span.textContent = text;
+    (el.closest(".inline") || el).after(span);
+    el.setAttribute("aria-describedby", [el.getAttribute("aria-describedby"), id].filter(Boolean).join(" "));
   }
 
   // ---------- now strip + notices ----------
@@ -974,7 +1064,7 @@
   }
 
   document.addEventListener("keydown", (e) => {
-    if (e.target.closest("input, textarea, select, [contenteditable]") || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.target.closest("input, textarea, select, [contenteditable], #ribbon, .look-pop") || e.altKey || e.ctrlKey || e.metaKey) return;
     const h = location.hash;
     const onDay = h === "" || h === "#/today" || h.startsWith("#/day/");
     if (!onDay || !currentDay) return;

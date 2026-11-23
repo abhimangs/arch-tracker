@@ -621,3 +621,10 @@ input[type="color"] { width: 40px; height: 34px; padding: 2px; border: 1px solid
 .locked p { margin: 0; }
 .locked .sub, .locked-note { color: var(--mist); }
 .locked code { background: var(--raise); padding: 1px 6px; border-radius: 4px; }
+
+/* ---------- form errors and the keyboard ribbon ---------- */
+
+[aria-invalid="true"] { border-color: var(--bad, var(--shu)) !important; }
+.ferr { display: block; margin-top: 4px; color: var(--bad, var(--shu)); font-size: var(--s-1); }
+.flabel { display: block; }
+.ribbon:focus-visible { outline: 2px solid var(--shu); outline-offset: 4px; border-radius: 4px; }
