@@ -81,13 +81,14 @@ pub async fn scan(
             }
         }
     }
+    // Only active app units: a few rows instead of every unit of the session.
     if let Ok(reply) = conn
         .call_method(
             Some("org.freedesktop.systemd1"),
             "/org/freedesktop/systemd1",
             Some("org.freedesktop.systemd1.Manager"),
-            "ListUnits",
-            &(),
+            "ListUnitsByPatterns",
+            &(vec!["active"], vec!["app-*"]),
         )
         .await
         && let Ok(units) = reply.body().deserialize::<Vec<UnitRow>>()

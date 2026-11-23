@@ -107,7 +107,42 @@ async fn watch_sleep(tx: UnboundedSender<Event>) -> Result<()> {
 }
 
 /// logind's LockedHint for this user's graphical session (backup for the ScreenSaver signal).
-pub async fn locked_hint(sys: &Connection) -> Option<bool> {
+/// The session's object path is looked up once and cached: one round trip per call after that.
+#[derive(Default)]
+pub struct LockedHint {
+    session: Option<OwnedObjectPath>,
+}
+
+impl LockedHint {
+    pub async fn get(&mut self, sys: &Connection) -> Option<bool> {
+        if self.session.is_none() {
+            self.session = session_path(sys).await;
+        }
+        let path = self.session.as_ref()?;
+        let hint = sys
+            .call_method(
+                Some("org.freedesktop.login1"),
+                path.as_str(),
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &("org.freedesktop.login1.Session", "LockedHint"),
+            )
+            .await;
+        let hint = match hint {
+            Ok(h) => h,
+            Err(_) => {
+                // The session may be gone (new login): look it up again next time.
+                self.session = None;
+                return None;
+            }
+        };
+        let v: OwnedVariant = hint.body().deserialize().ok()?;
+        bool::try_from(v).ok()
+    }
+}
+
+/// Object path of this user's graphical (display) session.
+async fn session_path(sys: &Connection) -> Option<OwnedObjectPath> {
     let uid = unsafe { libc::getuid() };
     let user = sys
         .call_method(
@@ -132,16 +167,5 @@ pub async fn locked_hint(sys: &Connection) -> Option<bool> {
         .ok()?;
     let v: OwnedVariant = display.body().deserialize().ok()?;
     let (_, session_path): (String, OwnedObjectPath) = v.try_into().ok()?;
-    let hint = sys
-        .call_method(
-            Some("org.freedesktop.login1"),
-            session_path.as_str(),
-            Some("org.freedesktop.DBus.Properties"),
-            "Get",
-            &("org.freedesktop.login1.Session", "LockedHint"),
-        )
-        .await
-        .ok()?;
-    let v: OwnedVariant = hint.body().deserialize().ok()?;
-    bool::try_from(v).ok()
+    (session_path.as_str() != "/").then_some(session_path)
 }

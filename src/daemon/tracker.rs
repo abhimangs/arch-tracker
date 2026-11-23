@@ -137,6 +137,8 @@ const KWIN_RETRY_MAX_MS: i64 = 600_000;
 /// Upper bounds for one Plasma Browser Integration query and one running-apps scan.
 const PBI_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1_500);
 const RUNNING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Running apps are rescanned this often (not every tick).
+const RUNNING_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A terminal window whose title keeps changing is inspected at most this often.
 const TERM_MIN_GAP_MS: i64 = 2_000;
@@ -258,12 +260,15 @@ pub struct Tracker {
     players: Vec<Player>,
     mic: bool,
     sys_conn: Option<zbus::Connection>,
+    locked_hint: session::LockedHint,
     /// Per KWin window: (normalized caption when inspected, when, what runs inside).
     term_cache: HashMap<String, (String, i64, TermInfo)>,
     projects: Projects,
     agent_scanner: agents::Scanner,
     agents: Vec<agents::AgentState>,
     running: Vec<Subject>,
+    /// When running apps were last scanned (they change slowly; see RUNNING_EVERY).
+    running_at: Option<Instant>,
     ext: HashMap<u64, ExtConn>,
     pbi: Option<PbiState>,
     pbi_caption: String,
@@ -317,11 +322,13 @@ impl Tracker {
             players: vec![],
             mic: false,
             sys_conn: None,
+            locked_hint: Default::default(),
             term_cache: HashMap::new(),
             projects: Projects::default(),
             agent_scanner: agents::Scanner::default(),
             agents: vec![],
             running: vec![],
+            running_at: None,
             ext: HashMap::new(),
             pbi: None,
             pbi_caption: String::new(),
@@ -502,7 +509,7 @@ impl Tracker {
             self.sys_conn = util::system_bus().await.ok();
         }
         if let Some(sys) = &self.sys_conn
-            && let Some(hint) = session::locked_hint(sys).await
+            && let Some(hint) = self.locked_hint.get(sys).await
         {
             self.logind_locked = hint;
         }
@@ -521,27 +528,28 @@ impl Tracker {
                 .scan(&self.cfg.agents, &mut self.projects, p),
             None => vec![],
         };
-        self.running = if let Some(conn) = &self.conn
-            && self.cfg.general.track_running
-            && self.paused.is_none()
-            && !self.suspended
+        let scan_due = self.running_at.is_none_or(|t| t.elapsed() >= RUNNING_EVERY);
+        let tracking = self.cfg.general.track_running && self.paused.is_none() && !self.suspended;
+        if !tracking {
+            self.running.clear();
+            self.running_at = None;
+        } else if let Some(conn) = &self.conn
+            && scan_due
             && self.kwin.is_some()
         {
+            self.running_at = Some(Instant::now());
             let kwin = self
                 .kwin
                 .as_ref()
                 .filter(|_| now - self.kwin_last <= KWIN_STALE_MS);
             let scan = crate::sources::running::scan(conn, &self.desktop, kwin);
-            match tokio::time::timeout(RUNNING_TIMEOUT, scan).await {
-                Ok(apps) => apps
+            if let Ok(apps) = tokio::time::timeout(RUNNING_TIMEOUT, scan).await {
+                self.running = apps
                     .into_iter()
                     .filter_map(|(k, n)| self.apply_privacy(Subject::app(&k, &n)))
-                    .collect(),
-                Err(_) => std::mem::take(&mut self.running),
+                    .collect();
             }
-        } else {
-            vec![]
-        };
+        }
         // The KWin script re-sends every 60 s; silence means KWin restarted or dropped it.
         // Reload it, retrying with a growing delay until a snapshot arrives again.
         if now - self.kwin_last > KWIN_STALE_MS
