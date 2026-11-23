@@ -23,7 +23,16 @@ fn kind_name(k: Kind) -> &'static str {
     }
 }
 
+/// A CSV cell. Text that a spreadsheet would run as a formula (starting with = + - @, a tab or a
+/// carriage return) gets a leading apostrophe: page titles are untrusted.
 fn csv_field(s: &str) -> String {
+    let guarded;
+    let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        guarded = format!("'{s}");
+        guarded.as_str()
+    } else {
+        s
+    };
     if s.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
@@ -84,5 +93,23 @@ pub fn export(
             Ok(("text/csv; charset=utf-8", out))
         }
         other => bail!("unknown format {other:?} (use csv or json)"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csv_cells_never_start_a_formula() {
+        assert_eq!(csv_field("=HYPERLINK(\"x\")"), "\"'=HYPERLINK(\"\"x\"\")\"");
+        assert_eq!(csv_field("+1 new message"), "'+1 new message");
+        assert_eq!(csv_field("-2"), "'-2");
+        assert_eq!(csv_field("@everyone"), "'@everyone");
+        assert_eq!(csv_field("\tcmd"), "'\tcmd");
+        assert_eq!(csv_field("\rcmd"), "\"'\rcmd\"");
+        assert_eq!(csv_field("a, b"), "\"a, b\"");
+        assert_eq!(csv_field("plain title"), "plain title");
+        assert_eq!(csv_field(""), "");
     }
 }
