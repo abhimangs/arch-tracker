@@ -3,8 +3,13 @@
 // Paths, queries and anything from incognito windows are never sent.
 
 const HOST = "dev.archtracker.native";
+// A missing or crashing host is only reported later, through onDisconnect. So the backoff is
+// reset only once a port has stayed up this long; otherwise the browser would respawn a broken
+// host every second, forever.
+const STABLE_MS = 5000;
 let port = null;
 let retryMs = 1000;
+let retryTimer = null;
 let timer = null;
 
 function hostOf(url) {
@@ -55,22 +60,30 @@ function schedule() {
 }
 
 function connect() {
+  retryTimer = null;
+  let p;
   try {
-    port = chrome.runtime.connectNative(HOST);
+    p = chrome.runtime.connectNative(HOST);
   } catch {
     port = null;
     return reconnectLater();
   }
-  port.onDisconnect.addListener(() => {
-    port = null;
+  port = p;
+  const stable = setTimeout(() => {
+    if (port === p) retryMs = 1000;
+  }, STABLE_MS);
+  p.onDisconnect.addListener(() => {
+    clearTimeout(stable);
+    void chrome.runtime.lastError; // read it, or Chromium logs "Unchecked runtime.lastError"
+    if (port === p) port = null;
     reconnectLater();
   });
-  retryMs = 1000;
   schedule();
 }
 
 function reconnectLater() {
-  setTimeout(connect, retryMs);
+  if (retryTimer) return;
+  retryTimer = setTimeout(connect, retryMs);
   retryMs = Math.min(retryMs * 2, 60000);
 }
 
@@ -96,6 +109,6 @@ setInterval(() => {
 }, 20000);
 
 chrome.runtime.onStartup.addListener(() => {
-  if (!port) connect();
+  if (!port && !retryTimer) connect();
 });
 connect();
