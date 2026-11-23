@@ -14,7 +14,7 @@ use crate::store;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const BUCKET_SECS: usize = 300;
 
@@ -162,6 +162,176 @@ pub struct DayReport {
     pub hourly: Vec<Times>,
     pub hours: Vec<Hour>,
     pub timeline: Vec<Bucket>,
+    /// Stretches on one app, site or project, to the millisecond.
+    pub sessions: Vec<Session>,
+    pub stats: DayStats,
+    /// Coding time per project: terminals, editors and agents.
+    pub projects: Vec<ProjectRow>,
+}
+
+/// A stretch of focus on one thing (an app; a site in a browser; a program and project in a
+/// terminal; a project in an editor). Breaks shorter than insights.session_gap_secs don't end it.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Session {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub app: String,
+    pub app_name: String,
+    /// "site", "terminal", "editor" or "app".
+    pub kind: String,
+    /// Site host, terminal program, or empty.
+    pub detail: String,
+    pub project: String,
+    /// The title seen longest during the session (empty for private windows and terminals).
+    pub title: String,
+    pub category: String,
+    pub color: String,
+    #[serde(flatten)]
+    pub times: Times,
+    pub counted: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct DayStats {
+    pub sessions: usize,
+    /// Times the focused app changed (between counted sessions).
+    pub switches: usize,
+    pub longest: i64,
+    pub longest_app: String,
+    pub avg_session: i64,
+    /// Time in sessions of at least insights.deep_work_mins, and how many.
+    pub deep_work: i64,
+    pub deep_sessions: usize,
+    /// First and last counted moment of the day.
+    pub first_ms: Option<i64>,
+    pub last_ms: Option<i64>,
+    pub peak_hour: String,
+    pub goal_secs: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct ProjectRow {
+    pub key: String,
+    pub name: String,
+    /// Focused time in its terminals and editors.
+    pub total: i64,
+    pub terminal: i64,
+    pub editor: i64,
+    /// Time an agent worked on it, wherever you were.
+    pub agent_busy: i64,
+    /// Time you had an agent's terminal in front of you (part of terminal).
+    pub agent_focus: i64,
+    pub programs: Vec<TitleRow>,
+    pub editors: Vec<TitleRow>,
+}
+
+/// Project grouping rules from the config: aliases, ignored folders, editor apps.
+struct ProjectRules<'a> {
+    cfg: &'a crate::config::Projects,
+}
+
+impl ProjectRules<'_> {
+    fn is_editor(&self, s: &Subject) -> bool {
+        self.cfg
+            .editors
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(&s.app) || e.eq_ignore_ascii_case(&s.app_name))
+    }
+
+    /// (key, display name) for a terminal or agent folder; None for ignored folders.
+    fn of_path(&self, path: &str) -> Option<(String, String)> {
+        let path = path.trim().trim_end_matches('/');
+        if path.is_empty()
+            || self
+                .cfg
+                .ignore
+                .iter()
+                .any(|i| i.trim().trim_end_matches('/') == path)
+        {
+            return None;
+        }
+        let name = path.rsplit('/').next().unwrap_or(path);
+        Some(self.alias(name, path))
+    }
+
+    /// (key, display name) for a bare project name (from an editor title).
+    fn of_name(&self, name: &str) -> Option<(String, String)> {
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        Some(self.alias(name, name))
+    }
+
+    fn alias(&self, name: &str, path: &str) -> (String, String) {
+        for line in &self.cfg.aliases {
+            if let Some((from, to)) = line.split_once('=') {
+                let from = from.trim().trim_end_matches('/');
+                if from == path || from.eq_ignore_ascii_case(name) {
+                    let to = to.trim();
+                    return (to.to_lowercase(), to.to_string());
+                }
+            }
+        }
+        (name.to_lowercase(), name.to_string())
+    }
+}
+
+/// The project an editor window shows, from its title: "main.rs - arch-tracker - Visual Studio
+/// Code", "arch-tracker – main.rs" (JetBrains), "arch-tracker — src/main.rs" (Zed). A segment
+/// that names a project seen in a terminal wins; otherwise the last segment that is neither the
+/// editor's name nor a file.
+pub fn editor_project(title: &str, app_name: &str, known: &HashSet<String>) -> String {
+    let t = title.trim_start_matches(['●', '•', '*', ' ']);
+    let mut parts: Vec<&str> = vec![t];
+    for sep in [" - ", " — ", " – ", " | "] {
+        parts = parts.iter().flat_map(|p| p.split(sep)).collect();
+    }
+    let app = app_name.to_lowercase();
+    let brand = |s: &str| {
+        let l = s.to_lowercase();
+        l == app
+            || (!app.is_empty() && l.contains(&app))
+            || [
+                "visual studio code",
+                "code - oss",
+                "vscodium",
+                "cursor",
+                "windsurf",
+                "zed",
+                "kate",
+                "sublime text",
+                "intellij idea",
+                "pycharm",
+                "clion",
+                "rustrover",
+                "webstorm",
+                "goland",
+            ]
+            .iter()
+            .any(|b| l == *b)
+    };
+    let looks_like_file = |s: &str| {
+        s.contains('/')
+            || s.rsplit_once('.').is_some_and(|(stem, ext)| {
+                !stem.is_empty()
+                    && (1..=6).contains(&ext.len())
+                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            })
+    };
+    let segs: Vec<&str> = parts
+        .iter()
+        .map(|p| p.trim().trim_start_matches(['●', '•', '*', ' ']).trim())
+        .filter(|p| !p.is_empty() && !brand(p))
+        .collect();
+    if let Some(k) = segs.iter().find(|s| known.contains(&s.to_lowercase())) {
+        return k.to_string();
+    }
+    segs.iter()
+        .rev()
+        .find(|s| !looks_like_file(s) && s.chars().count() <= 80)
+        .map(|s| s.to_string())
+        .unwrap_or_default()
 }
 
 /// The local clock hours in [ds, de). Steps to the next hour boundary on the local clock, so a
@@ -254,9 +424,16 @@ pub fn categorize<'a>(cats: &'a [Category], s: &Subject) -> Option<&'a Category>
         "edge",
         "opera",
         "librewolf",
+        "helium",
+        "thorium",
+        "floorp",
+        "waterfox",
+        "zen-browser",
+        "zen_browser",
     ]
     .iter()
-    .any(|b| app.contains(b));
+    .any(|b| app.contains(b))
+        || app == "zen";
     let fallback = if !s.host.is_empty() || s.private || browser {
         "Browsing"
     } else {
@@ -702,6 +879,9 @@ fn compute_in(
         })
         .collect();
 
+    let (sessions, stats) = sessions_and_stats(cfg, ds, spans, subjects, &state, &hourly, &hours);
+    let projects = projects_of(cfg, ds, spans, subjects, &state);
+
     let mut agents: Vec<AgentRow> = agents.into_values().collect();
     agents.sort_by_key(|x| std::cmp::Reverse(x.busy + x.focus));
     let mut background_audio: Vec<SimpleRow> = bg
@@ -734,6 +914,311 @@ fn compute_in(
         hourly,
         hours,
         timeline,
+        sessions,
+        stats,
+        projects,
+    }
+}
+
+/// Counted seconds of a focus span: (times, first counted ms, end of last counted ms).
+fn counted_in(state: &[State], ds: i64, s: &Span) -> (Times, Option<(i64, i64)>) {
+    let n = state.len() as i64;
+    let a = ((s.start - ds) / 1000).clamp(0, n) as usize;
+    let b = ((s.end - ds + 999) / 1000).clamp(0, n) as usize;
+    let mut t = Times::default();
+    let (mut first, mut last) = (None, None);
+    for (i, st) in state.iter().enumerate().take(b).skip(a) {
+        if matches!(st, State::Active | State::Passive | State::Call) {
+            t.add(*st, 1);
+            first.get_or_insert(i);
+            last = Some(i);
+        }
+    }
+    let edges = first.zip(last).map(|(f, l)| {
+        // Exact milliseconds where the span's own edges are counted, else second boundaries.
+        let start = (ds + f as i64 * 1000).max(s.start);
+        let end = (ds + (l as i64 + 1) * 1000).min(s.end);
+        (start, end.max(start))
+    });
+    (t, edges)
+}
+
+fn sessions_and_stats(
+    cfg: &Config,
+    ds: i64,
+    spans: &[Span],
+    subjects: &HashMap<i64, Subject>,
+    state: &[State],
+    hourly: &[Times],
+    hours: &[Hour],
+) -> (Vec<Session>, DayStats) {
+    let rules = ProjectRules { cfg: &cfg.projects };
+    let known = known_projects(&rules, spans, subjects);
+    let gap = cfg.insights.session_gap_secs as i64 * 1000;
+    let mut focus: Vec<&Span> = spans.iter().filter(|s| s.kind == Kind::Focus).collect();
+    focus.sort_by_key(|s| s.start);
+    let mut out: Vec<Session> = vec![];
+    let mut titles: Vec<HashMap<String, i64>> = vec![];
+    for s in focus {
+        let Some(subj) = subjects.get(&s.subject) else {
+            continue;
+        };
+        let (t, Some((start, end))) = counted_in(state, ds, s) else {
+            continue;
+        };
+        let project = if !subj.program.is_empty() {
+            rules
+                .of_path(&subj.project)
+                .map(|p| p.1)
+                .unwrap_or_default()
+        } else if rules.is_editor(subj) {
+            let p = editor_project(&subj.title, &subj.app_name, &known);
+            rules.of_name(&p).map(|p| p.1).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let kind = if subj.private || !subj.host.is_empty() {
+            "site"
+        } else if !subj.program.is_empty() {
+            "terminal"
+        } else if rules.is_editor(subj) {
+            "editor"
+        } else {
+            "app"
+        };
+        let detail = if subj.private {
+            "Private window".to_string()
+        } else if !subj.host.is_empty() {
+            subj.host.clone()
+        } else {
+            subj.program.clone()
+        };
+        let same = out.last().is_some_and(|l| {
+            l.app == subj.app
+                && l.detail == detail
+                && l.project == project
+                && start - l.end_ms <= gap
+        });
+        if !same {
+            let (category, color) = cat_of(&cfg.categories, subj);
+            out.push(Session {
+                start_ms: start,
+                end_ms: end,
+                app: subj.app.clone(),
+                app_name: subj.app_name.clone(),
+                kind: kind.into(),
+                detail,
+                project,
+                category,
+                color,
+                ..Default::default()
+            });
+            titles.push(HashMap::new());
+        }
+        let l = out.last_mut().expect("just pushed");
+        l.end_ms = l.end_ms.max(end);
+        l.times.merge(&t);
+        l.counted += t.total();
+        if !subj.private && subj.program.is_empty() && !subj.title.is_empty() {
+            *titles
+                .last_mut()
+                .expect("pushed with session")
+                .entry(subj.title.clone())
+                .or_default() += t.total();
+        }
+    }
+    for (s, t) in out.iter_mut().zip(titles) {
+        s.title = t
+            .into_iter()
+            .max_by_key(|(_, secs)| *secs)
+            .map(|(title, _)| title)
+            .unwrap_or_default();
+    }
+    let deep = cfg.insights.deep_work_mins as i64 * 60;
+    let mut st = DayStats {
+        sessions: out.len(),
+        switches: out.windows(2).filter(|w| w[0].app != w[1].app).count(),
+        first_ms: out.first().map(|s| s.start_ms),
+        last_ms: out.last().map(|s| s.end_ms),
+        goal_secs: cfg.insights.daily_goal_mins as i64 * 60,
+        ..Default::default()
+    };
+    for s in &out {
+        if s.counted > st.longest {
+            st.longest = s.counted;
+            st.longest_app = if s.project.is_empty() {
+                s.app_name.clone()
+            } else {
+                format!("{} ({})", s.app_name, s.project)
+            };
+        }
+        if s.counted >= deep {
+            st.deep_work += s.counted;
+            st.deep_sessions += 1;
+        }
+    }
+    let total: i64 = out.iter().map(|s| s.counted).sum();
+    st.avg_session = if out.is_empty() {
+        0
+    } else {
+        total / out.len() as i64
+    };
+    st.peak_hour = hourly
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.total() > 0)
+        .max_by_key(|(_, t)| t.total())
+        .and_then(|(i, _)| hours.get(i).map(|h| h.label.clone()))
+        .unwrap_or_default();
+    (out, st)
+}
+
+/// Project names seen in terminals and agents today (lowercase), to recognise editor titles.
+fn known_projects(
+    rules: &ProjectRules,
+    spans: &[Span],
+    subjects: &HashMap<i64, Subject>,
+) -> HashSet<String> {
+    let mut seen: HashSet<i64> = HashSet::new();
+    let mut out = HashSet::new();
+    for s in spans {
+        if !seen.insert(s.subject) {
+            continue;
+        }
+        if let Some(subj) = subjects.get(&s.subject)
+            && !subj.project.is_empty()
+            && let Some((_, name)) = rules.of_path(&subj.project)
+        {
+            out.insert(name.to_lowercase());
+        }
+    }
+    out
+}
+
+fn projects_of(
+    cfg: &Config,
+    ds: i64,
+    spans: &[Span],
+    subjects: &HashMap<i64, Subject>,
+    state: &[State],
+) -> Vec<ProjectRow> {
+    let rules = ProjectRules { cfg: &cfg.projects };
+    let known = known_projects(&rules, spans, subjects);
+    let tools: HashSet<&str> = cfg.agents.tools.iter().map(|t| t.id.as_str()).collect();
+    let mut rows: HashMap<String, ProjectRow> = HashMap::new();
+    let mut programs: HashMap<String, HashMap<String, i64>> = HashMap::new();
+    let mut editors: HashMap<String, HashMap<String, i64>> = HashMap::new();
+    let n = state.len() as i64;
+    for s in spans {
+        let Some(subj) = subjects.get(&s.subject) else {
+            continue;
+        };
+        match s.kind {
+            Kind::Focus => {
+                let (key, name, terminal) = if !subj.program.is_empty() {
+                    match rules.of_path(&subj.project) {
+                        Some((k, n)) => (k, n, true),
+                        None => continue,
+                    }
+                } else if rules.is_editor(subj) {
+                    let p = editor_project(&subj.title, &subj.app_name, &known);
+                    match rules.of_name(&p) {
+                        Some((k, n)) => (k, n, false),
+                        None => continue,
+                    }
+                } else {
+                    continue;
+                };
+                let (t, _) = counted_in(state, ds, s);
+                let secs = t.total();
+                if secs == 0 {
+                    continue;
+                }
+                let r = rows.entry(key.clone()).or_insert_with(|| ProjectRow {
+                    key: key.clone(),
+                    name,
+                    ..Default::default()
+                });
+                r.total += secs;
+                if terminal {
+                    r.terminal += secs;
+                    if tools.contains(subj.program.as_str()) {
+                        r.agent_focus += secs;
+                    }
+                    *programs
+                        .entry(key)
+                        .or_default()
+                        .entry(subj.program.clone())
+                        .or_default() += secs;
+                } else {
+                    r.editor += secs;
+                    *editors
+                        .entry(key)
+                        .or_default()
+                        .entry(subj.app_name.clone())
+                        .or_default() += secs;
+                }
+            }
+            Kind::AgentBusy => {
+                if let Some((key, name)) = rules.of_path(&subj.project) {
+                    let a = ((s.start - ds) / 1000).clamp(0, n);
+                    let b = ((s.end - ds) / 1000).clamp(0, n);
+                    let r = rows.entry(key.clone()).or_insert_with(|| ProjectRow {
+                        key,
+                        name,
+                        ..Default::default()
+                    });
+                    r.agent_busy += b - a;
+                }
+            }
+            _ => {}
+        }
+    }
+    let top = |m: Option<HashMap<String, i64>>| {
+        let mut v: Vec<TitleRow> = m
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(title, secs)| TitleRow { title, secs })
+            .collect();
+        v.sort_by_key(|x| std::cmp::Reverse(x.secs));
+        v.truncate(6);
+        v
+    };
+    let mut out: Vec<ProjectRow> = rows
+        .into_values()
+        .map(|mut r| {
+            r.programs = top(programs.remove(&r.key));
+            r.editors = top(editors.remove(&r.key));
+            r
+        })
+        .collect();
+    out.sort_by_key(|r| std::cmp::Reverse(r.total + r.agent_busy));
+    out
+}
+
+/// Adds one day's project rows into a range's.
+fn merge_projects(into: &mut HashMap<String, ProjectRow>, rows: &[ProjectRow]) {
+    let add = |list: &mut Vec<TitleRow>, more: &[TitleRow]| {
+        for t in more {
+            match list.iter_mut().find(|x| x.title == t.title) {
+                Some(x) => x.secs += t.secs,
+                None => list.push(t.clone()),
+            }
+        }
+    };
+    for r in rows {
+        let e = into.entry(r.key.clone()).or_insert_with(|| ProjectRow {
+            key: r.key.clone(),
+            name: r.name.clone(),
+            ..Default::default()
+        });
+        e.total += r.total;
+        e.terminal += r.terminal;
+        e.editor += r.editor;
+        e.agent_busy += r.agent_busy;
+        e.agent_focus += r.agent_focus;
+        add(&mut e.programs, &r.programs);
+        add(&mut e.editors, &r.editors);
     }
 }
 
@@ -742,6 +1227,9 @@ pub struct DaySummary {
     pub date: String,
     pub totals: Totals,
     pub categories: Vec<Row>,
+    /// Focused coding time (all projects).
+    pub coding: i64,
+    pub projects: Vec<ProjectRow>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -757,6 +1245,7 @@ pub struct RangeReport {
     pub categories: Vec<Row>,
     pub programs: Vec<Row>,
     pub agents: Vec<AgentRow>,
+    pub projects: Vec<ProjectRow>,
 }
 
 fn merge_rows(into: &mut HashMap<String, Row>, rows: &[Row]) {
@@ -800,6 +1289,8 @@ struct DayRollup {
     categories: Vec<Row>,
     programs: Vec<Row>,
     agents: Vec<AgentRow>,
+    #[serde(default)]
+    projects: Vec<ProjectRow>,
 }
 
 impl DayRollup {
@@ -817,6 +1308,7 @@ impl DayRollup {
             categories: r.categories,
             programs: trim(r.programs, 5),
             agents: r.agents,
+            projects: r.projects,
         }
     }
 }
@@ -861,6 +1353,7 @@ pub fn range(
         HashMap::new(),
     );
     let mut agents: HashMap<(String, String), AgentRow> = HashMap::new();
+    let mut projects: HashMap<String, ProjectRow> = HashMap::new();
     let hash = settings_hash(cfg);
     // A no-input gap that started before midnight is judged with the part after it, so a day
     // is final once the longest threshold (and a flush) has passed.
@@ -894,10 +1387,13 @@ pub fn range(
             e.focus += a.focus;
             e.busy += a.busy;
         }
+        merge_projects(&mut projects, &r.projects);
         out.days.push(DaySummary {
             date,
             totals: r.totals,
             categories: r.categories,
+            coding: r.projects.iter().map(|p| p.total).sum(),
+            projects: r.projects,
         });
         d = d.tomorrow()?;
     }
@@ -914,6 +1410,9 @@ pub fn range(
     let mut ag: Vec<AgentRow> = agents.into_values().collect();
     ag.sort_by_key(|x| std::cmp::Reverse(x.busy + x.focus));
     out.agents = ag;
+    let mut pr: Vec<ProjectRow> = projects.into_values().collect();
+    pr.sort_by_key(|r| std::cmp::Reverse(r.total + r.agent_busy));
+    out.projects = pr;
     Ok(out)
 }
 
@@ -972,7 +1471,7 @@ fn store_rollups(conn: &Connection, hash: &str, rows: &[(String, String)]) -> Re
 }
 
 /// Bump when DayRollup or the classification changes shape.
-const ROLLUP_SCHEMA: u32 = 2;
+const ROLLUP_SCHEMA: u32 = 3;
 
 /// Hash of everything that changes how a day is classified (for the rollup cache). The app
 /// version is part of it: a new release may count differently, so it starts a fresh cache.
@@ -983,6 +1482,7 @@ pub fn settings_hash(cfg: &Config) -> String {
         "idle": cfg.idle,
         "categories": cfg.categories,
         "tools": cfg.agents.tools,
+        "projects": cfg.projects,
     });
     let s = v.to_string();
     // FNV-1a: stable across Rust versions (unlike DefaultHasher).
@@ -997,6 +1497,34 @@ pub fn settings_hash(cfg: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_titles_name_projects() {
+        let none = HashSet::new();
+        assert_eq!(
+            editor_project(
+                "main.rs - arch-tracker - Visual Studio Code",
+                "Visual Studio Code",
+                &none
+            ),
+            "arch-tracker"
+        );
+        assert_eq!(
+            editor_project("● lib.rs - site - Cursor", "Cursor", &none),
+            "site"
+        );
+        assert_eq!(
+            editor_project("arch-tracker – main.rs", "RustRover", &none),
+            "arch-tracker"
+        );
+        assert_eq!(
+            editor_project("Welcome - Visual Studio Code", "Visual Studio Code", &none),
+            "Welcome"
+        );
+        let known: HashSet<String> = ["api".to_string()].into();
+        assert_eq!(editor_project("api — src/main.rs", "Zed", &known), "api");
+        assert_eq!(editor_project("notes.md", "Kate", &none), "");
+    }
 
     const DS: i64 = 1_000_000_000_000;
     const H: i64 = 3_600_000;

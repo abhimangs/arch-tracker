@@ -15,6 +15,8 @@ pub struct Config {
     pub dashboard: Dashboard,
     pub privacy: Privacy,
     pub titles: Titles,
+    pub projects: Projects,
+    pub insights: Insights,
     pub categories: Vec<Category>,
 }
 
@@ -29,6 +31,32 @@ pub struct General {
     pub track_running: bool,
     /// First day of the week for trends: "monday" or "sunday".
     pub week_start: String,
+    /// Delete recorded time older than this many days (0 = keep everything).
+    pub keep_days: u64,
+}
+
+/// How coding time is grouped by project.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Projects {
+    /// Apps (ids or names) whose window titles name the open project: code editors.
+    pub editors: Vec<String>,
+    /// "from=to" lines: count project "from" (a folder or a name) as "to".
+    pub aliases: Vec<String>,
+    /// Folders that are not projects; terminal time there still counts, just not per project.
+    pub ignore: Vec<String>,
+}
+
+/// Sessions, deep work and goals on the dashboard.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Insights {
+    /// A break shorter than this does not end a session (seconds).
+    pub session_gap_secs: u64,
+    /// A session at least this long counts as deep work (minutes).
+    pub deep_work_mins: u64,
+    /// Daily screen-time goal in minutes (0 = none).
+    pub daily_goal_mins: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -89,6 +117,16 @@ pub struct Dashboard {
     pub theme_categories: bool,
     /// Show the system-tray icon.
     pub tray: bool,
+    /// "24h" or "12h" clock.
+    pub time_format: String,
+    /// Page the dashboard opens on: today, timeline, apps, projects, agents or trends.
+    pub start_page: String,
+    /// "comfortable" or "compact" spacing.
+    pub density: String,
+    /// "system" (follow the desktop), "reduced" or "full" animation.
+    pub motion: String,
+    /// Show milliseconds on the live timer.
+    pub show_ms: bool,
 }
 
 /// A dashboard palette: its dark flavours and accents (the first of each is the default).
@@ -174,6 +212,13 @@ pub struct Category {
     pub apps: Vec<String>,
     #[serde(default)]
     pub programs: Vec<String>,
+    /// Daily limit in minutes, shown against today's time (0 = none).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub goal_mins: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 impl Default for General {
@@ -183,6 +228,53 @@ impl Default for General {
             flush_interval_secs: 30,
             track_running: true,
             week_start: "monday".into(),
+            keep_days: 0,
+        }
+    }
+}
+
+impl Default for Projects {
+    fn default() -> Self {
+        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect();
+        Projects {
+            editors: v(&[
+                "code",
+                "code-oss",
+                "visual-studio-code",
+                "cursor",
+                "windsurf",
+                "positron",
+                "dev.zed.Zed",
+                "zed",
+                "org.kde.kate",
+                "kate",
+                "org.kde.kdevelop",
+                "jetbrains-idea",
+                "jetbrains-idea-ce",
+                "jetbrains-pycharm",
+                "jetbrains-pycharm-ce",
+                "jetbrains-clion",
+                "jetbrains-rustrover",
+                "jetbrains-webstorm",
+                "jetbrains-goland",
+                "sublime_text",
+                "neovide",
+                "org.gnome.TextEditor",
+                "lapce",
+                "helix",
+            ]),
+            aliases: vec![],
+            ignore: v(&["~", "/", "/tmp"]),
+        }
+    }
+}
+
+impl Default for Insights {
+    fn default() -> Self {
+        Insights {
+            session_gap_secs: 60,
+            deep_work_mins: 25,
+            daily_goal_mins: 0,
         }
     }
 }
@@ -250,6 +342,11 @@ impl Default for Dashboard {
             accent: "mauve".into(),
             theme_categories: true,
             tray: true,
+            time_format: "24h".into(),
+            start_page: "today".into(),
+            density: "comfortable".into(),
+            motion: "system".into(),
+            show_ms: true,
         }
     }
 }
@@ -281,6 +378,7 @@ fn cat(name: &str, color: &str, hosts: &[&str], apps: &[&str], programs: &[&str]
         hosts: v(hosts),
         apps: v(apps),
         programs: v(programs),
+        goal_mins: 0,
     }
 }
 
@@ -526,6 +624,8 @@ impl Default for Config {
             dashboard: Dashboard::default(),
             privacy: Privacy::default(),
             titles: Titles::default(),
+            projects: Projects::default(),
+            insights: Insights::default(),
             categories: default_categories(),
         }
     }
@@ -611,6 +711,22 @@ impl Config {
         }
         if !matches!(self.dashboard.theme.as_str(), "system" | "dark" | "light") {
             self.dashboard.theme = "system".into();
+        }
+        let d = &mut self.dashboard;
+        if !matches!(d.time_format.as_str(), "24h" | "12h") {
+            d.time_format = "24h".into();
+        }
+        if !matches!(
+            d.start_page.as_str(),
+            "today" | "timeline" | "apps" | "projects" | "agents" | "trends"
+        ) {
+            d.start_page = "today".into();
+        }
+        if !matches!(d.density.as_str(), "comfortable" | "compact") {
+            d.density = "comfortable".into();
+        }
+        if !matches!(d.motion.as_str(), "system" | "reduced" | "full") {
+            d.motion = "system".into();
         }
         let pal = palette(&self.dashboard.palette);
         self.dashboard.palette = pal.id.into();
@@ -709,6 +825,46 @@ impl Config {
         }
         if !matches!(self.privacy.exclude_mode.as_str(), "hide" | "drop") {
             return Err(invalid("privacy.exclude_mode", "Choose hide or drop."));
+        }
+        whole(
+            "general.keep_days",
+            self.general.keep_days,
+            0,
+            36_500,
+            "Keep history (days)",
+        )?;
+        let ins = &self.insights;
+        whole(
+            "insights.session_gap_secs",
+            ins.session_gap_secs,
+            5,
+            3600,
+            "Session break (seconds)",
+        )?;
+        whole(
+            "insights.deep_work_mins",
+            ins.deep_work_mins,
+            5,
+            480,
+            "Deep work (minutes)",
+        )?;
+        whole(
+            "insights.daily_goal_mins",
+            ins.daily_goal_mins,
+            0,
+            24 * 60,
+            "Daily goal (minutes)",
+        )?;
+        for line in &self.projects.aliases {
+            let ok = line
+                .split_once('=')
+                .is_some_and(|(a, b)| !a.trim().is_empty() && !b.trim().is_empty());
+            if !ok {
+                return Err(invalid(
+                    "projects.aliases",
+                    format!("{line:?} should look like old=new."),
+                ));
+            }
         }
         if !matches!(self.general.week_start.as_str(), "monday" | "sunday") {
             return Err(invalid(
