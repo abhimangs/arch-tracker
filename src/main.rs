@@ -10,6 +10,7 @@ mod report;
 mod setup;
 mod sources;
 mod store;
+mod tray;
 mod util;
 mod web;
 

@@ -100,6 +100,14 @@ async fn run_async() -> Result<()> {
 
     let web = crate::web::Web::new(shared.clone(), tx.clone(), util::db_path(), false)?;
     serve_dashboard(&web, cfg.dashboard.port).await;
+    let tray = crate::tray::Tray::new(
+        conn.clone(),
+        shared.clone(),
+        tx.clone(),
+        web.clone(),
+        util::db_path(),
+    );
+    tray.set_enabled(cfg.dashboard.tray).await;
     let _watcher = watch_config(tx.clone());
 
     let mut tracker = Tracker::new(store, cfg.clone(), shared.clone(), conn.clone());
@@ -125,23 +133,25 @@ async fn run_async() -> Result<()> {
         }
         tokio::select! {
             Some(ev) = rx.recv() => {
-                let port = match &ev {
-                    Event::ConfigChanged(c) => Some(c.dashboard.port),
+                let dash = match &ev {
+                    Event::ConfigChanged(c) => Some((c.dashboard.port, c.dashboard.tray)),
                     _ => None,
                 };
                 tracker.handle(ev).await;
-                // The port applies however the config changed (dashboard or file).
-                if let Some(port) = port {
+                // The port and the tray apply however the config changed (dashboard or file).
+                if let Some((port, show_tray)) = dash {
                     serve_dashboard(&web, port).await;
+                    tray.set_enabled(show_tray).await;
                 }
             }
             _ = tick.tick() => tracker.tick().await,
             _ = hup.recv() => {
                 match Config::load() {
                     Ok(c) => {
-                        let port = c.dashboard.port;
+                        let (port, show_tray) = (c.dashboard.port, c.dashboard.tray);
                         tracker.handle(Event::ConfigChanged(Box::new(c))).await;
                         serve_dashboard(&web, port).await;
+                        tray.set_enabled(show_tray).await;
                     }
                     Err(e) => tracing::warn!("config reload failed: {e:#}"),
                 }
