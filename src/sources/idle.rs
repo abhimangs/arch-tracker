@@ -88,19 +88,39 @@ impl Dispatch<ExtIdleNotificationV1, Which> for State {
     }
 }
 
-/// Runs the Wayland connection on its own thread (blocking dispatch, no polling).
+/// Runs the Wayland connection on its own thread (blocking dispatch, no polling). After an
+/// error it reports IdleUnavailable and reconnects, waiting longer after each failure.
 pub fn spawn(tx: UnboundedSender<Event>) {
     let _ = std::thread::Builder::new()
         .name("wayland-idle".into())
         .spawn(move || {
-            if let Err(e) = run(tx.clone()) {
-                tracing::warn!("idle detection unavailable: {e:#}");
-                let _ = tx.send(Event::IdleUnavailable(format!("{e:#}")));
+            let mut delay = RETRY_MIN;
+            let mut last_err = String::new();
+            loop {
+                let started = std::time::Instant::now();
+                let Err(e) = run(tx.clone());
+                let msg = format!("{e:#}");
+                if msg != last_err {
+                    tracing::warn!("idle detection unavailable: {msg}");
+                    last_err = msg.clone();
+                }
+                if tx.send(Event::IdleUnavailable(msg)).is_err() {
+                    return; // daemon stopping
+                }
+                // A connection that worked for a while starts the backoff over.
+                if started.elapsed() > RETRY_MAX {
+                    delay = RETRY_MIN;
+                }
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(RETRY_MAX);
             }
         });
 }
 
-fn run(tx: UnboundedSender<Event>) -> Result<()> {
+const RETRY_MIN: std::time::Duration = std::time::Duration::from_secs(5);
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn run(tx: UnboundedSender<Event>) -> Result<std::convert::Infallible> {
     let conn = Connection::connect_to_env().context("connecting to Wayland (WAYLAND_DISPLAY)")?;
     let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
     let qh = queue.handle();

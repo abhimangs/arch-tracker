@@ -376,7 +376,14 @@ impl Tracker {
                 self.idle_version = version;
                 self.idle_error = None;
             }
-            Event::IdleUnavailable(e) => self.idle_error = Some(e),
+            Event::IdleUnavailable(e) => {
+                // The notifications are gone: whatever they said last is no longer known.
+                self.idle_error = Some(e);
+                self.idle_version = 0;
+                self.input_idle = false;
+                self.session_idle = false;
+                self.ledger.set_flag(Kind::InputIdle, false, now);
+            }
             Event::Locked(l) => {
                 tracing::info!("screen {}", if l { "locked" } else { "unlocked" });
                 self.screensaver_locked = l;
@@ -1202,6 +1209,27 @@ mod tests {
         let want = vec![(1_000, 10_000), (20_000, 30_000)];
         assert_eq!(kinds_in_db(&t, Kind::AgentBusy), want);
         assert_eq!(kinds_in_db(&t, Kind::Running), want);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_errors_reset_idle_state() {
+        let mut t = test_tracker();
+        let at = now_ms();
+        for input in [true, false] {
+            t.handle(Event::Idle {
+                input,
+                idle: true,
+                at,
+            })
+            .await;
+        }
+        assert!(t.input_idle && t.session_idle);
+        t.handle(Event::IdleUnavailable("gone".into())).await;
+        assert!(!t.input_idle && !t.session_idle);
+        t.flush(now_ms() + 1_000);
+        let idle = kinds_in_db(&t, Kind::InputIdle);
+        assert_eq!(idle.len(), 1);
+        assert!(idle[0].1 <= now_ms(), "the idle span was closed");
     }
 
     #[tokio::test(flavor = "current_thread")]
