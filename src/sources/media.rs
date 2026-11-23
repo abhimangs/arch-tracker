@@ -1,7 +1,7 @@
 //! MPRIS media players (what is playing, from which process) and microphone capture state.
 
 use crate::daemon::Event;
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -56,8 +56,11 @@ pub async fn spawn(conn: Connection, tx: UnboundedSender<Event>) {
                 Some(_) = next(&mut props) => {}
                 Some(_) = next(&mut owners) => {}
             }
-            // Coalesce bursts of property changes.
+            // Coalesce bursts of property changes: wait, then swallow what queued meanwhile, so a
+            // burst costs one round of ListNames/GetAll.
             tokio::time::sleep(Duration::from_millis(250)).await;
+            drain(&mut props);
+            drain(&mut owners);
             let players = read_players(&conn).await;
             if last.as_ref() != Some(&players) {
                 last = Some(players.clone());
@@ -65,6 +68,21 @@ pub async fn spawn(conn: Connection, tx: UnboundedSender<Event>) {
             }
         }
     });
+}
+
+/// Discards messages already queued on the stream without waiting.
+fn drain(s: &mut Option<MessageStream>) {
+    let Some(stream) = s else { return };
+    loop {
+        match stream.next().now_or_never() {
+            Some(Some(_)) => continue,
+            Some(None) => {
+                *s = None; // ended
+                return;
+            }
+            None => return,
+        }
+    }
 }
 
 async fn next(s: &mut Option<MessageStream>) -> Option<()> {
