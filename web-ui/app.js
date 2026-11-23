@@ -40,7 +40,48 @@
   };
   const dayLabel = (s, opts) =>
     parseYmd(s).toLocaleDateString(undefined, opts || { weekday: "long", day: "numeric", month: "long" });
-  const safeColor = (c) => (/^#[0-9a-fA-F]{3,8}$/.test(c || "") ? c : "#6b7392");
+  const rawColor = (c) => (/^#[0-9a-fA-F]{3,8}$/.test(c || "") ? c : "#6b7392");
+
+  // ---------- theme ----------
+  // <html> carries the look (data-theme/palette/dark/accent/theme-cats, filled in by the server so
+  // there is no flash). themes.css maps it to colours; this code only switches attributes.
+  const root = document.documentElement;
+  const CAT_SLOTS = ["ai", "development", "social", "video", "messaging", "music", "meetings", "productivity", "learning", "system", "browsing", "other"];
+  const catByColor = new Map();
+  const learnCats = (list) => {
+    for (const c of list || []) if (c && c.name && c.color) catByColor.set(String(c.color).toLowerCase(), c.name);
+  };
+  const slotFor = (name) => {
+    const s = String(name || "").toLowerCase();
+    if (CAT_SLOTS.includes(s)) return s;
+    let h = 0;
+    for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return `x${(h % 4) + 1}`;
+  };
+  const themedCats = () => root.dataset.themeCats === "on" && root.dataset.palette !== "aizome";
+  /** A category colour: the palette's slot when "follow theme" is on, else the colour from Settings. */
+  const safeColor = (c, name) => {
+    const hex = rawColor(c);
+    if (!themedCats()) return hex;
+    const n = name || catByColor.get(hex.toLowerCase());
+    return n ? `var(--cat-${slotFor(n)})` : hex;
+  };
+  const FLAVOR = { mocha: "Mocha", macchiato: "Macchiato", frappe: "Frappé", main: "Main", moon: "Moon", night: "Night", latte: "Latte", dawn: "Dawn", fog: "Fog" };
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const look = () => ({
+    theme: root.dataset.theme,
+    palette: root.dataset.palette,
+    dark_flavor: root.dataset.dark,
+    accent: root.dataset.accent,
+    theme_categories: root.dataset.themeCats === "on",
+  });
+  const applyLook = (l) => {
+    root.dataset.theme = l.theme;
+    root.dataset.palette = l.palette;
+    root.dataset.dark = l.dark_flavor;
+    root.dataset.accent = l.accent;
+    root.dataset.themeCats = l.theme_categories ? "on" : "off";
+  };
 
   function dur(secs) {
     secs = Math.max(0, Math.round(secs || 0));
@@ -59,8 +100,18 @@
     return `${h}<small>h</small>${pad(m)}<small>m</small>`;
   }
 
+  // The session cookie is gone (deleted key, cleared cookies): reload to show the locked page.
+  let reloading = false;
+  function signedOut(r) {
+    if (r.status === 401 && !reloading) {
+      reloading = true;
+      location.reload();
+    }
+  }
+
   async function get(path) {
     const r = await fetch(path, { headers: { accept: "application/json" } });
+    signedOut(r);
     const body = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(body.error || `The tracker answered ${r.status}.`);
     return body;
@@ -72,6 +123,7 @@
       headers: { "content-type": "application/json", "x-arch-tracker-token": TOKEN },
       body: JSON.stringify(data ?? {}),
     });
+    signedOut(r);
     const body = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(body.error || `The tracker answered ${r.status}.`);
     return body;
@@ -141,7 +193,7 @@
         <div class="who"><span>${esc(a.name || a.tool)}</span><em>${esc(a.project || "no project")}</em></div>
         <div class="pair">
           <span>You</span><span class="rb"><i style="--w:${w(a.focus)};--c:var(--text)"></i></span><span class="v">${dur(a.focus)}</span>
-          <span>Agent</span><span class="rb"><i style="--w:${w(a.busy)};--c:#b49be8"></i></span><span class="v">${dur(a.busy)}</span>
+          <span>Agent</span><span class="rb"><i style="--w:${w(a.busy)};--c:var(--agent, #b49be8)"></i></span><span class="v">${dur(a.busy)}</span>
         </div>
       </div>`,
       )
@@ -243,6 +295,7 @@
       return;
     }
     if (stale(gen) || currentDay !== date) return;
+    learnCats(d.categories);
     const usedNames = new Set(d.apps.filter((a) => a.total >= 60).map((a) => a.name));
     const unused = d.running.filter((r) => !usedNames.has(r.name));
     const t = d.totals;
@@ -393,7 +446,8 @@
     const y = (s) => H - bottom - (s / yMax) * (H - top - bottom);
     const bw = (W - left) / days.length;
     const order = cats.map((c) => c.name);
-    const color = Object.fromEntries(cats.map((c) => [c.name, safeColor(c.color)]));
+    learnCats(cats);
+    const color = Object.fromEntries(cats.map((c) => [c.name, safeColor(c.color, c.name)]));
     let svg = "";
     for (let h = 0; h <= yMax / 3600; h += stepH) {
       svg += `<line class="grid" x1="${left}" x2="${W}" y1="${y(h * 3600)}" y2="${y(h * 3600)}"/><text x="${left - 8}" y="${y(h * 3600) + 4}" text-anchor="end">${h}h</text>`;
@@ -429,7 +483,7 @@
     for (let i = 0; i < lead; i++) cells.push('<i style="visibility:hidden"></i>');
     for (const d of days) {
       const pct = Math.round((d.totals.screen / max) * 100);
-      const bg = d.totals.screen ? `color-mix(in srgb, #5fb4e0 ${Math.max(12, pct)}%, transparent)` : "";
+      const bg = d.totals.screen ? `color-mix(in srgb, var(--heat, #5fb4e0) ${Math.max(12, pct)}%, transparent)` : "";
       cells.push(`<i style="${bg ? `background:${bg}` : ""}" title="${esc(dayLabel(d.date, { weekday: "short", day: "numeric", month: "short" }))}: ${dur(d.totals.screen)}"></i>`);
     }
     return `<div class="heat-wrap"><div class="heat" role="img" aria-label="Screen time per day for the last year, one column per week starting ${weekStart === "sunday" ? "Sunday" : "Monday"}">${cells.join("")}</div></div>`;
@@ -487,7 +541,7 @@
 
   function catRow(c, i) {
     const fixed = c.name === "Browsing" || c.name === "Other";
-    return `<input type="color" data-cat="${i}" data-k="color" value="${esc(safeColor(c.color))}" aria-label="Colour">
+    return `<input type="color" data-cat="${i}" data-k="color" value="${esc(rawColor(c.color))}" aria-label="Colour">
       <input type="text" data-cat="${i}" data-k="name" value="${esc(c.name)}" aria-label="Name" ${fixed ? "readonly" : ""}>
       <textarea data-cat="${i}" data-k="hosts" aria-label="Sites">${esc(lines(c.hosts))}</textarea>
       <textarea data-cat="${i}" data-k="apps" aria-label="Apps">${esc(lines(c.apps))}</textarea>
@@ -569,7 +623,8 @@
         <legend>Dashboard</legend>
         ${field("Port", "The page moves to the new port after saving.", num("port", c.dashboard.port, "", 1024, 65535))}
         ${field("Weeks start on", "Used by the year view in Trends.", `<select id="weekstart">${["monday", "sunday"].map((d) => `<option value="${d}" ${c.general.week_start === d ? "selected" : ""}>${d[0].toUpperCase() + d.slice(1)}</option>`).join("")}</select>`)}
-        ${field("Theme", "", `<div class="seg" role="group" aria-label="Theme">${["system", "dark", "light"].map((t) => `<button type="button" data-theme-pick="${t}" aria-pressed="${c.dashboard.theme === t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div>`)}
+        ${field("Look", "Changes apply right away. The palette button at the top right has the same choices.", '<div class="look-inline" id="lookset"></div>')}
+        ${field("Tray icon", "Shows today's screen time; click it to open this dashboard.", check("tray", c.dashboard.tray, "Show the arch-tracker icon in the system tray"))}
         ${field("Custom CSS", "Loaded after the built-in styles. Variables like --bg, --text and --shu are yours to change.", `<textarea id="css" class="code" spellcheck="false">${esc(s.custom_css)}</textarea>`)}
       </fieldset>
 
@@ -582,7 +637,6 @@
     </form>`;
 
     const $ = (id) => document.getElementById(id);
-    let theme = c.dashboard.theme;
     const msg = (text, kind) => {
       $("smsg").textContent = text;
       $("smsg").dataset.kind = kind || "";
@@ -593,13 +647,8 @@
     ["exfrom", "exto", "exfmt"].forEach((id) => $(id).addEventListener("change", exlink));
     exlink();
 
-    view.querySelectorAll("[data-theme-pick]").forEach((b) =>
-      b.addEventListener("click", () => {
-        theme = b.dataset.themePick;
-        document.documentElement.dataset.theme = theme;
-        view.querySelectorAll("[data-theme-pick]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
-      }),
-    );
+    learnCats(c.categories);
+    lookControls($("lookset"));
     const readCats = () => {
       view.querySelectorAll("[data-cat]").forEach((el) => {
         const i = Number(el.dataset.cat);
@@ -665,7 +714,8 @@
       next.privacy.exclude_mode = $("xmode").value;
       next.categories = cats.filter((x) => x.name);
       next.dashboard.port = n("port");
-      next.dashboard.theme = theme;
+      Object.assign(next.dashboard, look());
+      next.dashboard.tray = $("tray").checked;
       msg("Saving…");
       try {
         const res = await send("PUT", "/api/settings", { config: next, custom_css: $("css").value });
@@ -747,14 +797,22 @@
     if (!s || !s.sources) return;
     const out = [];
     const ext = (s.sources.browser_extension || []).some((e) => e.alive);
-    const browserSeen = !!s.sources.plasma_browser_integration || /brave|chrom/i.test((s.focus && s.focus.app) || "");
+    const browserSeen =
+      !!s.sources.plasma_browser_integration ||
+      /brave|chrom|helium|vivaldi|edge|opera|thorium|firefox|zen|librewolf|floorp|waterfox/i.test((s.focus && s.focus.app) || "");
     const hidden = Number(localStorage.getItem("hide-ext-notice") || 0) > Date.now();
     if (!ext && browserSeen && !hidden) {
-      out.push(`<div class="notice"><p>Brave tabs are tracked with a fallback, so two tabs with the same title can be mixed up. Connect the arch-tracker extension for exact tabs:</p>
-        <ol><li>Open <code>brave://extensions</code> and switch on Developer mode.</li>
-        <li>Choose Load unpacked and pick <code>${esc(s.extension && s.extension.dir)}</code>.</li>
-        <li>Check that its ID is <code>${esc(s.extension && s.extension.id)}</code>.</li></ol>
+      out.push(`<div class="notice"><p>Browser tabs are tracked with a fallback, so two tabs with the same title can be mixed up. Connect the arch-tracker extension for exact tabs (run <code>arch-tracker setup</code> for every step):</p>
+        <ol><li>Chromium browsers (Brave, Chrome, Helium, Vivaldi…): open <code>chrome://extensions</code> or <code>brave://extensions</code> and switch on Developer mode.</li>
+        <li>Choose Load unpacked and pick <code>${esc(s.extension && s.extension.dir)}</code>; its ID must be <code>${esc(s.extension && s.extension.id)}</code>.</li>
+        <li>Firefox, Zen and other Firefox-based browsers: install the signed arch-tracker add-on (.xpi).</li></ol>
         <div class="actions"><button type="button" class="btn" id="hideext">Hide for a week</button></div></div>`);
+    }
+    if (s.config_error) {
+      out.push(`<div class="notice"><p>config.toml has an error, so the last settings that loaded are in use: ${esc(s.config_error)}</p></div>`);
+    }
+    if (s.dashboard_error) {
+      out.push(`<div class="notice"><p>${esc(s.dashboard_error)} The dashboard stays where it is; pick another port in Settings.</p></div>`);
     }
     if (s.sources.idle && !s.sources.idle.ok) {
       out.push(`<div class="notice"><p>Idle detection isn't working, so idle time is being counted. ${esc(s.sources.idle.error || "")}</p></div>`);
@@ -770,6 +828,119 @@
       renderNotices();
     });
   }
+
+  // ---------- theme picker ----------
+
+  let palettesCache = null;
+  async function palettes() {
+    if (!palettesCache) {
+      const s = await get("/api/settings");
+      palettesCache = s.palettes;
+      learnCats(s.config.categories);
+    }
+    return palettesCache;
+  }
+
+  let lookSaveTimer = null;
+  function saveLook() {
+    clearTimeout(lookSaveTimer);
+    lookSaveTimer = setTimeout(async () => {
+      try {
+        const r = await send("PUT", "/api/appearance", look());
+        applyLook(r.dashboard);
+      } catch {
+        // Read-only view or a failed save: the look still applies to this page.
+      }
+    }, 250);
+  }
+
+  /** Category colours are inline styles, so pages redraw when they switch (not Settings: unsaved edits). */
+  function redrawForLook() {
+    if (!location.hash.startsWith("#/settings")) route();
+  }
+
+  async function lookControls(el) {
+    if (!el) return;
+    let pals;
+    try {
+      pals = await palettes();
+    } catch (e) {
+      el.textContent = e.message;
+      return;
+    }
+    const draw = () => {
+      const l = look();
+      const p = pals.find((x) => x.id === l.palette) || pals[0];
+      const seg = (key, label, values, names) =>
+        `<div class="look-row"><span class="look-k" id="lk-${key}">${label}</span><div class="seg" role="radiogroup" aria-labelledby="lk-${key}">${values
+          .map((v, i) => `<button type="button" role="radio" data-look="${key}" data-v="${esc(v)}" aria-checked="${l[key] === v}">${esc(names[i])}</button>`)
+          .join("")}</div></div>`;
+      el.innerHTML = `
+        ${seg("palette", "Theme", pals.map((x) => x.id), pals.map((x) => x.name))}
+        ${seg("theme", "Mode", ["system", "dark", "light"], ["System", "Dark", "Light"])}
+        ${p.dark.length > 1 ? seg("dark_flavor", "Dark flavour", p.dark, p.dark.map((f) => FLAVOR[f] || cap(f))) : ""}
+        <div class="look-row"><span class="look-k" id="lk-accent">Accent</span><div class="swatches" role="radiogroup" aria-labelledby="lk-accent">${p.accents
+          .map((a) => `<button type="button" role="radio" class="swatch" data-look="accent" data-v="${a}" aria-checked="${l.accent === a}" title="${cap(a)}" aria-label="${cap(a)}" style="--sw:var(--p-${a})"></button>`)
+          .join("")}</div></div>
+        <label class="check"><input type="checkbox" data-look="theme_categories" ${l.theme_categories ? "checked" : ""}>Category colours follow the theme</label>
+        <p class="look-note">Light mode uses ${esc(FLAVOR[p.light] || cap(p.light))}.${p.id === "aizome" ? " Aizome keeps the category colours from Settings." : ""}</p>`;
+    };
+    draw();
+    el.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-look]");
+      if (!b) return;
+      const l = look();
+      const k = b.dataset.look;
+      const v = b.dataset.v;
+      if (k === "palette" && v !== l.palette) {
+        const p = pals.find((x) => x.id === v);
+        Object.assign(l, { palette: v, dark_flavor: p.dark[0], accent: p.accents[0] });
+      } else l[k] = v;
+      applyLook(l);
+      draw();
+      el.querySelector(`[data-look="${k}"][data-v="${v}"]`)?.focus();
+      saveLook();
+      if (k === "palette") redrawForLook();
+    });
+    el.addEventListener("change", (e) => {
+      if (!e.target.matches('input[data-look="theme_categories"]')) return;
+      applyLook({ ...look(), theme_categories: e.target.checked });
+      saveLook();
+      redrawForLook();
+    });
+  }
+
+  const lookBtn = document.getElementById("lookbtn");
+  const lookPop = document.getElementById("lookpop");
+  let lookReady = false;
+  async function toggleLook(open) {
+    const show = open ?? lookPop.hidden;
+    if (show && !lookReady) {
+      lookReady = true;
+      await lookControls(lookPop);
+    }
+    lookPop.hidden = !show;
+    lookBtn.setAttribute("aria-expanded", String(show));
+    if (show) lookPop.querySelector('[aria-checked="true"]')?.focus();
+  }
+  lookBtn.addEventListener("click", () => toggleLook());
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !lookPop.hidden) {
+      toggleLook(false);
+      lookBtn.focus();
+    }
+  });
+  document.addEventListener("click", (e) => {
+    // A redraw inside the popover detaches the clicked button: that click was inside.
+    if (lookPop.hidden || !e.target.isConnected || lookPop.contains(e.target) || lookBtn.contains(e.target)) return;
+    toggleLook(false);
+  });
+
+  // The skip link moves focus without changing the hash (which would re-route).
+  document.getElementById("skip")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    view.focus();
+  });
 
   // ---------- router ----------
 
