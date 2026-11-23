@@ -24,6 +24,18 @@ work, then shows it all in a local dashboard with a tray icon. It runs as a smal
 | Watching and calls | Video playing in a visible window; microphone open | MPRIS players, the browser extension, and the ALSA capture state |
 | Background | Music in a hidden tab; apps open in the tray but unused | Shown separately, never added to screen time |
 
+## The dashboard
+
+- **Now**: what has your focus this moment, with a millisecond timer, the windows beside it,
+  terminals, AI agents and their CPU, media, input and lock state, and connected browsers. It
+  updates the instant focus changes.
+- **Today**: the day as five-minute bars, screen time against your goal, categories against their
+  limits, apps, sites, coding projects, agents and focus stats (longest stretch, deep work, switches).
+- **Timeline**: every session (a stretch on one app, site or project) with its exact start and end,
+  filterable and searchable.
+- **Projects**: coding time per project from terminals, code editors and agents.
+- **Apps and sites**, **Agents** and **Trends** over a day, a week, a month or a year.
+
 ## How screen time is decided
 
 arch-tracker stores raw facts (focus, no-input gaps, media, microphone, lock, suspend) and decides
@@ -139,6 +151,10 @@ are picked up live. You can change:
 - AI agent names to recognise, and when an agent counts as working
 - apps and sites never to record
 - the dashboard port (applied at once, whichever way you change it), your own CSS and the tray icon
+- the page it opens on, a 12- or 24-hour clock, milliseconds on live timers, density and motion
+- a daily screen-time goal, per-category daily limits, what counts as a session and as deep work
+- which apps are code editors, project renames, and folders that aren't projects
+- how many days of history to keep
 - the look: Catppuccin (Mocha, Macchiato, Frappé, Latte), Rosé Pine (Main, Moon, Dawn) or the
   original Aizome, any of their accents, following the system or fixed dark or light. Category
   colours follow the theme unless you switch that off. The palette button in the header switches

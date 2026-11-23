@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Dashboard redesign: a sidebar with a sliding highlight, and new Now (live, to the millisecond),
+  Timeline (sessions with exact start and end) and Projects (coding time per project) pages. Today
+  adds focus stats, a daily goal and category limits.
+- Live updates over server-sent events, the moment focus changes.
+- Settings for the clock, milliseconds, density, motion, start page, goals, sessions, deep work,
+  code editors, project renames and history retention.
 - System-tray icon: today's screen time in the tooltip, click to open the dashboard, pause and
   resume from the menu or with a middle click.
 - Dashboard themes: Catppuccin (Mocha, Macchiato, Frappé, Latte) and Rosé Pine (Main, Moon, Dawn)
