@@ -281,13 +281,20 @@ pub async fn run() -> anyhow::Result<()> {
     );
 
     let cfg = crate::config::Config::load().unwrap_or_default();
-    let url = format!("http://127.0.0.1:{}/", cfg.dashboard.port);
+    let url = format!("http://arch-tracker.localhost:{}/", cfg.dashboard.port);
     let reachable = std::net::TcpStream::connect(("127.0.0.1", cfg.dashboard.port)).is_ok();
     r.line(
         reachable,
-        &format!("dashboard at {url}"),
-        "Another program may hold the port; change it in config.toml",
+        &format!("dashboard at {url} (open it with: arch-tracker open)"),
+        "Another program may hold the port: pick another one in config.toml; the daemon moves without a restart.",
     );
+    if let Some(e) = s["config_error"].as_str() {
+        r.line(
+            false,
+            "config.toml loads",
+            &format!("{e}\nThe last settings that loaded are in use until the file is fixed."),
+        );
+    }
 
     let rss = sh("ps", &["-o", "rss=", "-C", "arch-tracker"])
         .and_then(|o| {
@@ -298,7 +305,8 @@ pub async fn run() -> anyhow::Result<()> {
         .unwrap_or(0);
     if rss > 0 {
         r.line(
-            rss < 40_000,
+            // The target is under 15 MB; about 9 MB of that is the shared executable.
+            rss < 20_000,
             &format!("daemon memory {:.1} MB", rss as f64 / 1024.0),
             "Memory is higher than expected; please report it.",
         );
