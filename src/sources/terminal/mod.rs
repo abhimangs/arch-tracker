@@ -117,6 +117,7 @@ pub async fn inspect(
     caption: &str,
     tools: &[Tool],
     projects: &mut Projects,
+    procs: Option<&procfs::ProcTable>,
 ) -> Option<TermInfo> {
     if cls.to_lowercase().contains("kitty")
         && let Some(sock) = kitty::socket_for(pid)
@@ -145,25 +146,30 @@ pub async fn inspect(
             Err(e) => tracing::debug!("kitty remote control failed: {e:#}"),
         }
     }
-    inspect_proc(pid, tools, projects).await
+    inspect_proc(pid, tools, projects, procs).await
 }
 
-async fn inspect_proc(term_pid: i64, tools: &[Tool], projects: &mut Projects) -> Option<TermInfo> {
+async fn inspect_proc(
+    term_pid: i64,
+    tools: &[Tool],
+    projects: &mut Projects,
+    procs: Option<&procfs::ProcTable>,
+) -> Option<TermInfo> {
     if term_pid <= 0 {
         return None;
     }
-    let procs = procfs::own_processes();
-    let children = procfs::children_map(&procs);
-    let by_pid: std::collections::HashMap<u32, &procfs::Stat> =
-        procs.iter().map(|s| (s.pid, s)).collect();
+    let own;
+    let table = match procs {
+        Some(t) => t,
+        None => {
+            own = procfs::ProcTable::read();
+            &own
+        }
+    };
     // Shells: direct children of the terminal that own a pty.
     let mut best: Option<(std::time::SystemTime, u32)> = None;
-    for child in children
-        .get(&(term_pid as u32))
-        .cloned()
-        .unwrap_or_default()
-    {
-        let Some(s) = by_pid.get(&child) else {
+    for &child in table.children_of(term_pid as u32) {
+        let Some(s) = table.get(child) else {
             continue;
         };
         let Some(pts) = procfs::pts_path(s.tty_nr) else {
@@ -202,8 +208,8 @@ mod tests {
         let pid: i64 = std::env::var("KITTY_PID").unwrap().parse().unwrap();
         let tools = crate::config::Agents::default().tools;
         let mut projects = Projects::default();
-        let exact = inspect("kitty", pid, true, "", &tools, &mut projects).await;
-        let guess = inspect_proc(pid, &tools, &mut projects).await;
+        let exact = inspect("kitty", pid, true, "", &tools, &mut projects, None).await;
+        let guess = inspect_proc(pid, &tools, &mut projects, None).await;
         println!(
             "kitty: {exact:?}
 proc: {guess:?}"

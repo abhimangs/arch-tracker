@@ -95,6 +95,40 @@ pub fn own_processes() -> Vec<Stat> {
     out
 }
 
+/// One read of /proc (own processes), shared by everything that looks at processes in a tick.
+pub struct ProcTable {
+    pub procs: Vec<Stat>,
+    pub children: HashMap<u32, Vec<u32>>,
+    index: HashMap<u32, usize>,
+}
+
+impl ProcTable {
+    pub fn read() -> Self {
+        Self::from_procs(own_processes())
+    }
+
+    pub fn from_procs(procs: Vec<Stat>) -> Self {
+        let children = children_map(&procs);
+        let index = procs.iter().enumerate().map(|(i, s)| (s.pid, i)).collect();
+        ProcTable {
+            procs,
+            children,
+            index,
+        }
+    }
+
+    pub fn get(&self, pid: u32) -> Option<&Stat> {
+        self.index.get(&pid).map(|i| &self.procs[*i])
+    }
+
+    pub fn children_of(&self, pid: u32) -> &[u32] {
+        self.children
+            .get(&pid)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
+
 pub fn children_map(procs: &[Stat]) -> HashMap<u32, Vec<u32>> {
     let mut m: HashMap<u32, Vec<u32>> = HashMap::new();
     for p in procs {

@@ -40,11 +40,16 @@ pub struct AgentState {
 }
 
 impl Scanner {
-    pub fn scan(&mut self, cfg: &Agents, projects: &mut Projects) -> Vec<AgentState> {
+    pub fn scan(
+        &mut self,
+        cfg: &Agents,
+        projects: &mut Projects,
+        table: &procfs::ProcTable,
+    ) -> Vec<AgentState> {
         let elapsed = self.at.elapsed().as_secs_f64().max(0.5);
         self.at = Instant::now();
-        let procs = procfs::own_processes();
-        let children = procfs::children_map(&procs);
+        let procs = &table.procs;
+        let children = &table.children;
         let by_pid: HashMap<u32, &procfs::Stat> = procs.iter().map(|s| (s.pid, s)).collect();
         let mut tool_of: HashMap<u32, usize> = HashMap::new();
         for p in procs.iter().filter(|p| p.tty_nr != 0) {
@@ -67,7 +72,7 @@ impl Scanner {
                 continue;
             }
             let Some(st) = by_pid.get(&pid) else { continue };
-            let desc = procfs::descendants(pid, &children);
+            let desc = procfs::descendants(pid, children);
             let live_children: u64 = desc
                 .iter()
                 .filter_map(|d| by_pid.get(d))

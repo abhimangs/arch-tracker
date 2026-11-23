@@ -8,7 +8,7 @@ use crate::model::{Kind, Subject};
 use crate::sources::browser::{self, ExtMsg, ExtTab, ExtWindow, pbi::PbiTab, snss};
 use crate::sources::kwin::{self, Win};
 use crate::sources::media::{self, Player};
-use crate::sources::terminal::{self, TermInfo, agents, tools::Projects};
+use crate::sources::terminal::{self, TermInfo, agents, procfs::ProcTable, tools::Projects};
 use crate::sources::{idle, session};
 use crate::store::Store;
 use crate::store::ledger::Ledger;
@@ -134,6 +134,9 @@ const KWIN_STALE_MS: i64 = 150_000;
 const KWIN_RETRY_MIN_MS: i64 = 30_000;
 const KWIN_RETRY_MAX_MS: i64 = 600_000;
 
+/// A terminal window whose title keeps changing is inspected at most this often.
+const TERM_MIN_GAP_MS: i64 = 2_000;
+
 /// How long the extension may lag behind a KWin focus or caption change.
 const FOCUS_GRACE_MS: i64 = 2_000;
 
@@ -251,7 +254,7 @@ pub struct Tracker {
     players: Vec<Player>,
     mic: bool,
     sys_conn: Option<zbus::Connection>,
-    /// Per KWin window: (caption when inspected, when, what runs inside).
+    /// Per KWin window: (normalized caption when inspected, when, what runs inside).
     term_cache: HashMap<String, (String, i64, TermInfo)>,
     projects: Projects,
     agent_scanner: agents::Scanner,
@@ -351,7 +354,7 @@ impl Tracker {
                 self.kwin_last = now;
                 self.kwin_retry_at = 0;
                 self.kwin_backoff_ms = KWIN_RETRY_MIN_MS;
-                self.refresh_terminals(now, false).await;
+                self.refresh_terminals(now, false, None).await;
                 self.refresh_pbi(now, false).await;
             }
             Event::Idle {
@@ -503,14 +506,16 @@ impl Tracker {
             self.desktop = DesktopIndex::load();
             self.desktop_loaded = Instant::now();
         }
-        self.refresh_terminals(now, true).await;
+        // One read of /proc per tick, shared by terminal inspection and the agent scan.
+        let procs = (self.paused.is_none() && !self.suspended).then(ProcTable::read);
+        self.refresh_terminals(now, true, procs.as_ref()).await;
         self.refresh_pbi(now, true).await;
         self.ext.retain(|_, c| now - c.last < EXT_ALIVE_MS * 5);
-        self.agents = if self.paused.is_some() || self.suspended {
-            vec![]
-        } else {
-            self.agent_scanner
-                .scan(&self.cfg.agents, &mut self.projects)
+        self.agents = match &procs {
+            Some(p) => self
+                .agent_scanner
+                .scan(&self.cfg.agents, &mut self.projects, p),
+            None => vec![],
         };
         self.running = if let Some(conn) = &self.conn
             && self.cfg.general.track_running
@@ -596,42 +601,46 @@ impl Tracker {
     }
 
     /// Looks inside focused/visible terminal windows. Cached per window; refreshed when the
-    /// caption changes, and on the periodic tick for windows on screen.
-    async fn refresh_terminals(&mut self, now: i64, periodic: bool) {
+    /// normalized caption changes (agents animate spinner glyphs in their titles several times
+    /// a second), at most once per TERM_MIN_GAP_MS, and on the periodic tick for windows on
+    /// screen. procs: this tick's /proc snapshot, if one was taken.
+    async fn refresh_terminals(&mut self, now: i64, periodic: bool, procs: Option<&ProcTable>) {
         if now - self.kwin_last > KWIN_STALE_MS {
             return;
         }
         let Some(snap) = &self.kwin else { return };
         let focused_id = snap.focused().map(|w| w.id.clone());
-        let mut targets: Vec<(String, String, i64, bool, String)> = vec![];
-        let mut on_screen: Vec<&Win> = snap.focused().into_iter().collect();
-        on_screen.extend(snap.visible(
-            self.cfg.visibility.min_fraction,
-            self.cfg.visibility.min_pixels,
-        ));
-        for w in on_screen {
+        let mut targets: Vec<(String, String, i64, bool, String, String)> = vec![];
+        let interval = self.cfg.general.sample_interval_secs as i64 * 1000;
+        for w in snap.focused().into_iter().chain(self.visible_wins()) {
             let (app, _) = self.desktop.identify(&w.df, &w.cls, w.pid);
             if app_kind(&app, &w.cls) != AppKind::Terminal {
                 continue;
             }
+            let key = self.norm(&w.cap);
             let stale = match self.term_cache.get(&w.id) {
                 None => true,
                 Some((cap, at, _)) => {
-                    *cap != w.cap
-                        || (periodic
-                            && now - at
-                                >= self.cfg.general.sample_interval_secs as i64 * 1000 - 500)
+                    let age = now - at;
+                    (*cap != key && age >= TERM_MIN_GAP_MS) || (periodic && age >= interval - 500)
                 }
             };
             if stale {
                 let focused = focused_id.as_deref() == Some(w.id.as_str());
-                targets.push((w.id.clone(), w.cls.clone(), w.pid, focused, w.cap.clone()));
+                targets.push((
+                    w.id.clone(),
+                    w.cls.clone(),
+                    w.pid,
+                    focused,
+                    w.cap.clone(),
+                    key,
+                ));
             }
         }
         let alive: std::collections::HashSet<String> =
             snap.windows.iter().map(|w| w.id.clone()).collect();
         self.term_cache.retain(|id, _| alive.contains(id));
-        for (id, cls, pid, focused, cap) in targets {
+        for (id, cls, pid, focused, cap, key) in targets {
             let info = terminal::inspect(
                 &cls,
                 pid,
@@ -639,11 +648,25 @@ impl Tracker {
                 &cap,
                 &self.cfg.agents.tools,
                 &mut self.projects,
+                procs,
             )
             .await
             .unwrap_or_default();
-            self.term_cache.insert(id, (cap, now, info));
+            self.term_cache.insert(id, (key, now, info));
         }
+    }
+
+    /// Visible (not focused) windows of the current snapshot.
+    fn visible_wins(&self) -> Vec<&Win> {
+        self.kwin
+            .as_ref()
+            .map(|k| {
+                k.visible(
+                    self.cfg.visibility.min_fraction,
+                    self.cfg.visibility.min_pixels,
+                )
+            })
+            .unwrap_or_default()
     }
 
     fn norm(&self, t: &str) -> String {
@@ -1245,6 +1268,27 @@ mod tests {
         t.reconcile(later);
         assert!(t.focus.is_none());
         assert!(t.visible.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_inspection_ignores_spinners_and_is_rate_limited() {
+        let mut t = test_tracker();
+        let now = t.kwin_last;
+        let at = |t: &Tracker| t.term_cache["w1"].1;
+        t.kwin = Some(one_window("foot", "⠂ Working"));
+        t.refresh_terminals(now, false, None).await;
+        assert_eq!(at(&t), now);
+        t.kwin = Some(one_window("foot", "⠐ Working"));
+        t.refresh_terminals(now + 3_000, false, None).await;
+        assert_eq!(at(&t), now, "only the spinner changed");
+        t.kwin = Some(one_window("foot", "Other"));
+        t.refresh_terminals(now + 3_500, false, None).await;
+        assert_eq!(at(&t), now + 3_500);
+        t.kwin = Some(one_window("foot", "Third"));
+        t.refresh_terminals(now + 4_000, false, None).await;
+        assert_eq!(at(&t), now + 3_500, "at most once per 2 s");
+        t.refresh_terminals(now + 5_600, false, None).await;
+        assert_eq!(at(&t), now + 5_600, "the pending change is picked up later");
     }
 
     #[tokio::test(flavor = "current_thread")]
