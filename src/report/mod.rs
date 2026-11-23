@@ -165,12 +165,11 @@ pub fn categorize<'a>(cats: &'a [Category], s: &Subject) -> Option<&'a Category>
         return Some(c);
     }
     if !s.host.is_empty() {
-        let host = lc(&s.host);
-        let host = host.split(':').next().unwrap_or(&host).to_string();
+        let host = host_key(&s.host);
         let mut best: Option<(&Category, usize)> = None;
         for c in cats {
             for h in &c.hosts {
-                let h = lc(h);
+                let h = host_key(h);
                 if (host == h || host.ends_with(&format!(".{h}")))
                     && best.map(|(_, l)| h.len() > l).unwrap_or(true)
                 {
@@ -207,6 +206,27 @@ pub fn categorize<'a>(cats: &'a [Category], s: &Subject) -> Option<&'a Category>
         "Other"
     };
     cats.iter().find(|c| c.name == fallback)
+}
+
+/// A host as rules compare it: lowercase, with only a trailing ":port" removed, so
+/// "localhost:3000" is "localhost" while "brave://settings" and IPv6 addresses stay whole
+/// ("[::1]:8080" becomes "::1").
+fn host_key(host: &str) -> String {
+    let h = host.trim().to_lowercase();
+    if let Some(rest) = h.strip_prefix('[')
+        && let Some((addr, tail)) = rest.split_once(']')
+        && (tail.is_empty() || tail.strip_prefix(':').is_some_and(is_port))
+    {
+        return addr.to_string();
+    }
+    match h.rsplit_once(':') {
+        Some((name, port)) if !name.contains(':') && is_port(port) => name.to_string(),
+        _ => h,
+    }
+}
+
+fn is_port(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn cat_of(cats: &[Category], s: &Subject) -> (String, String) {
@@ -1032,5 +1052,35 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(categorize(&cats, &s).unwrap().name, "Development");
+    }
+
+    #[test]
+    fn only_a_trailing_port_is_stripped() {
+        assert_eq!(host_key("LocalHost:3000"), "localhost");
+        assert_eq!(host_key("brave://settings"), "brave://settings");
+        assert_eq!(host_key("[::1]:8080"), "::1");
+        assert_eq!(host_key("[::1]"), "::1");
+        assert_eq!(host_key("fe80::1"), "fe80::1");
+        assert_eq!(host_key("example.com:abc"), "example.com:abc");
+        let cats = crate::config::default_categories();
+        let host = |h: &str| Subject {
+            app: "brave-origin-beta".into(),
+            host: h.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            categorize(&cats, &host("brave://settings")).unwrap().name,
+            "System"
+        );
+        assert_eq!(
+            categorize(&cats, &host("127.0.0.1:8000")).unwrap().name,
+            "Development"
+        );
+        let mut cats = cats;
+        cats[1].hosts.push("[::1]".into());
+        assert_eq!(
+            categorize(&cats, &host("[::1]:5173")).unwrap().name,
+            "Development"
+        );
     }
 }
