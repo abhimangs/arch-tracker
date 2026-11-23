@@ -137,7 +137,9 @@ pub async fn scan(
                     .unwrap_or(id.clone());
                 apps.entry(key).or_insert_with(|| name_for(&id));
             } else if let Some(st) = procfs::stat(pid) {
-                let (key, name) = desktop.identify("", &st.comm, pid as i64);
+                // comm can hold a rewritten process title: keep its first word only.
+                let comm = st.comm.split_whitespace().next().unwrap_or_default();
+                let (key, name) = desktop.identify("", comm, pid as i64);
                 apps.entry(key).or_insert(name);
             }
         }

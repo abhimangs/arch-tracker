@@ -57,14 +57,42 @@ pub fn match_tool<'a>(cmd: &[String], tools: &'a [Tool]) -> Option<&'a Tool> {
     })
 }
 
+/// The program in a process title: its first word, basename, without a trailing ':'.
+/// Programs that rewrite their title put arguments there ("npm run deploy -- --key=...",
+/// "tmux: server"), so everything after the first whitespace is dropped.
+fn title_program(s: &str) -> &str {
+    let word = s.split_whitespace().next().unwrap_or("");
+    basename(word).trim_end_matches(':')
+}
+
 /// Program name to store: the tool id, else the executable's basename. Never arguments.
 pub fn program_name(cmd: &[String], tools: &[Tool]) -> String {
+    program_name_ex(cmd, None, None, tools)
+}
+
+/// Like program_name, with the process's comm and /proc/<pid>/exe target, used instead of
+/// argv[0] when argv[0] holds a rewritten process title (it contains whitespace).
+pub fn program_name_ex(
+    cmd: &[String],
+    comm: Option<&str>,
+    exe: Option<&str>,
+    tools: &[Tool],
+) -> String {
     if let Some(t) = match_tool(cmd, tools) {
         return t.id.clone();
     }
-    cmd.first()
-        .map(|a| basename(a).to_string())
-        .unwrap_or_default()
+    let Some(argv0) = cmd.first() else {
+        return String::new();
+    };
+    if argv0.chars().any(char::is_whitespace) {
+        for s in [comm, exe].into_iter().flatten() {
+            let p = title_program(s);
+            if !p.is_empty() {
+                return p.to_string();
+            }
+        }
+    }
+    title_program(argv0).to_string()
 }
 
 #[derive(Default)]
@@ -140,6 +168,38 @@ mod tests {
         assert_eq!(
             program_name(&v(&["python3", "-m", "http.server"]), &tools),
             "python3"
+        );
+        // Rewritten process titles carry arguments: only the program is kept.
+        assert_eq!(
+            program_name(&v(&["npm run deploy -- --key=abc123"]), &tools),
+            "npm"
+        );
+        assert_eq!(program_name(&v(&["tmux: server"]), &tools), "tmux");
+        assert_eq!(
+            program_name(&v(&["/usr/local/bin/worker --token=abc"]), &tools),
+            "worker"
+        );
+        assert_eq!(
+            program_name_ex(
+                &v(&["/opt/Some App/bin/app --flag=1"]),
+                Some("app"),
+                Some("/opt/Some App/bin/app"),
+                &tools
+            ),
+            "app"
+        );
+        assert_eq!(
+            program_name_ex(
+                &v(&["npm run deploy -- --key=abc123"]),
+                Some("npm run deploy "),
+                Some("/usr/bin/node"),
+                &tools
+            ),
+            "npm"
+        );
+        assert_eq!(
+            program_name_ex(&v(&["x y"]), Some(""), Some("/usr/bin/real"), &tools),
+            "real"
         );
         // An MCP helper launched by an agent is not the agent.
         assert_eq!(

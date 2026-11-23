@@ -53,6 +53,13 @@ pub fn cmdline(pid: u32) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Target of /proc/<pid>/exe (the executable actually running).
+pub fn exe(pid: u32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 pub fn cwd(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }

@@ -44,7 +44,16 @@ fn describe(
     tools: &[Tool],
     projects: &mut Projects,
 ) -> (String, String, u32) {
-    let program = tools::program_name(&cmd, tools);
+    let program = if cmd
+        .first()
+        .is_some_and(|a| a.chars().any(char::is_whitespace))
+    {
+        let comm = procfs::stat(pid).map(|s| s.comm);
+        let exe = procfs::exe(pid);
+        tools::program_name_ex(&cmd, comm.as_deref(), exe.as_deref(), tools)
+    } else {
+        tools::program_name(&cmd, tools)
+    };
     let dir = if cwd.is_empty() {
         procfs::cwd(pid)
     } else {
