@@ -14,7 +14,8 @@ use crate::report;
 use crate::util;
 use anyhow::Result;
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, Query, Request as HttpRequest, State};
+use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request as HttpRequest, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -140,6 +141,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/pause", post(api_pause))
         .route("/api/resume", post(api_resume))
         .route("/api/export", get(api_export))
+        .fallback(|| async { err(StatusCode::NOT_FOUND, "Not found.") })
         .layer(middleware::from_fn_with_state(ctx.clone(), guard))
         .with_state(ctx)
 }
@@ -332,6 +334,75 @@ fn err_field(status: StatusCode, msg: impl ToString, field: &str) -> Response {
         .into_response()
 }
 
+/// Json<T> whose rejections are JSON as well, naming the field that could not be read.
+struct JsonBody<T>(T);
+
+impl<S, T> FromRequest<S> for JsonBody<T>
+where
+    S: Send + Sync,
+    T: serde::de::DeserializeOwned,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: HttpRequest, state: &S) -> Result<Self, Response> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(v)) => Ok(JsonBody(v)),
+            Err(r) => Err(rejection(r.status(), &r.body_text())),
+        }
+    }
+}
+
+/// Query<T> whose rejections are JSON as well.
+struct Params<T>(T);
+
+impl<S, T> FromRequestParts<S> for Params<T>
+where
+    S: Send + Sync,
+    T: serde::de::DeserializeOwned,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Response> {
+        match Query::<T>::from_request_parts(parts, state).await {
+            Ok(Query(v)) => Ok(Params(v)),
+            Err(r) => Err(rejection(r.status(), &r.body_text())),
+        }
+    }
+}
+
+/// Turns axum's plain-text rejection, e.g. "Failed to deserialize the JSON body into the target
+/// type: config.dashboard.port: invalid value: integer `70000`, expected u16 at line 1 column 9",
+/// into {"error": "Invalid value for dashboard.port: …", "field": "dashboard.port"}.
+fn rejection(status: StatusCode, text: &str) -> Response {
+    match explain_rejection(text) {
+        (msg, Some(field)) => err_field(status, msg, &field),
+        (msg, None) => err(status, msg),
+    }
+}
+
+fn explain_rejection(text: &str) -> (String, Option<String>) {
+    let detail = match text.split_once(": ") {
+        Some((head, rest)) if head.starts_with("Failed to") => rest,
+        _ => text,
+    };
+    let detail = detail.rfind(" at line ").map_or(detail, |i| &detail[..i]);
+    let path = detail.split_once(": ").filter(|(p, _)| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '[' | ']'))
+    });
+    match path {
+        Some((p, why)) => {
+            let field = p.strip_prefix("config.").unwrap_or(p);
+            (
+                format!("Invalid value for {field}: {why}."),
+                Some(field.to_string()),
+            )
+        }
+        None => (format!("The request could not be read: {detail}."), None),
+    }
+}
+
 /// 400 for requests the caller got wrong, 500 for everything else.
 fn report_err(e: anyhow::Error) -> Response {
     if e.downcast_ref::<report::BadRequest>().is_some() {
@@ -442,7 +513,7 @@ fn db(path: &std::path::Path, viewer: bool) -> Result<rusqlite::Connection> {
     Ok(c)
 }
 
-async fn api_day(State(ctx): State<Ctx>, Query(q): Query<DayQ>) -> Response {
+async fn api_day(State(ctx): State<Ctx>, Params(q): Params<DayQ>) -> Response {
     let cfg = ctx.web.config();
     let date = q.date.unwrap_or_else(|| util::local_date(util::now_ms()));
     if let Err(e) = report::parse_date(&date) {
@@ -459,7 +530,7 @@ struct RangeQ {
     to: String,
 }
 
-async fn api_range(State(ctx): State<Ctx>, Query(q): Query<RangeQ>) -> Response {
+async fn api_range(State(ctx): State<Ctx>, Params(q): Params<RangeQ>) -> Response {
     let cfg = ctx.web.config();
     let path = ctx.web.db.clone();
     let viewer = ctx.web.viewer;
@@ -489,24 +560,43 @@ struct SettingsBody {
     custom_css: String,
 }
 
-async fn api_settings_put(State(ctx): State<Ctx>, Json(body): Json<SettingsBody>) -> Response {
+/// Larger custom.css files are refused.
+const CSS_LIMIT: usize = 200_000;
+
+async fn api_settings_put(
+    State(ctx): State<Ctx>,
+    JsonBody(body): JsonBody<SettingsBody>,
+) -> Response {
     if ctx.web.viewer {
         return err(StatusCode::FORBIDDEN, VIEWER_MSG);
     }
+    // Everything is checked before anything changes.
+    if let Err(e) = body.config.validate() {
+        return err_field(StatusCode::BAD_REQUEST, e.message, e.field);
+    }
+    if body.custom_css.len() > CSS_LIMIT {
+        return err_field(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Custom CSS is limited to 200 KB.",
+            "custom_css",
+        );
+    }
     let cfg = body.config.sanitized();
-    let old = ctx.web.config();
-    let mut redirect = None;
-    if cfg.dashboard.port != old.dashboard.port {
-        if let Err(e) = ctx.web.listen(cfg.dashboard.port).await {
-            return err(
-                StatusCode::CONFLICT,
-                format!("Port {} is not available: {e}", cfg.dashboard.port),
-            );
-        }
-        redirect = Some(format!(
-            "http://{}/#/settings",
-            canonical_host(cfg.dashboard.port)
-        ));
+    let port = cfg.dashboard.port;
+    let moving = ctx.web.port() != Some(port);
+    if moving && let Err(e) = TcpListener::bind(("127.0.0.1", port)).await {
+        return err_field(
+            StatusCode::CONFLICT,
+            format!("Port {port} is not available: {e}"),
+            "dashboard.port",
+        );
+    }
+    if let Err(e) = std::fs::write(config::custom_css_path(), &body.custom_css) {
+        return err_field(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not save custom.css: {e}"),
+            "custom_css",
+        );
     }
     if let Err(e) = cfg.save() {
         return err(
@@ -514,13 +604,24 @@ async fn api_settings_put(State(ctx): State<Ctx>, Json(body): Json<SettingsBody>
             format!("Could not save settings: {e:#}"),
         );
     }
-    if body.custom_css.len() > 200_000 {
-        return err(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Custom CSS is limited to 200 KB",
-        );
+    let mut redirect = None;
+    if moving {
+        match ctx.web.listen(port).await {
+            Ok(()) => redirect = Some(format!("http://{}/#/settings", canonical_host(port))),
+            Err(e) => {
+                // Taken since the check: keep this port, and keep the config saying so.
+                let mut kept = cfg;
+                kept.dashboard.port = ctx.web.port().unwrap_or(ctx.port);
+                let _ = kept.save();
+                let _ = ctx.web.tx.send(Event::ConfigChanged(Box::new(kept)));
+                return err_field(
+                    StatusCode::CONFLICT,
+                    format!("Port {port} is not available: {e}. Your other changes were saved."),
+                    "dashboard.port",
+                );
+            }
+        }
     }
-    let _ = std::fs::write(config::custom_css_path(), &body.custom_css);
     let _ = ctx.web.tx.send(Event::ConfigChanged(Box::new(cfg)));
     Json(json!({"ok": true, "redirect": redirect})).into_response()
 }
@@ -547,7 +648,14 @@ struct PauseBody {
     minutes: Option<u64>,
 }
 
-async fn api_pause(State(ctx): State<Ctx>, Json(b): Json<PauseBody>) -> Response {
+async fn api_pause(State(ctx): State<Ctx>, JsonBody(b): JsonBody<PauseBody>) -> Response {
+    if b.minutes.is_some_and(|m| !(1..=7 * 24 * 60).contains(&m)) {
+        return err_field(
+            StatusCode::BAD_REQUEST,
+            "A pause lasts between 1 minute and 7 days.",
+            "minutes",
+        );
+    }
     let until_ms = b.minutes.map(|m| util::now_ms() + m as i64 * 60_000);
     control(&ctx, Request::Pause { until_ms }).await
 }
@@ -564,7 +672,7 @@ struct ExportQ {
     format: Option<String>,
 }
 
-async fn api_export(State(ctx): State<Ctx>, Query(q): Query<ExportQ>) -> Response {
+async fn api_export(State(ctx): State<Ctx>, Params(q): Params<ExportQ>) -> Response {
     let format = match export::Format::parse(q.format.as_deref().unwrap_or("csv")) {
         Ok(f) => f,
         Err(e) => return err_field(StatusCode::BAD_REQUEST, format!("{e:#}"), "format"),
@@ -651,5 +759,41 @@ impl std::io::Write for ChunkWriter {
             return Ok(());
         }
         self.send()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejections_name_the_field() {
+        let (msg, field) = explain_rejection(
+            "Failed to deserialize the JSON body into the target type: config.dashboard.port: \
+             invalid value: integer `70000`, expected u16 at line 1 column 512",
+        );
+        assert_eq!(field.as_deref(), Some("dashboard.port"));
+        assert_eq!(
+            msg,
+            "Invalid value for dashboard.port: invalid value: integer `70000`, expected u16."
+        );
+        let (msg, field) = explain_rejection(
+            "Failed to deserialize the JSON body into the target type: config.idle.threshold_secs: \
+             invalid type: floating point `1.5`, expected u64 at line 1 column 40",
+        );
+        assert_eq!(field.as_deref(), Some("idle.threshold_secs"));
+        assert!(msg.contains("floating point"));
+        let (msg, field) = explain_rejection(
+            "Failed to parse the request body as JSON: expected value at line 1 column 1",
+        );
+        assert_eq!(field, None);
+        assert_eq!(msg, "The request could not be read: expected value.");
+        let (msg, field) =
+            explain_rejection("Expected request with `Content-Type: application/json`");
+        assert_eq!(field, None);
+        assert!(msg.contains("Content-Type: application/json"));
+        let (_, field) =
+            explain_rejection("Failed to deserialize query string: missing field `from`");
+        assert_eq!(field, None);
     }
 }

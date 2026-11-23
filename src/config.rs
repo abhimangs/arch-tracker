@@ -531,6 +531,42 @@ impl Default for Config {
     }
 }
 
+/// A value the dashboard can't save, with the config key it belongs to ("dashboard.port").
+#[derive(Debug, Clone, PartialEq)]
+pub struct Invalid {
+    pub field: &'static str,
+    pub message: String,
+}
+
+fn invalid(field: &'static str, message: impl Into<String>) -> Invalid {
+    Invalid {
+        field,
+        message: message.into(),
+    }
+}
+
+fn whole(field: &'static str, v: u64, lo: u64, hi: u64, what: &str) -> Result<(), Invalid> {
+    if (lo..=hi).contains(&v) {
+        Ok(())
+    } else {
+        Err(invalid(
+            field,
+            format!("{what} must be between {lo} and {hi}."),
+        ))
+    }
+}
+
+fn real(field: &'static str, v: f64, lo: f64, hi: f64, what: &str) -> Result<(), Invalid> {
+    if v.is_finite() && (lo..=hi).contains(&v) {
+        Ok(())
+    } else {
+        Err(invalid(
+            field,
+            format!("{what} must be between {lo} and {hi}."),
+        ))
+    }
+}
+
 const HEADER: &str = "# arch-tracker configuration. Edit here or in the dashboard (Settings).\n\
 # Changes are picked up automatically. Timings in [idle] re-classify all history.\n\n";
 
@@ -590,6 +626,108 @@ impl Config {
         self
     }
 
+    /// Checks the values the dashboard edits, so a bad save is refused before anything changes.
+    /// Keys only set by hand (visibility.min_pixels, titles) are left to sanitized().
+    pub fn validate(&self) -> Result<(), Invalid> {
+        let port = self.dashboard.port as u64;
+        whole("dashboard.port", port, 1024, 65535, "The port")?;
+        let g = &self.general;
+        whole(
+            "general.sample_interval_secs",
+            g.sample_interval_secs,
+            2,
+            300,
+            "Check every (seconds)",
+        )?;
+        whole(
+            "general.flush_interval_secs",
+            g.flush_interval_secs,
+            5,
+            600,
+            "Save every (seconds)",
+        )?;
+        let i = &self.idle;
+        whole(
+            "idle.threshold_secs",
+            i.threshold_secs,
+            30,
+            4 * 3600,
+            "Idle after (seconds)",
+        )?;
+        whole(
+            "idle.call_threshold_secs",
+            i.call_threshold_secs,
+            30,
+            8 * 3600,
+            "Calls allow (seconds)",
+        )?;
+        let v = self.visibility.min_fraction;
+        real(
+            "visibility.min_fraction",
+            v,
+            0.01,
+            1.0,
+            "The visible share of a window",
+        )?;
+        let a = &self.agents;
+        real(
+            "agents.busy_cpu_percent",
+            a.busy_cpu_percent,
+            0.1,
+            400.0,
+            "Agent CPU (%)",
+        )?;
+        real(
+            "agents.busy_child_cpu_percent",
+            a.busy_child_cpu_percent,
+            0.1,
+            1600.0,
+            "Build CPU (%)",
+        )?;
+        whole(
+            "agents.busy_write_bytes",
+            a.busy_write_bytes,
+            0,
+            10_000_000,
+            "Terminal output (bytes)",
+        )?;
+        let mut ids = std::collections::HashSet::new();
+        for t in &a.tools {
+            if t.id.trim().is_empty() {
+                return Err(invalid("agents.tools", "Every known agent needs an id."));
+            }
+            if !ids.insert(t.id.trim().to_lowercase()) {
+                return Err(invalid(
+                    "agents.tools",
+                    format!("The agent id {:?} is listed twice.", t.id),
+                ));
+            }
+        }
+        if !matches!(self.privacy.exclude_mode.as_str(), "hide" | "drop") {
+            return Err(invalid("privacy.exclude_mode", "Choose hide or drop."));
+        }
+        let mut names = std::collections::HashSet::new();
+        for c in &self.categories {
+            if c.name.trim().is_empty() {
+                return Err(invalid("categories", "Every category needs a name."));
+            }
+            if !names.insert(c.name.trim().to_lowercase()) {
+                return Err(invalid(
+                    "categories",
+                    format!("The category {:?} is listed twice.", c.name),
+                ));
+            }
+            let hex = c.color.strip_prefix('#').unwrap_or("");
+            if !matches!(hex.len(), 3 | 4 | 6 | 8) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(invalid(
+                    "categories",
+                    format!("The colour of {:?} must look like #5fb4e0.", c.name),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Writes the config atomically, keeping comments and unknown keys already in the file.
     pub fn save(&self) -> Result<()> {
         let path = config_path();
@@ -644,6 +782,49 @@ fn merge_tables(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validation_names_the_bad_field() {
+        assert_eq!(Config::default().validate(), Ok(()));
+        let field = |f: &dyn Fn(&mut Config)| {
+            let mut c = Config::default();
+            f(&mut c);
+            c.validate().unwrap_err().field
+        };
+        assert_eq!(field(&|c| c.dashboard.port = 0), "dashboard.port");
+        assert_eq!(field(&|c| c.dashboard.port = 80), "dashboard.port");
+        assert_eq!(field(&|c| c.idle.threshold_secs = 5), "idle.threshold_secs");
+        assert_eq!(
+            field(&|c| c.general.flush_interval_secs = 0),
+            "general.flush_interval_secs"
+        );
+        assert_eq!(
+            field(&|c| c.visibility.min_fraction = f64::NAN),
+            "visibility.min_fraction"
+        );
+        assert_eq!(
+            field(&|c| c.agents.busy_cpu_percent = -1.0),
+            "agents.busy_cpu_percent"
+        );
+        assert_eq!(
+            field(&|c| c.privacy.exclude_mode = "keep".into()),
+            "privacy.exclude_mode"
+        );
+        assert_eq!(field(&|c| c.categories[0].name = " ".into()), "categories");
+        assert_eq!(
+            field(&|c| c.categories[0].color = "red".into()),
+            "categories"
+        );
+        assert_eq!(
+            field(&|c| c.agents.tools.push(c.agents.tools[0].clone())),
+            "agents.tools"
+        );
+        // Hand-only keys are not the dashboard's to refuse.
+        let mut c = Config::default();
+        c.visibility.min_pixels = -5;
+        c.titles.max_len = 0;
+        assert_eq!(c.validate(), Ok(()));
+    }
 
     #[test]
     fn roundtrip_defaults() {
