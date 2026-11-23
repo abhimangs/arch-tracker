@@ -768,7 +768,7 @@ impl Tracker {
     }
 
     /// Subject for media that plays without being on screen.
-    fn player_subject(&self, p: &Player) -> Option<Subject> {
+    fn player_subject(&self, p: &Player, now: i64) -> Option<Subject> {
         let win = self.kwin.as_ref().and_then(|k| {
             k.windows
                 .iter()
@@ -784,19 +784,60 @@ impl Tracker {
             ),
             None => (p.bus.clone(), p.bus.clone()),
         };
-        let browser = p.is_browser_bridge() || app_kind(&app, "") == AppKind::Browser;
+        let browser = self.browser_player(p) || app_kind(&app, "") == AppKind::Browser;
+        // A browser's own MPRIS player also plays media of private windows, and nothing tells
+        // which: keep its details only when Plasma Browser Integration (which never sees
+        // private windows) knows the title. The PBI bridge itself only reports normal windows.
+        let known = !browser || p.is_browser_bridge() || self.pbi_knows(&p.title, now);
         let s = Subject {
-            host: if browser {
+            host: if browser && known {
                 media::url_host(&p.url)
             } else {
                 String::new()
             },
-            title: util::normalize_title(&p.title, &self.title_res, self.cfg.titles.max_len),
+            title: if known {
+                self.norm(&p.title)
+            } else {
+                String::new()
+            },
             app,
             app_name,
             ..Default::default()
         };
         self.apply_privacy(s)
+    }
+
+    /// A player run by a browser: the PBI bridge or the browser's own MPRIS service
+    /// ("org.mpris.MediaPlayer2.brave.instance1234").
+    fn browser_player(&self, p: &Player) -> bool {
+        if p.is_browser_bridge() {
+            return true;
+        }
+        let name = p.bus.trim_start_matches("org.mpris.MediaPlayer2.");
+        if app_kind(name, "") == AppKind::Browser || app_kind(&p.identity, "") == AppKind::Browser {
+            return true;
+        }
+        p.pid != 0
+            && self.kwin.as_ref().is_some_and(|k| {
+                k.windows.iter().any(|w| {
+                    w.pid as u32 == p.pid
+                        && matches!(
+                            app_kind(&self.desktop.identify(&w.df, &w.cls, w.pid).0, &w.cls),
+                            AppKind::Browser | AppKind::WebApp
+                        )
+                })
+            })
+    }
+
+    /// True if a fresh Plasma Browser Integration tab list has a tab with this title.
+    fn pbi_knows(&self, title: &str, now: i64) -> bool {
+        let t = self.norm(title);
+        self.pbi.as_ref().is_some_and(|p| {
+            now - p.at <= 30_000
+                && p.tabs
+                    .iter()
+                    .any(|x| util::titles_match(&self.norm(&x.title), &t))
+        })
     }
 
     /// Splits playing media into "in a window you can see" and "background".
@@ -846,7 +887,11 @@ impl Tracker {
         }
         // MPRIS players (non-browser apps, and browsers without the extension).
         for p in self.players.iter().filter(|p| p.playing) {
-            let ext_covers = p.is_browser_bridge() && !self.ext_conns(p.pid as i64, now).is_empty();
+            // The extension already reported this browser's audible tabs (shown or not); its
+            // own MPRIS player and the PBI bridge would count the same audio a second time.
+            if self.browser_player(p) && !self.ext_conns(p.pid as i64, now).is_empty() {
+                continue;
+            }
             let hit = shown.iter().find(|(w, s, _)| {
                 if w.pid as u32 != p.pid || p.pid == 0 {
                     return false;
@@ -861,8 +906,7 @@ impl Tracker {
             });
             match hit {
                 Some((_, s, _)) => vis.push(s.clone()),
-                None if ext_covers => {}
-                None => bg.extend(self.player_subject(p)),
+                None => bg.extend(self.player_subject(p, now)),
             }
         }
         vis.dedup();
