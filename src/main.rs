@@ -227,6 +227,189 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
         .block_on(f)
 }
 
+/// The readable form of "arch-tracker status" (--json prints everything).
 fn print_status(v: &serde_json::Value) {
-    println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+    let flag = |p: &str| v.pointer(p).and_then(|x| x.as_bool()).unwrap_or(false);
+    let num = |p: &str| v.pointer(p).and_then(|x| x.as_i64());
+    let watching = v
+        .get("media_visible")
+        .and_then(|m| m.as_array())
+        .is_some_and(|m| !m.is_empty());
+    let state = if flag("/paused") {
+        match num("/paused_until_ms") {
+            Some(ms) => format!("Paused until {}", clock(ms)),
+            None => "Paused until you resume".into(),
+        }
+    } else if flag("/locked") {
+        "Locked".into()
+    } else if flag("/suspended") {
+        "Suspended".into()
+    } else if flag("/idle/input_idle") && watching {
+        "Watching".into()
+    } else if flag("/mic") {
+        "In a call".into()
+    } else if flag("/idle/input_idle") {
+        "No input".into()
+    } else {
+        "Active".into()
+    };
+    println!("State    {state}");
+    println!("Focus    {}", describe_focus(v.get("focus")));
+    if let Some(today) = today_line() {
+        println!("Today    {today}");
+    }
+    println!("Sources");
+    let src = |p: &str| v.pointer(&format!("/sources/{p}"));
+    let kwin = if flag("/sources/kwin/ok") {
+        let n = num("/sources/kwin/windows").unwrap_or(0);
+        format!("ok, {n} windows")
+    } else {
+        "not reporting windows (the tracker reloads its script; see arch-tracker doctor)".into()
+    };
+    println!("  kwin       {kwin}");
+    let idle = if flag("/sources/idle/ok") {
+        let v = num("/sources/idle/protocol_version").unwrap_or(0);
+        format!("ok, ext-idle-notify v{v}")
+    } else {
+        let e = src("idle/error").and_then(|e| e.as_str()).unwrap_or("");
+        let e = if e.is_empty() { "not available" } else { e };
+        format!("error: {e} (idle time is counted)")
+    };
+    println!("  idle       {idle}");
+    let logind = if flag("/sources/logind/ok") {
+        "ok"
+    } else {
+        "not connected (lock and suspend are not seen)"
+    };
+    println!("  logind     {logind}");
+    let ext: Vec<&serde_json::Value> = src("browser_extension")
+        .and_then(|e| e.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|c| c["alive"].as_bool() == Some(true))
+                .collect()
+        })
+        .unwrap_or_default();
+    let browser = if !ext.is_empty() {
+        let sum = |k: &str| ext.iter().filter_map(|c| c[k].as_i64()).sum::<i64>();
+        format!(
+            "extension connected, {} windows, {} tabs",
+            sum("windows"),
+            sum("tabs")
+        )
+    } else if let Some(tabs) = src("plasma_browser_integration").and_then(|p| p["tabs"].as_i64()) {
+        format!("extension not connected; Plasma Browser Integration fallback, {tabs} tabs")
+    } else {
+        "extension not connected".into()
+    };
+    println!("  browser    {browser}");
+    let version = v.get("version").and_then(|x| x.as_str()).unwrap_or("?");
+    match num("/started_ms") {
+        Some(ms) => println!("arch-tracker {version}, running since {}", clock(ms)),
+        None => println!("arch-tracker {version}"),
+    }
+}
+
+/// "Brave, github.com" / "kitty, nvim in ~/p/x" / "Editor, notes.md", at most 72 characters.
+fn describe_focus(f: Option<&serde_json::Value>) -> String {
+    let Some(f) = f.filter(|f| f.is_object()) else {
+        return "nothing focused".into();
+    };
+    let s = |k: &str| f[k].as_str().unwrap_or("").to_string();
+    let mut bits = vec![s("app_name")];
+    let private = f["private"].as_bool().unwrap_or(false);
+    if private {
+        bits.push("private window".into());
+    } else if !s("host").is_empty() {
+        bits.push(s("host"));
+    }
+    if !s("program").is_empty() {
+        bits.push(if s("project").is_empty() {
+            s("program")
+        } else {
+            format!("{} in {}", s("program"), s("project"))
+        });
+    } else if s("host").is_empty() && !private && !s("title").is_empty() {
+        bits.push(s("title"));
+    }
+    let text = bits
+        .into_iter()
+        .filter(|b| !b.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    truncate(&text, 72)
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max - 1).collect();
+    out.push('…');
+    out
+}
+
+/// Today's totals, read from the database (what the dashboard shows).
+fn today_line() -> Option<String> {
+    let cfg = config::Config::load().unwrap_or_default();
+    let conn = store::open_readonly(&util::db_path()).ok()?;
+    let r = report::build_day(&conn, &cfg, &util::local_date(util::now_ms())).ok()?;
+    let t = &r.totals;
+    Some(format!(
+        "{} on screen ({} active, {} watching, {} in calls)",
+        hm(t.screen),
+        hm(t.times.active),
+        hm(t.times.passive),
+        hm(t.times.call)
+    ))
+}
+
+fn hm(secs: i64) -> String {
+    let (h, m) = (secs / 3600, secs / 60 % 60);
+    match (h, m) {
+        (0, 0) => format!("{secs}s"),
+        (0, _) => format!("{m}m"),
+        _ => format!("{h}h {m:02}m"),
+    }
+}
+
+/// Local "HH:MM", with the date when it isn't today.
+fn clock(ms: i64) -> String {
+    let Ok(ts) = jiff::Timestamp::from_millisecond(ms) else {
+        return "?".into();
+    };
+    let z = ts.to_zoned_datetime(jiff::tz::TimeZone::system());
+    if util::local_date(ms) == util::local_date(util::now_ms()) {
+        z.strftime("%H:%M").to_string()
+    } else {
+        z.strftime("%Y-%m-%d %H:%M").to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn focus_is_described_without_private_details() {
+        let f = serde_json::json!({"app_name": "Browser", "host": "example.org", "title": "A page",
+            "private": false, "program": "", "project": ""});
+        assert_eq!(describe_focus(Some(&f)), "Browser, example.org");
+        let f = serde_json::json!({"app_name": "Browser", "host": "", "title": "",
+            "private": true, "program": "", "project": ""});
+        assert_eq!(describe_focus(Some(&f)), "Browser, private window");
+        let f = serde_json::json!({"app_name": "Terminal", "host": "", "title": "x",
+            "private": false, "program": "nvim", "project": "~/p/demo"});
+        assert_eq!(describe_focus(Some(&f)), "Terminal, nvim in ~/p/demo");
+        let long = "t".repeat(200);
+        let f = serde_json::json!({"app_name": "Editor", "title": long});
+        assert_eq!(describe_focus(Some(&f)).chars().count(), 72);
+        assert_eq!(
+            describe_focus(Some(&serde_json::Value::Null)),
+            "nothing focused"
+        );
+        assert_eq!(hm(42), "42s");
+        assert_eq!(hm(3 * 60), "3m");
+        assert_eq!(hm(3600 + 5 * 60), "1h 05m");
+    }
 }
