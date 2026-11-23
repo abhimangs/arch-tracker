@@ -18,6 +18,10 @@ use std::collections::HashMap;
 
 const BUCKET_SECS: usize = 300;
 
+/// No stored span is longer than this: the ledger splits spans at local midnight (a DST day has
+/// 25 hours). Bounds how far back a day query looks for spans that reach into the day.
+const MAX_SPAN_MS: i64 = 26 * 3_600_000;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum State {
@@ -219,7 +223,7 @@ pub fn classify(spans: &[Span], ds: i64, de: i64, r: &Rules) -> Vec<State> {
     let mut mic = vec![false; n];
     let mut inhib = vec![false; n];
     let mut state = vec![State::Active; n];
-    let mut gaps = vec![];
+    let mut gaps: Vec<(i64, i64)> = vec![];
     for s in spans {
         let (a, b) = (sec(s.start), sec(s.end));
         match s.kind {
@@ -235,7 +239,7 @@ pub fn classify(spans: &[Span], ds: i64, de: i64, r: &Rules) -> Vec<State> {
             state[i] = State::Call;
         }
     }
-    for (gs, ge) in gaps {
+    for (gs, ge) in join_gaps(gaps) {
         let len = ge - gs;
         if len < r.idle_ms {
             continue; // short pause: still active
@@ -258,6 +262,20 @@ pub fn classify(spans: &[Span], ds: i64, de: i64, r: &Rules) -> Vec<State> {
         }
     }
     state
+}
+
+/// Joins no-input pieces that touch or overlap: the ledger cuts a gap in two at midnight (and a
+/// restart can do the same), but the threshold applies to the whole gap.
+fn join_gaps(mut gaps: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+    gaps.sort_unstable();
+    let mut out: Vec<(i64, i64)> = Vec::with_capacity(gaps.len());
+    for (s, e) in gaps {
+        match out.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => out.push((s, e)),
+        }
+    }
+    out
 }
 
 #[derive(Default)]
@@ -302,10 +320,56 @@ pub fn build_day(conn: &Connection, cfg: &Config, date: &str) -> Result<DayRepor
     let Some((ds, de)) = crate::util::date_bounds(date) else {
         anyhow::bail!("bad date {date:?}");
     };
-    let spans = store::spans_in(conn, ds, de)?;
+    build(conn, cfg, date, ds, de)
+}
+
+fn build(conn: &Connection, cfg: &Config, date: &str, ds: i64, de: i64) -> Result<DayReport> {
+    let rules = Rules::from(cfg);
+    let spans = day_spans(conn, ds, de, rules.idle_ms.max(rules.call_ms))?;
     let ids: Vec<i64> = spans.iter().map(|s| s.subject).collect();
     let subjects = store::subjects_by_id(conn, &ids)?;
     Ok(compute(cfg, date, ds, de, &spans, &subjects))
+}
+
+/// Every span that overlaps [ds, de), clipped to it, plus the no-input pieces up to pad beyond
+/// either edge (unclipped): a gap that runs over midnight is judged by its whole length, and pad
+/// (the longest threshold) is as far as that length can matter.
+fn day_spans(conn: &Connection, ds: i64, de: i64, pad: i64) -> Result<Vec<Span>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT kind, subject_id, start_ms, end_ms FROM spans
+         WHERE start_ms >= ?1 AND start_ms < ?2 AND end_ms > ?3 ORDER BY start_ms",
+    )?;
+    let rows = stmt.query_map(params![ds - pad - MAX_SPAN_MS, de + pad, ds - pad], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (k, subject, start, end) = row?;
+        let Some(kind) = Kind::from_i64(k) else {
+            continue;
+        };
+        if kind == Kind::InputIdle {
+            out.push(Span {
+                kind,
+                subject,
+                start,
+                end,
+            });
+        } else if start < de && end > ds {
+            out.push(Span {
+                kind,
+                subject,
+                start: start.max(ds),
+                end: end.min(de),
+            });
+        }
+    }
+    Ok(out)
 }
 
 pub fn compute(
@@ -705,7 +769,9 @@ pub fn settings_hash(cfg: &Config) -> String {
 /// Day report, served from the rollup cache for days that are over.
 pub fn day_cached(conn: &Connection, cfg: &Config, date: &str) -> Result<DayReport> {
     let (_, de) = crate::util::date_bounds(date).unwrap_or((0, i64::MAX));
-    let finished = crate::util::now_ms() > de + 10 * 60_000;
+    // A no-input gap that started before midnight is judged with the part after it.
+    let pad = cfg.idle.threshold_secs.max(cfg.idle.call_threshold_secs) as i64 * 1000;
+    let finished = crate::util::now_ms() > de.saturating_add(pad + 10 * 60_000);
     let hash = settings_hash(cfg);
     if finished {
         let cached: Option<String> = conn
@@ -816,6 +882,79 @@ mod tests {
         assert_eq!(count(&classify(&spans, DS, DS + H, &r), State::Idle), 0);
         r.idle_ms = M;
         assert_eq!(count(&classify(&spans, DS, DS + H, &r), State::Idle), 120);
+    }
+
+    #[test]
+    fn idle_pieces_that_touch_are_one_gap() {
+        // 23:58-00:00 stored on one day, 00:00-00:03 on the next: one 5-minute gap.
+        let spans = vec![
+            sp(Kind::InputIdle, 0, H - 2 * M, H),
+            sp(Kind::InputIdle, 0, H, H + 3 * M),
+        ];
+        let st = classify(&spans, DS, DS + H, &rules());
+        assert_eq!(count(&st, State::Idle), 2 * 60);
+        // The other side of midnight: 2 minutes before the day plus 2 inside it.
+        let spans = vec![
+            sp(Kind::InputIdle, 0, -2 * M, 0),
+            sp(Kind::InputIdle, 0, 0, 2 * M),
+        ];
+        let st = classify(&spans, DS, DS + H, &rules());
+        assert_eq!(count(&st, State::Idle), 2 * 60);
+        // A real input between two short gaps keeps both active.
+        let spans = vec![
+            sp(Kind::InputIdle, 0, 0, 2 * M),
+            sp(Kind::InputIdle, 0, 2 * M + 1000, 4 * M),
+        ];
+        assert_eq!(
+            count(&classify(&spans, DS, DS + H, &rules()), State::Idle),
+            0
+        );
+    }
+
+    fn temp_store() -> crate::store::Store {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("at-report-{}-{nanos}", std::process::id()));
+        crate::store::Store::open(&dir.join("t.db")).unwrap()
+    }
+
+    fn insert(conn: &Connection, kind: Kind, subject: i64, a: i64, b: i64) {
+        conn.execute(
+            "INSERT INTO spans(kind, subject_id, start_ms, end_ms) VALUES (?1, ?2, ?3, ?4)",
+            params![kind as i64, subject, DS + a, DS + b],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn gap_split_at_midnight_is_idle_on_both_days() {
+        let st = temp_store();
+        let c = &st.conn;
+        c.execute(
+            "INSERT INTO subjects(app, app_name, title, host, private, program, project)
+             VALUES ('editor', 'Editor', '', '', 0, '', '')",
+            [],
+        )
+        .unwrap();
+        let mut cfg = Config::default();
+        cfg.idle.threshold_secs = 180;
+        // Day one is [0, H), day two [H, 2H); the gap runs 23:58-00:03 and the ledger split it.
+        insert(c, Kind::Focus, 1, 0, H);
+        insert(c, Kind::Focus, 1, H, 2 * H);
+        insert(c, Kind::InputIdle, 0, H - 2 * M, H);
+        insert(c, Kind::InputIdle, 0, H, H + 3 * M);
+        let one = build(c, &cfg, "one", DS, DS + H).unwrap();
+        assert_eq!(one.totals.idle_removed, 2 * 60);
+        assert_eq!(one.totals.screen, 3600 - 2 * 60);
+        let two = build(c, &cfg, "two", DS + H, DS + 2 * H).unwrap();
+        assert_eq!(two.totals.idle_removed, 3 * 60);
+        // A span that started before the day (not split) still counts inside it.
+        insert(c, Kind::Focus, 1, 2 * H, 3 * H);
+        insert(c, Kind::Locked, 0, 2 * H - M, 2 * H + 10 * M);
+        let three = build(c, &cfg, "three", DS + 2 * H, DS + 3 * H).unwrap();
+        assert_eq!(three.totals.screen, 3600 - 10 * 60);
     }
 
     #[test]
