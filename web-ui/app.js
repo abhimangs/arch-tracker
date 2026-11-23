@@ -507,19 +507,20 @@
     const c = s.config;
     let cats = c.categories.map((x) => ({ ...x }));
     const st = status || {};
-    const pausedText = st.paused ? (st.paused_until_ms ? `Paused until ${hm(st.paused_until_ms)}.` : "Paused until you resume.") : "Tracking is on.";
     const tools = c.agents.tools.map((t) => `${t.id} | ${t.name} | ${t.matches.join(", ")}`).join("\n");
     const t0 = today();
     view.innerHTML = `<form class="settings" id="sform" novalidate>
       <div class="toolbar"><h1>Settings</h1><span class="msg">Saved to ${esc(s.config_path)}</span></div>
 
-      <fieldset>
+      <fieldset id="pausebox">
         <legend>Pause</legend>
-        ${field("Tracking", pausedText, `<div class="inline">
-          <button type="button" class="btn" data-pause="30">Pause 30 minutes</button>
-          <button type="button" class="btn" data-pause="60">Pause 1 hour</button>
-          <button type="button" class="btn" data-pause="">Pause until I resume</button>
-          <button type="button" class="btn" data-resume ${st.paused ? "" : "disabled"}>Resume</button></div>`)}
+        <div class="field"><span class="label" id="pause-label">Tracking<span class="hint" id="pausestate" role="status">${esc(pauseText(st))}</span></span>
+          <div class="inline" role="group" aria-labelledby="pause-label">
+            <button type="button" class="btn" data-pause="30">Pause 30 minutes</button>
+            <button type="button" class="btn" data-pause="60">Pause 1 hour</button>
+            <button type="button" class="btn" data-pause="">Pause until I resume</button>
+            <button type="button" class="btn" data-resume ${st.paused ? "" : "disabled"}>Resume</button>
+          </div></div>
       </fieldset>
 
       <fieldset>
@@ -623,25 +624,17 @@
       cats.splice(Number(b.dataset.delcat), 1);
       drawCats();
     });
-    view.querySelectorAll("[data-pause]").forEach((b) =>
-      b.addEventListener("click", async () => {
-        const m = b.dataset.pause;
-        try {
-          await send("POST", "/api/pause", { minutes: m ? Number(m) : null });
-          await pollStatus();
-          pageSettings(renderGen);
-        } catch (e) {
-          msg(e.message, "error");
-        }
-      }),
-    );
-    view.querySelector("[data-resume]").addEventListener("click", async () => {
+    // Pause and resume redraw only this fieldset (through pollStatus and syncPause), so edits
+    // elsewhere in the form stay as they are.
+    $("pausebox").addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-pause], [data-resume]");
+      if (!b || b.disabled) return;
       try {
-        await send("POST", "/api/resume");
+        if (b.matches("[data-resume]")) await send("POST", "/api/resume");
+        else await send("POST", "/api/pause", { minutes: b.dataset.pause ? Number(b.dataset.pause) : null });
         await pollStatus();
-        pageSettings(renderGen);
-      } catch (e) {
-        msg(e.message, "error");
+      } catch (err) {
+        msg(err.message, "error");
       }
     });
 
@@ -692,6 +685,22 @@
 
   // ---------- now strip + notices ----------
 
+  const pauseText = (st) =>
+    st.paused ? (st.paused_until_ms ? `Paused until ${hm(st.paused_until_ms)}.` : "Paused until you resume.") : "Tracking is on.";
+
+  // Keeps the Settings page's Pause fieldset in step with the tracker without touching the form.
+  function syncPause() {
+    const box = document.getElementById("pausebox");
+    if (!box || !status) return;
+    const text = document.getElementById("pausestate");
+    const t = pauseText(status);
+    if (text.textContent !== t) text.textContent = t;
+    const resume = box.querySelector("[data-resume]");
+    const hadFocus = document.activeElement === resume;
+    resume.disabled = !status.paused;
+    if (hadFocus && resume.disabled) box.querySelector("[data-pause]").focus();
+  }
+
   function stateOf(s) {
     if (s.viewer) return ["paused", "Read-only view"];
     if (s.paused) return ["paused", s.paused_until_ms ? `Paused until ${hm(s.paused_until_ms)}` : "Paused"];
@@ -730,6 +739,7 @@
       pollStatus();
     });
     renderNotices();
+    syncPause();
   }
 
   function renderNotices() {
