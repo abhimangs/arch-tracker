@@ -408,10 +408,11 @@
     return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Screen time per day by category">${svg}</svg>`;
   }
 
-  function heatmap(days) {
+  function heatmap(days, weekStart) {
     const max = Math.max(1, ...days.map((d) => d.totals.screen));
     const first = parseYmd(days[0].date);
-    const lead = (first.getDay() + 6) % 7; // weeks start Monday
+    const startDay = weekStart === "sunday" ? 0 : 1; // getDay(): 0 is Sunday
+    const lead = (first.getDay() - startDay + 7) % 7;
     const cells = [];
     for (let i = 0; i < lead; i++) cells.push('<i style="visibility:hidden"></i>');
     for (const d of days) {
@@ -419,7 +420,7 @@
       const bg = d.totals.screen ? `color-mix(in srgb, #5fb4e0 ${Math.max(12, pct)}%, transparent)` : "";
       cells.push(`<i style="${bg ? `background:${bg}` : ""}" title="${esc(dayLabel(d.date, { weekday: "short", day: "numeric", month: "short" }))}: ${dur(d.totals.screen)}"></i>`);
     }
-    return `<div class="heat-wrap"><div class="heat" role="img" aria-label="Screen time per day for the last year">${cells.join("")}</div></div>`;
+    return `<div class="heat-wrap"><div class="heat" role="img" aria-label="Screen time per day for the last year, one column per week starting ${weekStart === "sunday" ? "Sunday" : "Monday"}">${cells.join("")}</div></div>`;
   }
 
   async function pageTrends(n) {
@@ -444,7 +445,7 @@
         <div><span>Spent watching</span><b>${watchShare}%</b></div>
         <div><span>Agents worked</span><b>${dur(r.totals.agent_busy)}</b></div>
       </div>
-      ${n === "365" ? heatmap(r.days) : stackedChart(r.days, r.categories)}
+      ${n === "365" ? heatmap(r.days, r.week_start) : stackedChart(r.days, r.categories)}
       <div class="cols">
         <div><section><h2>Top apps</h2>${rowsHtml(r.apps, "tapp", { max: 10, empty: "No apps in this period." })}</section></div>
         <div>
@@ -552,6 +553,7 @@
       <fieldset>
         <legend>Dashboard</legend>
         ${field("Port", "The page moves to the new port after saving.", num("port", c.dashboard.port, "", 1024, 65535))}
+        ${field("Weeks start on", "Used by the year view in Trends.", `<select id="weekstart">${["monday", "sunday"].map((d) => `<option value="${d}" ${c.general.week_start === d ? "selected" : ""}>${d[0].toUpperCase() + d.slice(1)}</option>`).join("")}</select>`)}
         ${field("Theme", "", `<div class="seg" role="group" aria-label="Theme">${["system", "dark", "light"].map((t) => `<button type="button" data-theme-pick="${t}" aria-pressed="${c.dashboard.theme === t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div>`)}
         ${field("Custom CSS", "Loaded after the built-in styles. Variables like --bg, --text and --shu are yours to change.", `<textarea id="css" class="code" spellcheck="false">${esc(s.custom_css)}</textarea>`)}
       </fieldset>
@@ -641,6 +643,7 @@
       next.general.sample_interval_secs = n("sample");
       next.general.flush_interval_secs = n("flush");
       next.general.track_running = $("running").checked;
+      next.general.week_start = $("weekstart").value;
       next.visibility.min_fraction = n("visfrac") / 100;
       next.agents.busy_cpu_percent = n("acpu");
       next.agents.busy_child_cpu_percent = n("akid");

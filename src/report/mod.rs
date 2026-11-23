@@ -748,6 +748,8 @@ pub struct DaySummary {
 pub struct RangeReport {
     pub from: String,
     pub to: String,
+    /// "monday" or "sunday": how the page lays out weeks.
+    pub week_start: String,
     pub days: Vec<DaySummary>,
     pub totals: Totals,
     pub apps: Vec<Row>,
@@ -849,6 +851,7 @@ pub fn range(
     let mut out = RangeReport {
         from: from.into(),
         to: to.into(),
+        week_start: cfg.general.week_start.clone(),
         ..Default::default()
     };
     let (mut apps, mut sites, mut cats, mut progs) = (

@@ -623,6 +623,10 @@ impl Config {
         if !matches!(self.privacy.exclude_mode.as_str(), "hide" | "drop") {
             self.privacy.exclude_mode = "hide".into();
         }
+        self.general.week_start = self.general.week_start.trim().to_lowercase();
+        if !matches!(self.general.week_start.as_str(), "monday" | "sunday") {
+            self.general.week_start = "monday".into();
+        }
         self
     }
 
@@ -705,6 +709,12 @@ impl Config {
         }
         if !matches!(self.privacy.exclude_mode.as_str(), "hide" | "drop") {
             return Err(invalid("privacy.exclude_mode", "Choose hide or drop."));
+        }
+        if !matches!(self.general.week_start.as_str(), "monday" | "sunday") {
+            return Err(invalid(
+                "general.week_start",
+                "Weeks start on monday or sunday.",
+            ));
         }
         let mut names = std::collections::HashSet::new();
         for c in &self.categories {
@@ -809,6 +819,10 @@ mod tests {
         assert_eq!(
             field(&|c| c.privacy.exclude_mode = "keep".into()),
             "privacy.exclude_mode"
+        );
+        assert_eq!(
+            field(&|c| c.general.week_start = "friday".into()),
+            "general.week_start"
         );
         assert_eq!(field(&|c| c.categories[0].name = " ".into()), "categories");
         assert_eq!(
