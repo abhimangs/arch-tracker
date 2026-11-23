@@ -128,6 +128,12 @@ fn stored_pause(store: &Store, now: i64) -> Option<Option<i64>> {
     }
 }
 
+/// The KWin script re-sends every 60 s: a snapshot older than this is stale, and focus and
+/// visibility are not recorded from it.
+const KWIN_STALE_MS: i64 = 150_000;
+const KWIN_RETRY_MIN_MS: i64 = 30_000;
+const KWIN_RETRY_MAX_MS: i64 = 600_000;
+
 /// How long the extension may lag behind a KWin focus or caption change.
 const FOCUS_GRACE_MS: i64 = 2_000;
 
@@ -223,7 +229,9 @@ pub struct Tracker {
     paused: Option<Option<i64>>,
     kwin: Option<kwin::Snapshot>,
     kwin_last: i64,
-    kwin_reloading: bool,
+    /// Next KWin script reload attempt while snapshots are missing, and the delay after it.
+    kwin_retry_at: i64,
+    kwin_backoff_ms: i64,
     /// KWin's focused window and its caption, and when either last changed.
     focus_key: Option<(String, String)>,
     focus_changed_at: i64,
@@ -284,7 +292,8 @@ impl Tracker {
             kwin: None,
             // Grace period: the first snapshot arrives right after the script loads.
             kwin_last: now,
-            kwin_reloading: false,
+            kwin_retry_at: 0,
+            kwin_backoff_ms: KWIN_RETRY_MIN_MS,
             focus_key: None,
             focus_changed_at: 0,
             focus: None,
@@ -340,7 +349,8 @@ impl Tracker {
                 }
                 self.kwin = Some(*snap);
                 self.kwin_last = now;
-                self.kwin_reloading = false;
+                self.kwin_retry_at = 0;
+                self.kwin_backoff_ms = KWIN_RETRY_MIN_MS;
                 self.refresh_terminals(now, false).await;
                 self.refresh_pbi(now, false).await;
             }
@@ -501,7 +511,11 @@ impl Tracker {
             && !self.suspended
             && self.kwin.is_some()
         {
-            crate::sources::running::scan(conn, &self.desktop, self.kwin.as_ref())
+            let kwin = self
+                .kwin
+                .as_ref()
+                .filter(|_| now - self.kwin_last <= KWIN_STALE_MS);
+            crate::sources::running::scan(conn, &self.desktop, kwin)
                 .await
                 .into_iter()
                 .filter_map(|(k, n)| self.apply_privacy(Subject::app(&k, &n)))
@@ -510,11 +524,13 @@ impl Tracker {
             vec![]
         };
         // The KWin script re-sends every 60 s; silence means KWin restarted or dropped it.
-        if now - self.kwin_last > 150_000
-            && !self.kwin_reloading
+        // Reload it, retrying with a growing delay until a snapshot arrives again.
+        if now - self.kwin_last > KWIN_STALE_MS
+            && now >= self.kwin_retry_at
             && let Some(conn) = self.conn.clone()
         {
-            self.kwin_reloading = true;
+            self.kwin_retry_at = now + self.kwin_backoff_ms;
+            self.kwin_backoff_ms = (self.kwin_backoff_ms * 2).min(KWIN_RETRY_MAX_MS);
             tokio::spawn(async move {
                 if let Err(e) = kwin::load_script(&conn).await {
                     tracing::warn!("KWin script reload failed: {e:#}");
@@ -575,6 +591,9 @@ impl Tracker {
     /// Looks inside focused/visible terminal windows. Cached per window; refreshed when the
     /// caption changes, and on the periodic tick for windows on screen.
     async fn refresh_terminals(&mut self, now: i64, periodic: bool) {
+        if now - self.kwin_last > KWIN_STALE_MS {
+            return;
+        }
         let Some(snap) = &self.kwin else { return };
         let focused_id = snap.focused().map(|w| w.id.clone());
         let mut targets: Vec<(String, String, i64, bool, String)> = vec![];
@@ -686,6 +705,9 @@ impl Tracker {
 
     /// Re-queries Plasma Browser Integration when a browser window on screen has no extension.
     async fn refresh_pbi(&mut self, now: i64, periodic: bool) {
+        if now - self.kwin_last > KWIN_STALE_MS {
+            return;
+        }
         let Some(snap) = &self.kwin else { return };
         let mut need = None;
         let mut on_screen: Vec<&Win> = snap.focused().into_iter().collect();
@@ -994,7 +1016,10 @@ impl Tracker {
 
         let mut shown: Vec<(&Win, Subject, Option<TabPick>)> = vec![];
         let mut focus = None;
-        if let (Some(snap), false) = (&self.kwin, blocked) {
+        // A stale snapshot no longer says what is on screen: record no focus rather than piling
+        // time onto the last known window.
+        let kwin_fresh = now - self.kwin_last <= KWIN_STALE_MS;
+        if let (Some(snap), false, true) = (&self.kwin, blocked, kwin_fresh) {
             if let Some(w) = snap.focused()
                 && let Some((s, p)) = self.window_subject_ex(w, true, now)
             {
@@ -1093,7 +1118,7 @@ impl Tracker {
                 "playing": p.playing, "pid": p.pid, "host": media::url_host(&p.url), "title": p.title})).collect::<Vec<_>>(),
             "open_spans": self.ledger.open_count(),
             "sources": {
-                "kwin": {"ok": now - self.kwin_last < 150_000, "last_ms": self.kwin_last,
+                "kwin": {"ok": now - self.kwin_last <= KWIN_STALE_MS, "last_ms": self.kwin_last,
                          "windows": self.kwin.as_ref().map(|k| k.windows.len()).unwrap_or(0)},
                 "idle": {"ok": self.idle_version > 0, "protocol_version": self.idle_version, "error": self.idle_error},
                 "logind": {"ok": self.sys_conn.is_some()},
@@ -1177,6 +1202,21 @@ mod tests {
         let want = vec![(1_000, 10_000), (20_000, 30_000)];
         assert_eq!(kinds_in_db(&t, Kind::AgentBusy), want);
         assert_eq!(kinds_in_db(&t, Kind::Running), want);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_kwin_snapshot_records_no_focus() {
+        let mut t = test_tracker();
+        t.handle(Event::Kwin(Box::new(one_window(
+            "org.example.Editor",
+            "Notes",
+        ))))
+        .await;
+        assert!(t.focus.is_some());
+        let later = t.kwin_last + KWIN_STALE_MS + 1;
+        t.reconcile(later);
+        assert!(t.focus.is_none());
+        assert!(t.visible.is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
