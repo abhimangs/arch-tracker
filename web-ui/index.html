@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="__THEME__">
+<html lang="en" data-theme="__THEME__" data-palette="__PALETTE__" data-dark="__DARK__" data-accent="__ACCENT__" data-theme-cats="__THEMECATS__">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -8,11 +8,12 @@
 <title>arch-tracker</title>
 <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="/assets/themes.css">
 <link rel="stylesheet" href="/custom.css" id="custom-css">
 <script src="/assets/app.js" defer></script>
 </head>
 <body>
-<a class="skip" href="#view">Skip to content</a>
+<a class="skip" href="#view" id="skip">Skip to content</a>
 <header class="top">
   <a class="mark" href="#/today"><img src="/assets/icon.svg" alt="" width="22" height="22">arch-tracker</a>
   <nav class="nav" aria-label="Pages">
@@ -23,6 +24,8 @@
     <a href="#/settings" data-route="settings">Settings</a>
   </nav>
   <div class="now" id="now" aria-live="polite"></div>
+  <button type="button" class="look-btn" id="lookbtn" aria-haspopup="dialog" aria-expanded="false" aria-controls="lookpop" title="Theme"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 3a9 9 0 0 0 0 18c1.1 0 1.8-.8 1.8-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-.9.8-1.7 1.7-1.7H16a5 5 0 0 0 5-5c0-4-4-7.2-9-7.2Zm-5.5 9a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Zm3-4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Zm3 4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Z"/></svg><span class="sr">Theme</span></button>
+  <div class="look-pop" id="lookpop" role="dialog" aria-label="Theme" hidden></div>
 </header>
 <div class="notices" id="notices"></div>
 <main id="view" tabindex="-1"></main>

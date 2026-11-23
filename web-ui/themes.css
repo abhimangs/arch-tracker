@@ -1,0 +1,407 @@
+/* Theme palettes: Aizome (the original), Catppuccin and Rosé Pine.
+   <html> carries data-palette, data-theme (system | dark | light), data-dark (the dark flavour)
+   and data-accent. Each flavour defines raw --p-* colours; each palette maps them onto the
+   semantic variables app.css uses (--bg, --raise, --line, --text, --mist, --faint, --shu …)
+   and onto --cat-* slots that category colours use when "follow theme" is on.
+   Catppuccin: https://catppuccin.com/palette  ·  Rosé Pine: https://rosepinetheme.com/palette */
+
+/* ---------- Aizome ---------- */
+
+:root[data-palette="aizome"] {
+  --p-bg: #121a33;
+  --p-raise: #19223f;
+  --p-line: #2a3558;
+  --p-text: #ece7dc;
+  --p-mist: #8f98b8;
+  --p-faint: #3b4669;
+  --p-cinnabar: #e5533d;
+  --p-gold: #e8b84a;
+  --p-jade: #7cc59a;
+  --p-sky: #6f9ee8;
+  --p-lilac: #b49be8;
+  --p-sakura: #f08fb0;
+  --p-teal: #4fc1c0;
+  color-scheme: dark;
+}
+
+/* ---------- Catppuccin ---------- */
+
+:root[data-palette="catppuccin"][data-dark="mocha"] {
+  --p-rosewater: #f5e0dc;
+  --p-flamingo: #f2cdcd;
+  --p-pink: #f5c2e7;
+  --p-mauve: #cba6f7;
+  --p-red: #f38ba8;
+  --p-maroon: #eba0ac;
+  --p-peach: #fab387;
+  --p-yellow: #f9e2af;
+  --p-green: #a6e3a1;
+  --p-teal: #94e2d5;
+  --p-sky: #89dceb;
+  --p-sapphire: #74c7ec;
+  --p-blue: #89b4fa;
+  --p-lavender: #b4befe;
+  --p-text: #cdd6f4;
+  --p-subtext1: #bac2de;
+  --p-subtext0: #a6adc8;
+  --p-overlay2: #9399b2;
+  --p-overlay1: #7f849c;
+  --p-overlay0: #6c7086;
+  --p-surface2: #585b70;
+  --p-surface1: #45475a;
+  --p-surface0: #313244;
+  --p-base: #1e1e2e;
+  --p-mantle: #181825;
+  --p-crust: #11111b;
+  color-scheme: dark;
+}
+
+:root[data-palette="catppuccin"][data-dark="macchiato"] {
+  --p-rosewater: #f4dbd6;
+  --p-flamingo: #f0c6c6;
+  --p-pink: #f5bde6;
+  --p-mauve: #c6a0f6;
+  --p-red: #ed8796;
+  --p-maroon: #ee99a0;
+  --p-peach: #f5a97f;
+  --p-yellow: #eed49f;
+  --p-green: #a6da95;
+  --p-teal: #8bd5ca;
+  --p-sky: #91d7e3;
+  --p-sapphire: #7dc4e4;
+  --p-blue: #8aadf4;
+  --p-lavender: #b7bdf8;
+  --p-text: #cad3f5;
+  --p-subtext1: #b8c0e0;
+  --p-subtext0: #a5adcb;
+  --p-overlay2: #939ab7;
+  --p-overlay1: #8087a2;
+  --p-overlay0: #6e738d;
+  --p-surface2: #5b6078;
+  --p-surface1: #494d64;
+  --p-surface0: #363a4f;
+  --p-base: #24273a;
+  --p-mantle: #1e2030;
+  --p-crust: #181926;
+  color-scheme: dark;
+}
+
+:root[data-palette="catppuccin"][data-dark="frappe"] {
+  --p-rosewater: #f2d5cf;
+  --p-flamingo: #eebebe;
+  --p-pink: #f4b8e4;
+  --p-mauve: #ca9ee6;
+  --p-red: #e78284;
+  --p-maroon: #ea999c;
+  --p-peach: #ef9f76;
+  --p-yellow: #e5c890;
+  --p-green: #a6d189;
+  --p-teal: #81c8be;
+  --p-sky: #99d1db;
+  --p-sapphire: #85c1dc;
+  --p-blue: #8caaee;
+  --p-lavender: #babbf1;
+  --p-text: #c6d0f5;
+  --p-subtext1: #b5bfe2;
+  --p-subtext0: #a5adce;
+  --p-overlay2: #949cbb;
+  --p-overlay1: #838ba7;
+  --p-overlay0: #737994;
+  --p-surface2: #626880;
+  --p-surface1: #51576d;
+  --p-surface0: #414559;
+  --p-base: #303446;
+  --p-mantle: #292c3c;
+  --p-crust: #232634;
+  color-scheme: dark;
+}
+
+/* ---------- Rosé Pine ---------- */
+
+:root[data-palette="rose-pine"][data-dark="main"] {
+  --p-base: #191724;
+  --p-surface: #1f1d2e;
+  --p-overlay: #26233a;
+  --p-muted: #6e6a86;
+  --p-subtle: #908caa;
+  --p-text: #e0def4;
+  --p-love: #eb6f92;
+  --p-gold: #f6c177;
+  --p-rose: #ebbcba;
+  --p-pine: #31748f;
+  --p-foam: #9ccfd8;
+  --p-iris: #c4a7e7;
+  --p-hl-low: #21202e;
+  --p-hl-med: #403d52;
+  --p-hl-high: #524f67;
+  color-scheme: dark;
+}
+
+:root[data-palette="rose-pine"][data-dark="moon"] {
+  --p-base: #232136;
+  --p-surface: #2a273f;
+  --p-overlay: #393552;
+  --p-muted: #6e6a86;
+  --p-subtle: #908caa;
+  --p-text: #e0def4;
+  --p-love: #eb6f92;
+  --p-gold: #f6c177;
+  --p-rose: #ea9a97;
+  --p-pine: #3e8fb0;
+  --p-foam: #9ccfd8;
+  --p-iris: #c4a7e7;
+  --p-hl-low: #2a283e;
+  --p-hl-med: #44415a;
+  --p-hl-high: #56526e;
+  color-scheme: dark;
+}
+
+/* ---------- light flavours: Fog, Latte, Dawn ---------- */
+
+:root[data-palette="aizome"][data-theme="light"] {
+  --p-bg: #eef1f7;
+  --p-raise: #e2e7f1;
+  --p-line: #c9d1e3;
+  --p-text: #18203d;
+  --p-mist: #5b6584;
+  --p-faint: #aab3c9;
+  --p-cinnabar: #c8402c;
+  --p-gold: #a8780f;
+  --p-jade: #2f8a57;
+  --p-sky: #2f5fb8;
+  --p-lilac: #6e4fc0;
+  --p-sakura: #b8436a;
+  --p-teal: #1f8584;
+  color-scheme: light;
+}
+
+:root[data-palette="catppuccin"][data-theme="light"] {
+  --p-rosewater: #dc8a78;
+  --p-flamingo: #dd7878;
+  --p-pink: #ea76cb;
+  --p-mauve: #8839ef;
+  --p-red: #d20f39;
+  --p-maroon: #e64553;
+  --p-peach: #fe640b;
+  --p-yellow: #df8e1d;
+  --p-green: #40a02b;
+  --p-teal: #179299;
+  --p-sky: #04a5e5;
+  --p-sapphire: #209fb5;
+  --p-blue: #1e66f5;
+  --p-lavender: #7287fd;
+  --p-text: #4c4f69;
+  --p-subtext1: #5c5f77;
+  --p-subtext0: #6c6f85;
+  --p-overlay2: #7c7f93;
+  --p-overlay1: #8c8fa1;
+  --p-overlay0: #9ca0b0;
+  --p-surface2: #acb0be;
+  --p-surface1: #bcc0cc;
+  --p-surface0: #ccd0da;
+  --p-base: #eff1f5;
+  --p-mantle: #e6e9ef;
+  --p-crust: #dce0e8;
+  color-scheme: light;
+}
+
+:root[data-palette="rose-pine"][data-theme="light"] {
+  --p-base: #faf4ed;
+  --p-surface: #fffaf3;
+  --p-overlay: #f2e9e1;
+  --p-muted: #9893a5;
+  --p-subtle: #797593;
+  --p-text: #575279;
+  --p-love: #b4637a;
+  --p-gold: #ea9d34;
+  --p-rose: #d7827e;
+  --p-pine: #286983;
+  --p-foam: #56949f;
+  --p-iris: #907aa9;
+  --p-hl-low: #f4ede8;
+  --p-hl-med: #dfdad9;
+  --p-hl-high: #cecacd;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-palette="aizome"][data-theme="system"] {
+    --p-bg: #eef1f7;
+    --p-raise: #e2e7f1;
+    --p-line: #c9d1e3;
+    --p-text: #18203d;
+    --p-mist: #5b6584;
+    --p-faint: #aab3c9;
+    --p-cinnabar: #c8402c;
+    --p-gold: #a8780f;
+    --p-jade: #2f8a57;
+    --p-sky: #2f5fb8;
+    --p-lilac: #6e4fc0;
+    --p-sakura: #b8436a;
+    --p-teal: #1f8584;
+    color-scheme: light;
+  }
+
+  :root[data-palette="catppuccin"][data-theme="system"] {
+    --p-rosewater: #dc8a78;
+    --p-flamingo: #dd7878;
+    --p-pink: #ea76cb;
+    --p-mauve: #8839ef;
+    --p-red: #d20f39;
+    --p-maroon: #e64553;
+    --p-peach: #fe640b;
+    --p-yellow: #df8e1d;
+    --p-green: #40a02b;
+    --p-teal: #179299;
+    --p-sky: #04a5e5;
+    --p-sapphire: #209fb5;
+    --p-blue: #1e66f5;
+    --p-lavender: #7287fd;
+    --p-text: #4c4f69;
+    --p-subtext1: #5c5f77;
+    --p-subtext0: #6c6f85;
+    --p-overlay2: #7c7f93;
+    --p-overlay1: #8c8fa1;
+    --p-overlay0: #9ca0b0;
+    --p-surface2: #acb0be;
+    --p-surface1: #bcc0cc;
+    --p-surface0: #ccd0da;
+    --p-base: #eff1f5;
+    --p-mantle: #e6e9ef;
+    --p-crust: #dce0e8;
+    color-scheme: light;
+  }
+
+  :root[data-palette="rose-pine"][data-theme="system"] {
+    --p-base: #faf4ed;
+    --p-surface: #fffaf3;
+    --p-overlay: #f2e9e1;
+    --p-muted: #9893a5;
+    --p-subtle: #797593;
+    --p-text: #575279;
+    --p-love: #b4637a;
+    --p-gold: #ea9d34;
+    --p-rose: #d7827e;
+    --p-pine: #286983;
+    --p-foam: #56949f;
+    --p-iris: #907aa9;
+    --p-hl-low: #f4ede8;
+    --p-hl-med: #dfdad9;
+    --p-hl-high: #cecacd;
+    color-scheme: light;
+  }
+}
+
+/* ---------- semantic mapping ---------- */
+
+:root[data-palette="aizome"] {
+  --bg: var(--p-bg);
+  --raise: var(--p-raise);
+  --line: var(--p-line);
+  --text: var(--p-text);
+  --mist: var(--p-mist);
+  --faint: var(--p-faint);
+  --shu: var(--p-accent, var(--p-cinnabar));
+  --ok: var(--p-jade);
+  --bad: var(--p-cinnabar);
+  --warn: var(--p-gold);
+  --info: var(--p-teal);
+  --agent: var(--p-lilac);
+  --heat: var(--p-sky);
+}
+
+:root[data-palette="catppuccin"] {
+  --bg: var(--p-base);
+  --raise: var(--p-surface0);
+  --line: var(--p-surface1);
+  --text: var(--p-text);
+  --mist: var(--p-subtext0);
+  --faint: var(--p-surface2);
+  --shu: var(--p-accent, var(--p-mauve));
+  --ok: var(--p-green);
+  --bad: var(--p-red);
+  --warn: var(--p-yellow);
+  --info: var(--p-teal);
+  --agent: var(--p-mauve);
+  --heat: var(--p-accent, var(--p-mauve));
+  --cat-ai: var(--p-mauve);
+  --cat-development: var(--p-blue);
+  --cat-social: var(--p-pink);
+  --cat-video: var(--p-red);
+  --cat-messaging: var(--p-green);
+  --cat-music: var(--p-yellow);
+  --cat-meetings: var(--p-teal);
+  --cat-productivity: var(--p-lavender);
+  --cat-learning: var(--p-peach);
+  --cat-system: var(--p-overlay2);
+  --cat-browsing: var(--p-sky);
+  --cat-other: var(--p-overlay0);
+  --cat-x1: var(--p-flamingo);
+  --cat-x2: var(--p-sapphire);
+  --cat-x3: var(--p-maroon);
+  --cat-x4: var(--p-rosewater);
+}
+
+:root[data-palette="rose-pine"] {
+  --bg: var(--p-base);
+  --raise: var(--p-surface);
+  --line: var(--p-hl-med);
+  --text: var(--p-text);
+  --mist: var(--p-subtle);
+  --faint: var(--p-hl-high);
+  --shu: var(--p-accent, var(--p-iris));
+  --ok: var(--p-foam);
+  --bad: var(--p-love);
+  --warn: var(--p-gold);
+  --info: var(--p-pine);
+  --agent: var(--p-iris);
+  --heat: var(--p-accent, var(--p-iris));
+  --cat-ai: var(--p-iris);
+  --cat-development: var(--p-pine);
+  --cat-social: var(--p-rose);
+  --cat-video: var(--p-love);
+  --cat-messaging: var(--p-foam);
+  --cat-music: var(--p-gold);
+  --cat-meetings: color-mix(in oklab, var(--p-foam) 50%, var(--p-pine));
+  --cat-productivity: color-mix(in oklab, var(--p-gold) 45%, var(--p-pine));
+  --cat-learning: color-mix(in oklab, var(--p-gold) 55%, var(--p-love));
+  --cat-system: var(--p-subtle);
+  --cat-browsing: color-mix(in oklab, var(--p-foam) 55%, var(--p-iris));
+  --cat-other: var(--p-muted);
+  --cat-x1: color-mix(in oklab, var(--p-rose) 50%, var(--p-gold));
+  --cat-x2: color-mix(in oklab, var(--p-love) 50%, var(--p-iris));
+  --cat-x3: color-mix(in oklab, var(--p-pine) 50%, var(--p-iris));
+  --cat-x4: color-mix(in oklab, var(--p-love) 45%, var(--p-rose));
+}
+
+:root[data-palette] {
+  --track: color-mix(in srgb, var(--mist) 14%, transparent);
+  --hatch: color-mix(in srgb, var(--bg) 62%, transparent);
+}
+
+/* ---------- accents (any palette that defines the colour) ---------- */
+
+:root[data-accent="rosewater"] { --p-accent: var(--p-rosewater); }
+:root[data-accent="flamingo"] { --p-accent: var(--p-flamingo); }
+:root[data-accent="pink"] { --p-accent: var(--p-pink); }
+:root[data-accent="mauve"] { --p-accent: var(--p-mauve); }
+:root[data-accent="red"] { --p-accent: var(--p-red); }
+:root[data-accent="maroon"] { --p-accent: var(--p-maroon); }
+:root[data-accent="peach"] { --p-accent: var(--p-peach); }
+:root[data-accent="yellow"] { --p-accent: var(--p-yellow); }
+:root[data-accent="green"] { --p-accent: var(--p-green); }
+:root[data-accent="teal"] { --p-accent: var(--p-teal); }
+:root[data-accent="sky"] { --p-accent: var(--p-sky); }
+:root[data-accent="sapphire"] { --p-accent: var(--p-sapphire); }
+:root[data-accent="blue"] { --p-accent: var(--p-blue); }
+:root[data-accent="lavender"] { --p-accent: var(--p-lavender); }
+:root[data-accent="love"] { --p-accent: var(--p-love); }
+:root[data-accent="gold"] { --p-accent: var(--p-gold); }
+:root[data-accent="rose"] { --p-accent: var(--p-rose); }
+:root[data-accent="pine"] { --p-accent: var(--p-pine); }
+:root[data-accent="foam"] { --p-accent: var(--p-foam); }
+:root[data-accent="iris"] { --p-accent: var(--p-iris); }
+:root[data-accent="cinnabar"] { --p-accent: var(--p-cinnabar); }
+:root[data-accent="jade"] { --p-accent: var(--p-jade); }
+:root[data-accent="lilac"] { --p-accent: var(--p-lilac); }
+:root[data-accent="sakura"] { --p-accent: var(--p-sakura); }

@@ -138,6 +138,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/day", get(api_day))
         .route("/api/range", get(api_range))
         .route("/api/settings", get(api_settings).put(api_settings_put))
+        .route("/api/appearance", axum::routing::put(api_appearance))
         .route("/api/pause", post(api_pause))
         .route("/api/resume", post(api_resume))
         .route("/api/export", get(api_export))
@@ -549,6 +550,7 @@ async fn api_settings(State(ctx): State<Ctx>) -> Response {
         "custom_css": css,
         "defaults": Config::default(),
         "config_path": config::config_path(),
+        "palettes": config::PALETTES,
     }))
     .into_response()
 }
@@ -624,6 +626,55 @@ async fn api_settings_put(
     }
     let _ = ctx.web.tx.send(Event::ConfigChanged(Box::new(cfg)));
     Json(json!({"ok": true, "redirect": redirect})).into_response()
+}
+
+#[derive(Deserialize)]
+struct AppearanceBody {
+    theme: Option<String>,
+    palette: Option<String>,
+    dark_flavor: Option<String>,
+    accent: Option<String>,
+    theme_categories: Option<bool>,
+}
+
+/// Saves only the look (from the header's theme picker) without touching other settings.
+async fn api_appearance(State(ctx): State<Ctx>, JsonBody(b): JsonBody<AppearanceBody>) -> Response {
+    if ctx.web.viewer {
+        return err(StatusCode::FORBIDDEN, VIEWER_MSG);
+    }
+    // The file is the newest truth: two quick changes must not undo each other.
+    let mut cfg = Config::load().unwrap_or_else(|_| ctx.web.config());
+    let d = &mut cfg.dashboard;
+    if let Some(v) = b.palette {
+        if v != d.palette {
+            // A new palette starts from its own default flavour and accent.
+            d.dark_flavor.clear();
+            d.accent.clear();
+        }
+        d.palette = v;
+    }
+    if let Some(v) = b.theme {
+        d.theme = v;
+    }
+    if let Some(v) = b.dark_flavor {
+        d.dark_flavor = v;
+    }
+    if let Some(v) = b.accent {
+        d.accent = v;
+    }
+    if let Some(v) = b.theme_categories {
+        d.theme_categories = v;
+    }
+    let cfg = cfg.sanitized();
+    if let Err(e) = cfg.save() {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not save settings: {e:#}"),
+        );
+    }
+    let dashboard = cfg.dashboard.clone();
+    let _ = ctx.web.tx.send(Event::ConfigChanged(Box::new(cfg)));
+    Json(json!({"ok": true, "dashboard": dashboard})).into_response()
 }
 
 const VIEWER_MSG: &str = "This is a read-only view (arch-tracker serve). Change settings in the tracker's own dashboard.";
