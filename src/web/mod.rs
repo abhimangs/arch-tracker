@@ -443,7 +443,7 @@ async fn api_day(State(ctx): State<Ctx>, Query(q): Query<DayQ>) -> Response {
         return err_field(StatusCode::BAD_REQUEST, format!("{e:#}"), "date");
     }
     let path = ctx.web.db.clone();
-    blocking(move || report::day_cached(&db(&path)?, &cfg, &date)).await
+    blocking(move || report::build_day(&db(&path)?, &cfg, &date)).await
 }
 
 #[derive(Deserialize)]
@@ -455,7 +455,12 @@ struct RangeQ {
 async fn api_range(State(ctx): State<Ctx>, Query(q): Query<RangeQ>) -> Response {
     let cfg = ctx.web.config();
     let path = ctx.web.db.clone();
-    blocking(move || report::range(&db(&path)?, &cfg, &q.from, &q.to)).await
+    let cache = if ctx.web.viewer {
+        report::Cache::ReadOnly
+    } else {
+        report::Cache::ReadWrite
+    };
+    blocking(move || report::range(&db(&path)?, &cfg, &q.from, &q.to, cache)).await
 }
 
 async fn api_settings(State(ctx): State<Ctx>) -> Response {

@@ -783,12 +783,63 @@ fn finish(map: HashMap<String, Row>, max_titles: usize) -> Vec<Row> {
     v
 }
 
+/// What a range needs from one day. The rollup cache keeps this rather than the whole day
+/// report (288 timeline buckets, hourly totals, running apps), so a year of Trends stays small.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct DayRollup {
+    totals: Totals,
+    apps: Vec<Row>,
+    sites: Vec<Row>,
+    categories: Vec<Row>,
+    programs: Vec<Row>,
+    agents: Vec<AgentRow>,
+}
+
+impl DayRollup {
+    fn from_report(r: DayReport) -> DayRollup {
+        let trim = |mut rows: Vec<Row>, n: usize| {
+            for r in &mut rows {
+                r.titles.truncate(n);
+            }
+            rows
+        };
+        DayRollup {
+            totals: r.totals,
+            apps: trim(r.apps, 10),
+            sites: trim(r.sites, 10),
+            categories: r.categories,
+            programs: trim(r.programs, 5),
+            agents: r.agents,
+        }
+    }
+}
+
+/// Whether range() may store the day rollups it computes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cache {
+    ReadWrite,
+    /// Read-only viewers (arch-tracker serve) never write to the database.
+    ReadOnly,
+}
+
+/// Longest range, in days (about three years).
+const MAX_RANGE_DAYS: i32 = 1200;
+
 /// Inclusive date range (at most ~3 years).
-pub fn range(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<RangeReport> {
+pub fn range(
+    conn: &Connection,
+    cfg: &Config,
+    from: &str,
+    to: &str,
+    cache: Cache,
+) -> Result<RangeReport> {
     let (mut d, _, _) = parse_date(from)?;
     let (end, _, _) = parse_date(to)?;
     if end < d {
         return Err(BadRequest("'to' must not be before 'from'".into()).into());
+    }
+    if d.until(end)?.get_days() >= MAX_RANGE_DAYS {
+        return Err(BadRequest(format!("a range can be at most {MAX_RANGE_DAYS} days")).into());
     }
     let mut out = RangeReport {
         from: from.into(),
@@ -802,11 +853,17 @@ pub fn range(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<Ra
         HashMap::new(),
     );
     let mut agents: HashMap<(String, String), AgentRow> = HashMap::new();
-    let mut guard = 0;
-    while d <= end && guard < 1200 {
-        guard += 1;
-        let ds = d.to_string();
-        let r = day_cached(conn, cfg, &ds)?;
+    let hash = settings_hash(cfg);
+    // A no-input gap that started before midnight is judged with the part after it, so a day
+    // is final once the longest threshold (and a flush) has passed.
+    let pad = cfg.idle.threshold_secs.max(cfg.idle.call_threshold_secs) as i64 * 1000;
+    let now = crate::util::now_ms();
+    let mut fresh: Vec<(String, String)> = Vec::new();
+    while d <= end {
+        let date = d.to_string();
+        let (_, ds, de) = parse_date(&date)?;
+        let finished = now > de.saturating_add(pad + 10 * 60_000);
+        let r = day_rollup(conn, cfg, &date, (ds, de), &hash, finished, &mut fresh)?;
         out.totals.times.merge(&r.totals.times);
         out.totals.screen += r.totals.screen;
         out.totals.idle_removed += r.totals.idle_removed;
@@ -830,11 +887,17 @@ pub fn range(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<Ra
             e.busy += a.busy;
         }
         out.days.push(DaySummary {
-            date: ds,
+            date,
             totals: r.totals,
             categories: r.categories,
         });
         d = d.tomorrow()?;
+    }
+    if cache == Cache::ReadWrite
+        && !fresh.is_empty()
+        && let Err(e) = store_rollups(conn, &hash, &fresh)
+    {
+        tracing::debug!("could not store day rollups: {e:#}");
     }
     out.apps = finish(apps, 10);
     out.sites = finish(sites, 10);
@@ -846,10 +909,69 @@ pub fn range(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<Ra
     Ok(out)
 }
 
-/// Hash of everything that changes how a day is classified (for the rollup cache).
+/// One day of a range: nothing for a day without spans, the cached rollup for a finished day,
+/// computed otherwise (finished days are queued in fresh for the cache).
+fn day_rollup(
+    conn: &Connection,
+    cfg: &Config,
+    date: &str,
+    (ds, de): (i64, i64),
+    hash: &str,
+    finished: bool,
+    fresh: &mut Vec<(String, String)>,
+) -> Result<DayRollup> {
+    let any: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM spans WHERE start_ms >= ?1 AND start_ms < ?2 AND end_ms > ?3)",
+        )?
+        .query_row(params![ds - MAX_SPAN_MS, de, ds], |r| r.get(0))?;
+    if !any {
+        return Ok(DayRollup::default());
+    }
+    if finished {
+        let cached: Option<String> = conn
+            .prepare_cached("SELECT json FROM rollups WHERE day=?1 AND settings_hash=?2")?
+            .query_row(params![date, hash], |r| r.get(0))
+            .optional()?;
+        if let Some(r) = cached.and_then(|j| serde_json::from_str(&j).ok()) {
+            return Ok(r);
+        }
+    }
+    let r = DayRollup::from_report(build(conn, cfg, date, ds, de)?);
+    if finished {
+        fresh.push((date.to_string(), serde_json::to_string(&r)?));
+    }
+    Ok(r)
+}
+
+/// Stores rollups in one transaction and drops those made under other settings or versions.
+fn store_rollups(conn: &Connection, hash: &str, rows: &[(String, String)]) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM rollups WHERE settings_hash != ?1",
+        params![hash],
+    )?;
+    {
+        let mut ins = tx.prepare_cached(
+            "INSERT OR REPLACE INTO rollups(day, settings_hash, json) VALUES (?1, ?2, ?3)",
+        )?;
+        for (day, json) in rows {
+            ins.execute(params![day, hash, json])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Bump when DayRollup or the classification changes shape.
+const ROLLUP_SCHEMA: u32 = 2;
+
+/// Hash of everything that changes how a day is classified (for the rollup cache). The app
+/// version is part of it: a new release may count differently, so it starts a fresh cache.
 pub fn settings_hash(cfg: &Config) -> String {
     let v = serde_json::json!({
-        "v": 1,
+        "v": ROLLUP_SCHEMA,
+        "app": env!("CARGO_PKG_VERSION"),
         "idle": cfg.idle,
         "categories": cfg.categories,
         "tools": cfg.agents.tools,
@@ -862,41 +984,6 @@ pub fn settings_hash(cfg: &Config) -> String {
         h = h.wrapping_mul(0x100000001b3);
     }
     format!("{h:016x}")
-}
-
-/// Day report, served from the rollup cache for days that are over.
-pub fn day_cached(conn: &Connection, cfg: &Config, date: &str) -> Result<DayReport> {
-    let (_, _, de) = parse_date(date)?;
-    // A no-input gap that started before midnight is judged with the part after it.
-    let pad = cfg.idle.threshold_secs.max(cfg.idle.call_threshold_secs) as i64 * 1000;
-    let finished = crate::util::now_ms() > de.saturating_add(pad + 10 * 60_000);
-    let hash = settings_hash(cfg);
-    if finished {
-        let cached: Option<String> = conn
-            .query_row(
-                "SELECT json FROM rollups WHERE day=?1 AND settings_hash=?2",
-                params![date, hash],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(j) = cached
-            && let Ok(r) = serde_json::from_str(&j)
-        {
-            return Ok(r);
-        }
-    }
-    let r = build_day(conn, cfg, date)?;
-    if finished {
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO rollups(day, settings_hash, json) VALUES (?1, ?2, ?3)",
-            params![date, hash, serde_json::to_string(&r)?],
-        );
-        let _ = conn.execute(
-            "DELETE FROM rollups WHERE settings_hash != ?1",
-            params![hash],
-        );
-    }
-    Ok(r)
 }
 
 #[cfg(test)]
@@ -1195,11 +1282,66 @@ mod tests {
             "99999-01-01",
             "2026-1-1",
         ] {
-            let e = day_cached(&st.conn, &cfg, bad).unwrap_err();
+            let e = build_day(&st.conn, &cfg, bad).unwrap_err();
             assert!(e.downcast_ref::<BadRequest>().is_some(), "{bad}");
         }
-        assert!(range(&st.conn, &cfg, "2026-11-02", "2026-11-01").is_err());
-        assert!(day_cached(&st.conn, &cfg, "2026-11-01").is_ok());
+        let rw = Cache::ReadWrite;
+        assert!(range(&st.conn, &cfg, "2026-11-02", "2026-11-01", rw).is_err());
+        assert!(range(&st.conn, &cfg, "2020-01-01", "2026-01-01", rw).is_err());
+        assert!(build_day(&st.conn, &cfg, "2026-11-01").is_ok());
+    }
+
+    #[test]
+    fn ranges_cache_small_rollups_for_days_with_data() {
+        let st = temp_store();
+        let c = &st.conn;
+        c.execute(
+            "INSERT INTO subjects(app, app_name, title, host, private, program, project)
+             VALUES ('editor', 'Editor', 'notes', '', 0, '', '')",
+            [],
+        )
+        .unwrap();
+        let day = |d: &str| crate::util::date_bounds(d).unwrap().0;
+        for d in ["2020-01-01", "2020-01-03"] {
+            c.execute(
+                "INSERT INTO spans(kind, subject_id, start_ms, end_ms) VALUES (1, 1, ?1, ?2)",
+                params![day(d) + H, day(d) + 2 * H],
+            )
+            .unwrap();
+        }
+        let cfg = Config::default();
+        let count = |hash: &str| -> i64 {
+            c.query_row(
+                "SELECT COUNT(*) FROM rollups WHERE settings_hash=?1",
+                params![hash],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let r = range(c, &cfg, "2020-01-01", "2020-01-03", Cache::ReadWrite).unwrap();
+        assert_eq!(r.days.len(), 3);
+        assert_eq!(r.totals.screen, 2 * 3600);
+        assert_eq!(r.days[1].totals.screen, 0);
+        let hash = settings_hash(&cfg);
+        assert_eq!(count(&hash), 2, "the empty day is not cached");
+        let biggest: i64 = c
+            .query_row("SELECT MAX(LENGTH(json)) FROM rollups", [], |r| r.get(0))
+            .unwrap();
+        assert!(biggest < 2_000, "rollup is {biggest} bytes");
+        // Served from the cache the second time.
+        c.execute(
+            "UPDATE rollups SET json = replace(json, '\"screen\":3600', '\"screen\":7')",
+            [],
+        )
+        .unwrap();
+        let again = range(c, &cfg, "2020-01-01", "2020-01-03", Cache::ReadWrite).unwrap();
+        assert_eq!(again.totals.screen, 14);
+        // Read-only callers compute but never write.
+        let mut other = cfg.clone();
+        other.idle.threshold_secs = 600;
+        range(c, &other, "2020-01-01", "2020-01-03", Cache::ReadOnly).unwrap();
+        assert_eq!(count(&settings_hash(&other)), 0);
+        assert_eq!(count(&hash), 2);
     }
 
     #[test]
