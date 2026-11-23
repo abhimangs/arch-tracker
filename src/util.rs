@@ -166,6 +166,9 @@ pub fn normalize_title(raw: &str, extra: &[regex_lite::Regex], max_len: usize) -
         }
     }
     let mut out: String = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some(host) = url_title(&out) {
+        out = host;
+    }
     for re in extra {
         out = re.replace_all(&out, "").trim().to_string();
     }
@@ -173,6 +176,82 @@ pub fn normalize_title(raw: &str, extra: &[regex_lite::Regex], max_len: usize) -
         out = out.chars().take(max_len).collect();
     }
     out
+}
+
+/// Pages without a <title> (or still loading) show their URL as the title, and directory
+/// listings show the path. Such titles are reduced to the host (paths and queries are never
+/// stored); None if the title does not look like a URL.
+fn url_title(t: &str) -> Option<String> {
+    if t.starts_with("Index of /") {
+        return Some("Index of".into());
+    }
+    let first = t.split_whitespace().next()?;
+    let lower = first.to_ascii_lowercase();
+    if lower.starts_with("view-source:") {
+        return Some(url_title(&t["view-source:".len()..]).unwrap_or_default());
+    }
+    if ["data:", "blob:", "javascript:"]
+        .iter()
+        .any(|p| lower.starts_with(p))
+    {
+        return Some(String::new());
+    }
+    if let Some((scheme, _)) = first.split_once("://")
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    {
+        let host = match url::Url::parse(first) {
+            Ok(u) => {
+                let h = u.host_str().unwrap_or_default().to_lowercase();
+                let h = match u.port() {
+                    Some(p) => format!("{h}:{p}"),
+                    None => h,
+                };
+                match u.scheme() {
+                    "file" => String::new(),
+                    "http" | "https" | "ws" | "wss" | "ftp" => h,
+                    _ if h.is_empty() => String::new(),
+                    s => format!("{s}://{h}"),
+                }
+            }
+            Err(_) => String::new(),
+        };
+        return Some(host);
+    }
+    // "www.example.com/search?q=..." (browsers drop the scheme and lowercase the host).
+    let end = first.find(['/', '?', '#'])?;
+    let host = &first[..end];
+    looks_like_host(host).then(|| host.to_string())
+}
+
+/// "www.example.com", "localhost:3000", "127.0.0.1:8080" (lowercase, as browsers show them).
+fn looks_like_host(h: &str) -> bool {
+    let (name, port) = match h.rsplit_once(':') {
+        Some((n, p)) => (n, Some(p)),
+        None => (h, None),
+    };
+    if let Some(p) = port
+        && (p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false;
+    }
+    if name == "localhost" {
+        return true;
+    }
+    let labels: Vec<&str> = name.split('.').collect();
+    let label_ok = |l: &&str| {
+        !l.is_empty()
+            && l.chars()
+                .all(|c| (c.is_alphanumeric() && !c.is_uppercase()) || c == '-')
+    };
+    if labels.len() < 2 || !labels.iter().all(label_ok) {
+        return false;
+    }
+    let tld = labels[labels.len() - 1];
+    let ipv4 = labels.len() == 4 && labels.iter().all(|l| l.parse::<u8>().is_ok());
+    ipv4 || (tld.chars().count() >= 2 && tld.chars().all(char::is_alphabetic))
 }
 
 /// Loose title equality: media sessions drop site suffixes ("Video" vs "Video - YouTube").
@@ -250,5 +329,27 @@ mod tests {
         assert_eq!(n("⠂ ⠐ working   hard"), "working hard");
         assert_eq!(n("(draft) notes"), "(draft) notes");
         assert_eq!(n("#general"), "#general");
+    }
+
+    #[test]
+    fn url_titles_keep_only_the_host() {
+        let n = |s| normalize_title(s, &[], 200);
+        assert_eq!(n("www.example.com/search?q=secret"), "www.example.com");
+        assert_eq!(n("www.example.com/search?q=two words"), "www.example.com");
+        assert_eq!(n("(2) mail.example.com/inbox/42"), "mail.example.com");
+        assert_eq!(n("https://host.example.org/a/b?c=d#e"), "host.example.org");
+        assert_eq!(n("http://localhost:3000/admin"), "localhost:3000");
+        assert_eq!(n("127.0.0.1:8080/debug/vars"), "127.0.0.1:8080");
+        assert_eq!(n("file:///home/user/notes.txt"), "");
+        assert_eq!(n("Index of /home/user/"), "Index of");
+        assert_eq!(n("view-source:https://a.example.com/x"), "a.example.com");
+        assert_eq!(n("data:text/html,hello"), "");
+        assert_eq!(n("chrome://settings/privacy"), "chrome://settings");
+        // Not URLs.
+        assert_eq!(n("www.example.com"), "www.example.com");
+        assert_eq!(n("Node.js/Express tutorial"), "Node.js/Express tutorial");
+        assert_eq!(n("TCP/IP basics"), "TCP/IP basics");
+        assert_eq!(n("1.5/10 rating"), "1.5/10 rating");
+        assert_eq!(n("v2.0/beta notes"), "v2.0/beta notes");
     }
 }
