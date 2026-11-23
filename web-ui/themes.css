@@ -295,6 +295,7 @@
 /* ---------- semantic mapping ---------- */
 
 :root[data-palette="aizome"] {
+  --rail: color-mix(in oklab, var(--p-bg) 80%, var(--p-raise));
   --bg: var(--p-bg);
   --raise: var(--p-raise);
   --line: var(--p-line);
@@ -311,6 +312,7 @@
 }
 
 :root[data-palette="catppuccin"] {
+  --rail: var(--p-mantle);
   --bg: var(--p-base);
   --raise: var(--p-surface0);
   --line: var(--p-surface1);
@@ -343,6 +345,7 @@
 }
 
 :root[data-palette="rose-pine"] {
+  --rail: color-mix(in oklab, var(--p-base) 72%, var(--p-surface));
   --bg: var(--p-base);
   --raise: var(--p-surface);
   --line: var(--p-hl-med);
