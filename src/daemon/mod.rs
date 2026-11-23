@@ -99,12 +99,7 @@ async fn run_async() -> Result<()> {
     media::spawn(conn.clone(), tx.clone()).await;
 
     let web = crate::web::Web::new(shared.clone(), tx.clone(), util::db_path(), false)?;
-    if let Err(e) = web.listen(cfg.dashboard.port).await {
-        tracing::warn!(
-            "dashboard could not start on port {}: {e:#}",
-            cfg.dashboard.port
-        );
-    }
+    serve_dashboard(&web, cfg.dashboard.port).await;
     let _watcher = watch_config(tx.clone());
 
     let mut tracker = Tracker::new(store, cfg.clone(), shared.clone(), conn.clone());
@@ -129,11 +124,25 @@ async fn run_async() -> Result<()> {
             tick.reset();
         }
         tokio::select! {
-            Some(ev) = rx.recv() => tracker.handle(ev).await,
+            Some(ev) = rx.recv() => {
+                let port = match &ev {
+                    Event::ConfigChanged(c) => Some(c.dashboard.port),
+                    _ => None,
+                };
+                tracker.handle(ev).await;
+                // The port applies however the config changed (dashboard or file).
+                if let Some(port) = port {
+                    serve_dashboard(&web, port).await;
+                }
+            }
             _ = tick.tick() => tracker.tick().await,
             _ = hup.recv() => {
                 match Config::load() {
-                    Ok(c) => tracker.handle(Event::ConfigChanged(Box::new(c))).await,
+                    Ok(c) => {
+                        let port = c.dashboard.port;
+                        tracker.handle(Event::ConfigChanged(Box::new(c))).await;
+                        serve_dashboard(&web, port).await;
+                    }
                     Err(e) => tracing::warn!("config reload failed: {e:#}"),
                 }
             }
@@ -146,6 +155,21 @@ async fn run_async() -> Result<()> {
     kwin::unload_script(&conn).await;
     tracing::info!("arch-tracker daemon stopped");
     Ok(())
+}
+
+/// Serves the dashboard on port (a no-op if it already does); a busy port is reported in the
+/// status the dashboard and `doctor` show, and the old port keeps serving.
+async fn serve_dashboard(web: &std::sync::Arc<crate::web::Web>, port: u16) {
+    if web.port() == Some(port) {
+        return;
+    }
+    match web.listen(port).await {
+        Ok(()) => web.set_error(None),
+        Err(e) => {
+            tracing::warn!("dashboard could not start on port {port}: {e:#}");
+            web.set_error(Some(format!("Port {port} is not available ({e}).")));
+        }
+    }
 }
 
 /// Reloads config.toml when it changes on disk (hand edits and dashboard saves).

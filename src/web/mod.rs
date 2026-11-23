@@ -36,6 +36,8 @@ pub struct Web {
     /// Read-only dashboard (arch-tracker serve): no settings writes, no pause.
     viewer: bool,
     current: Mutex<Option<(u16, oneshot::Sender<()>)>>,
+    /// Why the configured port could not be served, if it couldn't.
+    error: Mutex<Option<String>>,
 }
 
 #[derive(Clone)]
@@ -58,7 +60,14 @@ impl Web {
             db,
             viewer,
             current: Mutex::new(None),
+            error: Mutex::new(None),
         }))
+    }
+
+    pub fn set_error(&self, e: Option<String>) {
+        if let Ok(mut x) = self.error.lock() {
+            *x = e;
+        }
     }
 
     /// One-time sign-in URL for the dashboard, opening at a hash route ("today", "settings").
@@ -374,6 +383,8 @@ async fn api_status(State(ctx): State<Ctx>) -> Response {
             "extension".into(),
             json!({"id": crate::setup::EXTENSION_ID, "dir": crate::setup::extension_dir()}),
         );
+        let dash_err = ctx.web.error.lock().ok().and_then(|e| e.clone());
+        o.insert("dashboard_error".into(), json!(dash_err));
     }
     Json(v).into_response()
 }
