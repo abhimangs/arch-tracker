@@ -134,6 +134,10 @@ const KWIN_STALE_MS: i64 = 150_000;
 const KWIN_RETRY_MIN_MS: i64 = 30_000;
 const KWIN_RETRY_MAX_MS: i64 = 600_000;
 
+/// Upper bounds for one Plasma Browser Integration query and one running-apps scan.
+const PBI_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1_500);
+const RUNNING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// A terminal window whose title keeps changing is inspected at most this often.
 const TERM_MIN_GAP_MS: i64 = 2_000;
 
@@ -495,7 +499,7 @@ impl Tracker {
         }
         self.mic = media::mic_active();
         if self.sys_conn.is_none() {
-            self.sys_conn = zbus::Connection::system().await.ok();
+            self.sys_conn = util::system_bus().await.ok();
         }
         if let Some(sys) = &self.sys_conn
             && let Some(hint) = session::locked_hint(sys).await
@@ -527,11 +531,14 @@ impl Tracker {
                 .kwin
                 .as_ref()
                 .filter(|_| now - self.kwin_last <= KWIN_STALE_MS);
-            crate::sources::running::scan(conn, &self.desktop, kwin)
-                .await
-                .into_iter()
-                .filter_map(|(k, n)| self.apply_privacy(Subject::app(&k, &n)))
-                .collect()
+            let scan = crate::sources::running::scan(conn, &self.desktop, kwin);
+            match tokio::time::timeout(RUNNING_TIMEOUT, scan).await {
+                Ok(apps) => apps
+                    .into_iter()
+                    .filter_map(|(k, n)| self.apply_privacy(Subject::app(&k, &n)))
+                    .collect(),
+                Err(_) => std::mem::take(&mut self.running),
+            }
         } else {
             vec![]
         };
@@ -760,7 +767,12 @@ impl Tracker {
         }
         self.pbi_caption = cap;
         let Some(conn) = &self.conn else { return };
-        match browser::pbi::query(conn).await {
+        // Bounded: a busy plasmashell must not hold up recording.
+        let res = tokio::time::timeout(PBI_TIMEOUT, browser::pbi::query(conn))
+            .await
+            .ok()
+            .flatten();
+        match res {
             Some((bpid, tabs)) => {
                 let mut seen = std::collections::HashSet::new();
                 let dupes = tabs.iter().any(|t| !seen.insert(self.norm(&t.title)));

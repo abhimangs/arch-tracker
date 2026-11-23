@@ -85,6 +85,7 @@ async fn run_async() -> Result<()> {
     }
 
     let conn = zbus::connection::Builder::session()
+        .method_timeout(util::DBUS_TIMEOUT)
         .name(kwin::BUS_NAME)
         .serve_at(kwin::OBJECT_PATH, kwin::KwinIface { tx: tx.clone() })
         .build()

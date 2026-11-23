@@ -63,6 +63,19 @@ fn describe(
     (program, project, pid)
 }
 
+/// Runs tmux, giving up (and killing it) after a second so a stuck server cannot stall us.
+async fn tmux(args: &[&str]) -> Option<std::process::Output> {
+    let out = tokio::process::Command::new("tmux")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    tokio::time::timeout(std::time::Duration::from_secs(1), out)
+        .await
+        .ok()?
+        .ok()
+}
+
 /// If the program is a tmux client, look through to the active pane of its session.
 async fn through_tmux(
     program: &str,
@@ -73,29 +86,22 @@ async fn through_tmux(
     if program != "tmux" {
         return None;
     }
-    let clients = tokio::process::Command::new("tmux")
-        .args(["list-clients", "-F", "#{client_pid} #{client_session}"])
-        .output()
-        .await
-        .ok()?;
+    let clients = tmux(&["list-clients", "-F", "#{client_pid} #{client_session}"]).await?;
     let text = String::from_utf8_lossy(&clients.stdout);
     let session = text.lines().find_map(|l| {
         l.split_once(' ')
             .filter(|(p, _)| p.parse::<u32>().ok() == Some(pid))
             .map(|(_, s)| s.to_string())
     })?;
-    let panes = tokio::process::Command::new("tmux")
-        .args([
-            "list-panes",
-            "-s",
-            "-t",
-            &session,
-            "-F",
-            "#{window_active}#{pane_active} #{pane_pid}",
-        ])
-        .output()
-        .await
-        .ok()?;
+    let panes = tmux(&[
+        "list-panes",
+        "-s",
+        "-t",
+        &session,
+        "-F",
+        "#{window_active}#{pane_active} #{pane_pid}",
+    ])
+    .await?;
     let text = String::from_utf8_lossy(&panes.stdout);
     let shell: u32 = text
         .lines()

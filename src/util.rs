@@ -1,7 +1,19 @@
 //! Small helpers: time, XDG paths, durations, title normalization.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Every D-Bus method call gives up after this long, so a hung service (plasmashell, a media
+/// player, logind) cannot freeze recording.
+pub const DBUS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A system-bus connection with the method timeout.
+pub async fn system_bus() -> zbus::Result<zbus::Connection> {
+    zbus::connection::Builder::system()
+        .method_timeout(DBUS_TIMEOUT)
+        .build()
+        .await
+}
 
 pub fn now_ms() -> i64 {
     SystemTime::now()

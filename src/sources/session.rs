@@ -70,7 +70,7 @@ async fn inhibit(sys: &Connection) -> Option<OwnedFd> {
 }
 
 async fn watch_sleep(tx: UnboundedSender<Event>) -> Result<()> {
-    let sys = Connection::system().await?;
+    let sys = crate::util::system_bus().await?;
     let rule = MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
         .interface("org.freedesktop.login1.Manager")
