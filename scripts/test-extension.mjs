@@ -148,6 +148,58 @@ test("a host that keeps crashing early does not reset the backoff", async () => 
   assert.ok(b.ports.length <= 15, `${b.ports.length} attempts in five minutes`);
 });
 
+function tab(url, title, extra = {}) {
+  return { id: 7, active: true, audible: true, mutedInfo: { muted: true }, url, title, ...extra };
+}
+
+// Sends one window holding the given tab and returns what the extension reported for it.
+async function report(t, win = {}) {
+  const b = load({ windows: [{ id: 1, focused: true, type: "normal", tabs: [t], ...win }] });
+  await b.advance(500);
+  return b.snapshots().at(-1).windows[0].tabs[0];
+}
+
+test("normal tabs send host and title", async () => {
+  const r = await report(tab("https://www.example.com/watch?v=abc", "Some video - Example"));
+  assert.equal(r.host, "www.example.com");
+  assert.equal(r.title, "Some video - Example");
+  assert.equal(r.audible, true);
+  assert.equal(r.muted, true);
+});
+
+test("URL-like titles are dropped", async () => {
+  const cases = [
+    ["https://www.example.com/search?q=private+words", "www.example.com/search?q=private+words"],
+    ["https://www.example.com/search?q=private+words", "example.com/search?q=private words"],
+    ["https://www.example.com/search?q=private+words", "https://www.example.com/search?q=private+words"],
+    ["http://127.0.0.1:8080/api/items?token=abc", "127.0.0.1:8080/api/items?token=abc"],
+    ["https://example.org/a/b/c", "example.org/a/b"],
+    ["https://example.org/docs/page", "example.org/docs/page – loading"],
+    ["file:///srv/shared/notes/plan.txt", "/srv/shared/notes/plan.txt"],
+    ["about:blank", "https://example.net/secret/path"],
+  ];
+  for (const [url, title] of cases) {
+    assert.equal((await report(tab(url, title))).title, "", `${title} from ${url}`);
+  }
+});
+
+test("real titles that mention the site are kept", async () => {
+  const cases = [
+    ["https://example.com/", "Example Domain"],
+    ["https://example.com/", "example.com"],
+    ["https://news.example.com/item?id=1", "Example News"],
+    ["https://docs.example.com/guide", "Guide - docs.example.com"],
+  ];
+  for (const [url, title] of cases) {
+    assert.equal((await report(tab(url, title))).title, title, `${title} from ${url}`);
+  }
+});
+
+test("private windows report time only", async () => {
+  const r = await report(tab("https://example.com/x", "Example"), { incognito: true });
+  assert.deepEqual(r, { id: 7, active: true, audible: false, muted: false, host: "", title: "", split: null });
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
   try {
