@@ -423,8 +423,12 @@ async fn blocking<T: serde::Serialize + Send + 'static>(
     }
 }
 
-/// Read-write when possible (the rollup cache is written), read-only otherwise.
-fn db(path: &std::path::Path) -> Result<rusqlite::Connection> {
+/// The tracker's own dashboard opens read-write when it can (the rollup cache is written); a
+/// read-only viewer (arch-tracker serve) never opens the database for writing.
+fn db(path: &std::path::Path, viewer: bool) -> Result<rusqlite::Connection> {
+    if viewer {
+        return crate::store::open_readonly(path);
+    }
     let c = match rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
@@ -443,7 +447,8 @@ async fn api_day(State(ctx): State<Ctx>, Query(q): Query<DayQ>) -> Response {
         return err_field(StatusCode::BAD_REQUEST, format!("{e:#}"), "date");
     }
     let path = ctx.web.db.clone();
-    blocking(move || report::build_day(&db(&path)?, &cfg, &date)).await
+    let viewer = ctx.web.viewer;
+    blocking(move || report::build_day(&db(&path, viewer)?, &cfg, &date)).await
 }
 
 #[derive(Deserialize)]
@@ -455,12 +460,13 @@ struct RangeQ {
 async fn api_range(State(ctx): State<Ctx>, Query(q): Query<RangeQ>) -> Response {
     let cfg = ctx.web.config();
     let path = ctx.web.db.clone();
-    let cache = if ctx.web.viewer {
+    let viewer = ctx.web.viewer;
+    let cache = if viewer {
         report::Cache::ReadOnly
     } else {
         report::Cache::ReadWrite
     };
-    blocking(move || report::range(&db(&path)?, &cfg, &q.from, &q.to, cache)).await
+    blocking(move || report::range(&db(&path, viewer)?, &cfg, &q.from, &q.to, cache)).await
 }
 
 async fn api_settings(State(ctx): State<Ctx>) -> Response {
@@ -559,8 +565,9 @@ struct ExportQ {
 async fn api_export(State(ctx): State<Ctx>, Query(q): Query<ExportQ>) -> Response {
     let format = q.format.unwrap_or_else(|| "csv".into());
     let path = ctx.web.db.clone();
+    let viewer = ctx.web.viewer;
     let res = tokio::task::spawn_blocking(move || {
-        crate::export::export(&db(&path)?, &q.from, &q.to, &format)
+        crate::export::export(&db(&path, viewer)?, &q.from, &q.to, &format)
     })
     .await;
     match res {
