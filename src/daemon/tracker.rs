@@ -34,7 +34,7 @@ pub fn app_kind(app: &str, cls: &str) -> AppKind {
     {
         return AppKind::WebApp;
     }
-    const BROWSERS: [&str; 7] = [
+    const BROWSERS: [&str; 12] = [
         "brave",
         "chrom",
         "vivaldi",
@@ -42,8 +42,20 @@ pub fn app_kind(app: &str, cls: &str) -> AppKind {
         "opera",
         "firefox",
         "librewolf",
+        "helium",
+        "thorium",
+        "floorp",
+        "waterfox",
+        "zen-browser",
     ];
-    if BROWSERS.iter().any(|b| a.contains(b) || c.contains(b)) {
+    // Short names that would match too much as substrings ("zen" in "zenity") must be whole words.
+    const WORDS: [&str; 2] = ["zen", "app.zen_browser.zen"];
+    let word = |s: &str| {
+        WORDS
+            .iter()
+            .any(|w| s == *w || s.split(['-', '_', '.']).next() == Some(*w))
+    };
+    if BROWSERS.iter().any(|b| a.contains(b) || c.contains(b)) || word(&a) || word(&c) {
         return AppKind::Browser;
     }
     const TERMS: [&str; 10] = [
@@ -66,16 +78,23 @@ pub fn app_kind(app: &str, cls: &str) -> AppKind {
 
 /// "Instagram - Brave Origin" -> "Instagram" (also " - Work" profile suffixes).
 pub fn strip_browser_suffix(caption: &str) -> String {
-    const NAMES: [&str; 9] = [
+    const NAMES: [&str; 16] = [
         " - Brave Origin",
         " - Brave",
         " - Google Chrome",
         " - Chromium",
+        " - Helium",
         " - Vivaldi",
         " - Microsoft Edge",
         " - Opera",
+        " - Thorium",
         " — Mozilla Firefox",
         " - Mozilla Firefox",
+        " — Zen Browser",
+        " — Zen",
+        " — LibreWolf",
+        " — Floorp",
+        " — Waterfox",
     ];
     let mut best: Option<usize> = None;
     for n in NAMES {
@@ -1530,6 +1549,8 @@ mod tests {
         );
         assert_eq!(strip_browser_suffix("A - B - Brave Origin - Work"), "A - B");
         assert_eq!(strip_browser_suffix("plain"), "plain");
+        assert_eq!(strip_browser_suffix("Docs — Zen Browser"), "Docs");
+        assert_eq!(strip_browser_suffix("Docs - Helium"), "Docs");
     }
 
     #[test]
@@ -1546,6 +1567,10 @@ mod tests {
             AppKind::WebApp
         );
         assert_eq!(app_kind("kitty", "kitty"), AppKind::Terminal);
+        assert_eq!(app_kind("helium-browser", "helium"), AppKind::Browser);
+        assert_eq!(app_kind("zen", "zen"), AppKind::Browser);
+        assert_eq!(app_kind("app.zen_browser.zen", ""), AppKind::Browser);
+        assert_eq!(app_kind("zenity", "zenity"), AppKind::Other);
         assert_eq!(
             app_kind("com.mitchellh.ghostty", "com.mitchellh.ghostty"),
             AppKind::Terminal
