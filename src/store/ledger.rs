@@ -4,7 +4,7 @@
 
 use crate::model::Kind;
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Transaction, params};
 use std::collections::{HashMap, HashSet};
 
 /// Spans shorter than this that were never written are dropped (alt-tab flicker).
@@ -115,41 +115,59 @@ impl Ledger {
     /// Writes closed spans and refreshes open ones in one transaction.
     pub fn flush(&mut self, conn: &mut Connection, now: i64) -> Result<()> {
         let tx = conn.transaction()?;
-        {
-            let mut ins = tx.prepare_cached(
-                "INSERT INTO spans(kind, subject_id, start_ms, end_ms) VALUES (?1, ?2, ?3, ?4)",
-            )?;
-            let mut upd = tx.prepare_cached("UPDATE spans SET end_ms=?2 WHERE id=?1")?;
-            for p in self.pending.drain(..) {
-                match p {
-                    Pending::Insert {
-                        kind,
-                        subject,
-                        start,
-                        end,
-                    } => {
-                        ins.execute(params![kind as i64, subject, start, end])?;
-                    }
-                    Pending::Close { row, end } => {
-                        upd.execute(params![row, end])?;
-                    }
+        let rows = self.write(&tx, now)?;
+        tx.commit()?;
+        self.committed(rows);
+        Ok(())
+    }
+
+    /// Writes pending spans and open rows inside tx. Nothing in the ledger changes here: the
+    /// row ids of newly inserted open spans are returned and only applied (with the pending list
+    /// cleared) by committed(), so a failed commit loses nothing and leaves no stale row ids.
+    pub fn write(&self, tx: &Transaction, now: i64) -> Result<Vec<((Kind, i64), i64)>> {
+        let mut ins = tx.prepare_cached(
+            "INSERT INTO spans(kind, subject_id, start_ms, end_ms) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        let mut upd = tx.prepare_cached("UPDATE spans SET end_ms=?2 WHERE id=?1")?;
+        for p in &self.pending {
+            match *p {
+                Pending::Insert {
+                    kind,
+                    subject,
+                    start,
+                    end,
+                } => {
+                    ins.execute(params![kind as i64, subject, start, end])?;
                 }
-            }
-            for ((kind, subject), o) in self.open.iter_mut() {
-                match o.row {
-                    Some(row) => {
-                        upd.execute(params![row, now.max(o.start)])?;
-                    }
-                    None if now - o.start >= MIN_SPAN_MS => {
-                        ins.execute(params![*kind as i64, *subject, o.start, now])?;
-                        o.row = Some(tx.last_insert_rowid());
-                    }
-                    None => {}
+                Pending::Close { row, end } => {
+                    upd.execute(params![row, end])?;
                 }
             }
         }
-        tx.commit()?;
-        Ok(())
+        let mut rows = vec![];
+        for (&(kind, subject), o) in &self.open {
+            match o.row {
+                Some(row) => {
+                    upd.execute(params![row, now.max(o.start)])?;
+                }
+                None if now - o.start >= MIN_SPAN_MS => {
+                    ins.execute(params![kind as i64, subject, o.start, now])?;
+                    rows.push(((kind, subject), tx.last_insert_rowid()));
+                }
+                None => {}
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Call after the transaction given to write() committed.
+    pub fn committed(&mut self, rows: Vec<((Kind, i64), i64)>) {
+        self.pending.clear();
+        for (key, row) in rows {
+            if let Some(o) = self.open.get_mut(&key) {
+                o.row = Some(row);
+            }
+        }
     }
 }
 
@@ -186,6 +204,51 @@ mod tests {
         let spans = spans_in(&st.conn, 0, 100_000).unwrap();
         let got: Vec<(i64, i64, i64)> = spans.iter().map(|s| (s.subject, s.start, s.end)).collect();
         assert_eq!(got, vec![(1, 1_000, 5_000), (3, 5_100, 13_000)]);
+    }
+
+    #[test]
+    fn failed_commit_keeps_pending_and_row_ids() {
+        let mut st = mem();
+        let set = |v: &[i64]| v.iter().copied().collect::<HashSet<_>>();
+        let mut l = Ledger::default();
+        l.reconcile(Kind::Focus, &set(&[1]), 1_000);
+        l.flush(&mut st.conn, 5_000).unwrap(); // row for 1 written
+        l.reconcile(Kind::Focus, &set(&[7]), 6_000); // close 1 (pending), open 7
+        l.set_flag(Kind::Mic, true, 6_000);
+        // Make the next COMMIT fail after every statement ran: a deferred foreign key that a
+        // trigger violates when subject 7 is inserted.
+        st.conn
+            .execute_batch(
+                "PRAGMA foreign_keys=ON;
+                 CREATE TABLE p(id INTEGER PRIMARY KEY);
+                 CREATE TABLE c(pid INTEGER REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED);
+                 CREATE TRIGGER boom AFTER INSERT ON spans WHEN NEW.subject_id = 7
+                 BEGIN INSERT INTO c VALUES (42); END;",
+            )
+            .unwrap();
+        assert!(l.flush(&mut st.conn, 9_000).is_err());
+        st.conn.execute_batch("DROP TRIGGER boom;").unwrap();
+        // An unrelated row takes the id the failed transaction handed out.
+        st.conn
+            .execute(
+                "INSERT INTO spans(kind, subject_id, start_ms, end_ms) VALUES (2, 99, 100, 200)",
+                [],
+            )
+            .unwrap();
+        l.flush(&mut st.conn, 12_000).unwrap();
+        let spans = spans_in(&st.conn, 0, 100_000).unwrap();
+        let mut got: Vec<(i64, i64, i64)> =
+            spans.iter().map(|s| (s.subject, s.start, s.end)).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (0, 6_000, 12_000),
+                (1, 1_000, 6_000),
+                (7, 6_000, 12_000),
+                (99, 100, 200)
+            ]
+        );
     }
 
     #[test]
