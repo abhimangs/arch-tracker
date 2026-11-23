@@ -1,5 +1,6 @@
 mod config;
 mod daemon;
+mod demo;
 mod desktop;
 mod doctor;
 mod export;
@@ -47,6 +48,16 @@ enum Cmd {
     Open {
         /// Page: today, apps, agents, trends or settings.
         page: Option<String>,
+    },
+    /// Write a new database of made-up activity (for screenshots and trying the dashboard).
+    #[command(hide = true)]
+    Demo {
+        /// The new database file to create.
+        #[arg(long)]
+        db: std::path::PathBuf,
+        /// How many days, ending today.
+        #[arg(long, default_value_t = 7)]
+        days: u32,
     },
     /// Read-only dashboard for a database, without tracking (e.g. a copied tracker.db).
     Serve {
@@ -150,6 +161,7 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Cmd::Setup => setup::run(),
+        Cmd::Demo { db, days } => demo::run(&db, days.clamp(1, 60)),
         Cmd::Open { page } => {
             let route = page.unwrap_or_else(|| "today".into());
             let v = block_on(ipc::call(

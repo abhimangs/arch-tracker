@@ -9,7 +9,7 @@ you use (with subdomains kept apart), what runs in your terminal, and how long y
 work, then shows it all in a local dashboard with a tray icon. It runs as a small user service (about
 12 MB of memory, close to 0 % CPU) and nothing leaves your computer.
 
-![The Today view: the day as five-minute bars, with apps, sites, categories and AI agents](docs/screenshots/today-dark.png)
+![Now: the focused window with a live timer, the windows beside it, agents, media and the tracker's health](docs/screenshots/now.png)
 
 ## What it records
 
@@ -50,13 +50,19 @@ Change a threshold in Settings and every past day is re-classified.
 
 <table>
 <tr>
-<td><img src="docs/screenshots/trends-dark.png" alt="Trends: screen time per day by category"></td>
-<td><img src="docs/screenshots/agents-dark.png" alt="AI agents: time you watched each agent and time it worked"></td>
+<td colspan="2"><img src="docs/screenshots/today.png" alt="Today: screen time against a daily goal, the day in five-minute bars, categories, apps, sites and coding projects"></td>
 </tr>
 <tr>
-<td colspan="2"><img src="docs/screenshots/today-light.png" alt="The Today view in the light theme"></td>
+<td><img src="docs/screenshots/timeline.png" alt="Timeline: every session with its exact start and end"></td>
+<td><img src="docs/screenshots/projects.png" alt="Projects: editor, terminal and agent time per project, with a daily sparkline"></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/trends.png" alt="Trends: screen time per day by category"></td>
+<td><img src="docs/screenshots/today-dawn.png" alt="Today in the Rosé Pine Dawn light theme"></td>
 </tr>
 </table>
+
+Screenshots use made-up data (`arch-tracker demo`) in the Rosé Pine theme; `node scripts/screenshots.mjs` regenerates them.
 
 ## Install
 
