@@ -237,6 +237,8 @@ pub struct Tracker {
     desktop: DesktopIndex,
     desktop_loaded: Instant,
     started_ms: i64,
+    /// Why config.toml failed to load (defaults or the last good settings are in effect).
+    config_error: Option<String>,
     /// Some(None) = paused until resumed; Some(Some(t)) = paused until t.
     paused: Option<Option<i64>>,
     kwin: Option<kwin::Snapshot>,
@@ -310,6 +312,7 @@ impl Tracker {
             desktop: DesktopIndex::load(),
             desktop_loaded: Instant::now(),
             started_ms: now,
+            config_error: None,
             paused,
             kwin: None,
             kwin_vis: vec![],
@@ -367,8 +370,10 @@ impl Tracker {
             }
             Event::ConfigChanged(cfg) => {
                 tracing::info!("config reloaded");
+                self.config_error = None;
                 self.set_config(*cfg);
             }
+            Event::ConfigError(e) => self.config_error = Some(e),
             Event::Kwin(snap) => {
                 let key = snap.focused().map(|w| (w.id.clone(), w.cap.clone()));
                 if key != self.focus_key {
@@ -501,6 +506,11 @@ impl Tracker {
         if self.status_dirty && self.status_due() {
             self.publish_status(now);
         }
+    }
+
+    /// Why config.toml could not be loaded, shown in the status until it loads again.
+    pub fn set_config_error(&mut self, e: Option<String>) {
+        self.config_error = e;
     }
 
     pub fn sample_interval_secs(&self) -> u64 {
@@ -646,10 +656,14 @@ impl Tracker {
             }
             Request::Reload => match crate::config::Config::load() {
                 Ok(c) => {
+                    self.config_error = None;
                     self.set_config(c);
                     json!({"ok": true})
                 }
-                Err(e) => json!({"error": format!("{e:#}")}),
+                Err(e) => {
+                    self.config_error = Some(format!("{e:#}"));
+                    json!({"error": format!("{e:#}")})
+                }
             },
         }
     }
@@ -1203,6 +1217,7 @@ impl Tracker {
             "version": env!("CARGO_PKG_VERSION"),
             "now_ms": now,
             "started_ms": self.started_ms,
+            "config_error": self.config_error,
             "paused": self.paused.is_some(),
             "paused_until_ms": self.paused.flatten(),
             "focus": self.focus,
@@ -1362,6 +1377,17 @@ mod tests {
         assert_eq!(at(&t), now + 3_500, "at most once per 2 s");
         t.refresh_terminals(now + 5_600, false, None).await;
         assert_eq!(at(&t), now + 5_600, "the pending change is picked up later");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn config_errors_show_in_the_status() {
+        let mut t = test_tracker();
+        t.set_config_error(Some("parsing config.toml: bad".into()));
+        assert_eq!(t.status_json(0)["config_error"], "parsing config.toml: bad");
+        t.handle(Event::ConfigChanged(Box::default())).await;
+        assert!(t.status_json(0)["config_error"].is_null());
+        t.handle(Event::ConfigError("again".into())).await;
+        assert_eq!(t.status_json(0)["config_error"], "again");
     }
 
     #[test]

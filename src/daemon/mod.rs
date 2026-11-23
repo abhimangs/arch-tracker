@@ -20,6 +20,8 @@ use tracker::Tracker;
 pub enum Event {
     Control(Request, oneshot::Sender<serde_json::Value>),
     ConfigChanged(Box<Config>),
+    /// config.toml could not be loaded (the previous settings stay in effect).
+    ConfigError(String),
     Kwin(Box<kwin::Snapshot>),
     /// input: true = pure input-idle notification; false = inhibitor-respecting one.
     Idle {
@@ -66,7 +68,15 @@ async fn run_async() -> Result<()> {
     set_mode_700(&rdir);
     let _lock = acquire_lock(&rdir.join("daemon.lock"))?;
 
-    let cfg = Config::load_or_create().context("loading config")?;
+    // A broken config.toml must not keep the daemon down (systemd would restart it forever):
+    // start with defaults and show the error in the status until the file is fixed.
+    let (cfg, cfg_error) = match Config::load_or_create() {
+        Ok(c) => (c, None),
+        Err(e) => {
+            tracing::warn!("config.toml has an error, using defaults: {e:#}");
+            (Config::default(), Some(format!("{e:#}")))
+        }
+    };
     let store = Store::open(&util::db_path())?;
     let shared: SharedRef = Arc::new(Mutex::new(Shared {
         status: serde_json::Value::Null,
@@ -109,9 +119,16 @@ async fn run_async() -> Result<()> {
         util::db_path(),
     );
     tray.set_enabled(cfg.dashboard.tray).await;
-    let _watcher = watch_config(tx.clone());
+    let _watcher = match watch_config(tx.clone()) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            tracing::warn!("config.toml changes will not be picked up live: {e:#}");
+            None
+        }
+    };
 
     let mut tracker = Tracker::new(store, cfg.clone(), shared.clone(), conn.clone());
+    tracker.set_config_error(cfg_error);
     tracker.start();
 
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.general.sample_interval_secs));
@@ -155,7 +172,10 @@ async fn run_async() -> Result<()> {
                         serve_dashboard(&web, port).await;
                         tray.set_enabled(show_tray).await;
                     }
-                    Err(e) => tracing::warn!("config reload failed: {e:#}"),
+                    Err(e) => {
+                        tracing::warn!("config reload failed: {e:#}");
+                        tracker.handle(Event::ConfigError(format!("{e:#}"))).await;
+                    }
                 }
             }
             _ = term.recv() => break,
@@ -192,10 +212,13 @@ async fn sleep_until_opt(t: Option<tokio::time::Instant>) {
 }
 
 /// Reloads config.toml when it changes on disk (hand edits and dashboard saves).
-fn watch_config(tx: mpsc::UnboundedSender<Event>) -> Option<notify::RecommendedWatcher> {
+fn watch_config(tx: mpsc::UnboundedSender<Event>) -> Result<notify::RecommendedWatcher> {
     use notify::Watcher;
     let path = crate::config::config_path();
-    let dir = path.parent()?.to_path_buf();
+    let dir = path
+        .parent()
+        .context("config path has no directory")?
+        .to_path_buf();
     let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         let Ok(ev) = res else { return };
         if !ev.paths.iter().any(|p| p.file_name() == path.file_name()) {
@@ -209,13 +232,13 @@ fn watch_config(tx: mpsc::UnboundedSender<Event>) -> Option<notify::RecommendedW
                 let _ = tx.send(Event::ConfigChanged(Box::new(c)));
             }
             Err(e) => {
-                tracing::warn!("config.toml has an error, keeping the previous settings: {e:#}")
+                tracing::warn!("config.toml has an error, keeping the previous settings: {e:#}");
+                let _ = tx.send(Event::ConfigError(format!("{e:#}")));
             }
         }
-    })
-    .ok()?;
-    w.watch(&dir, notify::RecursiveMode::NonRecursive).ok()?;
-    Some(w)
+    })?;
+    w.watch(&dir, notify::RecursiveMode::NonRecursive)?;
+    Ok(w)
 }
 
 fn set_mode_700(p: &std::path::Path) {
