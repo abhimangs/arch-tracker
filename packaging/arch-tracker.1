@@ -1,0 +1,89 @@
+.TH ARCH-TRACKER 1 "2026-11-23" "arch-tracker" "User Commands"
+.SH NAME
+arch-tracker \- local screen-time and activity tracker for KDE Plasma on Wayland
+.SH SYNOPSIS
+.B arch-tracker
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B arch-tracker
+records which apps, sites, terminal programs and AI agents you use, and for how long,
+without sending anything off the computer.
+A per-user daemon, started by the systemd user unit
+.BR arch-tracker.service ,
+watches KWin, idle time, the screen lock, media and the browser extension, and writes
+raw intervals to a local SQLite database.
+What counts as screen time is decided when you look at the data, so changing a setting
+re-classifies all history.
+.SH COMMANDS
+.TP
+.B daemon
+Run the tracker in the foreground (normally started by systemd).
+.TP
+.BR status " [" \-\-json ]
+Show what is being tracked right now and which sources work.
+.TP
+.BR pause " [" \fIduration\fR ]
+Pause tracking, for example
+.B pause 30m
+or
+.BR "pause 1h" .
+Without a duration, tracking stays paused until
+.BR resume .
+.TP
+.B resume
+Resume tracking.
+.TP
+.BR open " [" \fIpage\fR ]
+Open the dashboard in the default browser, signed in.
+.I page
+is one of today, apps, agents, trends or settings.
+.TP
+.B setup
+Unpack the browser extensions and register the native-messaging bridge for every
+installed Chromium- and Firefox-based browser.
+.TP
+.B doctor
+Check every data source and explain how to fix problems.
+.TP
+.BR serve " [" \-\-db " \fIfile\fR] [" \-\-port " \fIport\fR]"
+Read-only dashboard for a database (for example a copy from another computer).
+.TP
+.BR export " \-\-from " \fIdate\fR " [" \-\-to " \fIdate\fR] [" \-\-format " csv|json]"
+Print every recorded interval in a date range (dates as YYYY-MM-DD).
+.SH DASHBOARD
+The dashboard is served at
+.BI http://arch-tracker.localhost: port /
+(port 7600 by default) and only answers on the loopback interface.
+It is locked: open it from the tray icon or with
+.BR "arch-tracker open" ,
+which signs the browser in with a one-time code.
+The browser then stays signed in, so bookmarks keep working.
+Other programs on the computer cannot read your history.
+.SH FILES
+.TP
+.I ~/.config/arch-tracker/config.toml
+Settings. Edited here or in the dashboard; changes apply immediately.
+.TP
+.I ~/.config/arch-tracker/custom.css
+Extra CSS loaded by the dashboard.
+.TP
+.I ~/.local/share/arch-tracker/tracker.db
+The recorded intervals.
+.TP
+.I ~/.local/share/arch-tracker/dashboard.key
+The dashboard's sign-in key (mode 0600). Delete it and restart the daemon to sign
+every browser out.
+.TP
+.I $XDG_RUNTIME_DIR/arch-tracker/
+Control and browser-bridge sockets.
+.SH PRIVACY
+Browser data is the host name and page title only, never paths or queries.
+Private (incognito) windows count as time with no site, title or audio details.
+Terminal data is the program name and project folder only, never arguments or
+environment variables.
+.SH SEE ALSO
+.BR systemctl (1),
+.BR systemd.unit (5)
+.PP
+https://github.com/abhimangs/arch-tracker

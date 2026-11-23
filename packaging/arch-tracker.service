@@ -1,6 +1,6 @@
 [Unit]
 Description=arch-tracker screen-time and activity tracker
-Documentation=man:arch-tracker(1)
+Documentation=https://github.com/abhimangs/arch-tracker
 PartOf=graphical-session.target
 After=graphical-session.target
 
