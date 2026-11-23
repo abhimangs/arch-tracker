@@ -145,6 +145,7 @@ async fn run_async() -> Result<()> {
                 }
             }
             _ = tick.tick() => tracker.tick().await,
+            _ = sleep_until_opt(tracker.deadline()) => tracker.on_deadline(),
             _ = hup.recv() => {
                 match Config::load() {
                     Ok(c) => {
@@ -179,6 +180,13 @@ async fn serve_dashboard(web: &std::sync::Arc<crate::web::Web>, port: u16) {
             tracing::warn!("dashboard could not start on port {port}: {e:#}");
             web.set_error(Some(format!("Port {port} is not available ({e}).")));
         }
+    }
+}
+
+async fn sleep_until_opt(t: Option<tokio::time::Instant>) {
+    match t {
+        Some(t) => tokio::time::sleep_until(t).await,
+        None => std::future::pending().await,
     }
 }
 

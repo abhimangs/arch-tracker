@@ -93,6 +93,8 @@ pub fn strip_browser_suffix(caption: &str) -> String {
 struct ExtConn {
     pid: u32,
     last: i64,
+    /// When the last window snapshot arrived.
+    snap_at: i64,
     windows: Vec<ExtWindow>,
 }
 
@@ -126,6 +128,83 @@ fn stored_pause(store: &Store, now: i64) -> Option<Option<i64>> {
     }
 }
 
+/// How long the extension may lag behind a KWin focus or caption change.
+const FOCUS_GRACE_MS: i64 = 2_000;
+
+/// The tab a browser window shows, from the windows the extension reports. focused: KWin
+/// focuses this window; settled: the extension has reported since the focus or caption last
+/// changed (or the grace period is over), so its focused window can be trusted.
+fn pick_ext(
+    wins: &[(u64, &ExtWindow)],
+    focused: bool,
+    settled: bool,
+    caption: &str,
+    norm: &dyn Fn(&str) -> String,
+) -> Option<TabPick> {
+    let fits = |t: &ExtTab| {
+        let n = norm(&t.title);
+        caption.is_empty() || n == caption || util::titles_match(&n, caption)
+    };
+    let make = |cid: u64, x: &ExtWindow, t: &ExtTab| TabPick {
+        host: t.host.clone(),
+        title: norm(&t.title),
+        private: x.incognito,
+        audible: t.audible && !t.muted,
+        conn: Some(cid),
+        tab_id: Some(t.id),
+        split: match t.split {
+            Some(sid) => x
+                .tabs
+                .iter()
+                .filter(|o| o.id != t.id && o.split == Some(sid))
+                .map(|o| (o.host.clone(), norm(&o.title)))
+                .collect(),
+            None => vec![],
+        },
+    };
+    let private = || TabPick {
+        private: true,
+        ..Default::default()
+    };
+    let devtools = || {
+        caption.starts_with("DevTools").then(|| TabPick {
+            host: "devtools".into(),
+            title: caption.into(),
+            ..Default::default()
+        })
+    };
+    if focused {
+        if let Some((cid, x)) = wins.iter().find(|(_, x)| x.focused) {
+            if x.incognito {
+                return Some(private());
+            }
+            if let Some(t) = x.active_tab()
+                && fits(t)
+            {
+                return Some(make(*cid, x, t));
+            }
+        }
+        if settled {
+            // KWin focuses a window of this browser that the extension does not report as
+            // focused with this title: one it cannot see, i.e. incognito. Matching the caption
+            // against normal tabs would record a private window as a normal tab.
+            return Some(devtools().unwrap_or_else(private));
+        }
+    }
+    if let Some((cid, x, t)) = wins
+        .iter()
+        .filter(|(_, x)| !x.incognito)
+        .find_map(|(cid, x)| x.active_tab().filter(|t| fits(t)).map(|t| (*cid, *x, t)))
+    {
+        return Some(make(cid, x, t));
+    }
+    if let Some(d) = devtools() {
+        return Some(d);
+    }
+    // Focused, and no window the extension can see shows this: incognito.
+    focused.then(private)
+}
+
 /// An extension connection is alive while it keeps sending (heartbeat every 20 s).
 const EXT_ALIVE_MS: i64 = 60_000;
 
@@ -144,6 +223,9 @@ pub struct Tracker {
     kwin: Option<kwin::Snapshot>,
     kwin_last: i64,
     kwin_reloading: bool,
+    /// KWin's focused window and its caption, and when either last changed.
+    focus_key: Option<(String, String)>,
+    focus_changed_at: i64,
     focus: Option<Subject>,
     visible: Vec<Subject>,
     media_visible: Vec<Subject>,
@@ -198,6 +280,8 @@ impl Tracker {
             // Grace period: the first snapshot arrives right after the script loads.
             kwin_last: now,
             kwin_reloading: false,
+            focus_key: None,
+            focus_changed_at: 0,
             focus: None,
             visible: vec![],
             media_visible: vec![],
@@ -244,6 +328,11 @@ impl Tracker {
                 self.set_config(*cfg);
             }
             Event::Kwin(snap) => {
+                let key = snap.focused().map(|w| (w.id.clone(), w.cap.clone()));
+                if key != self.focus_key {
+                    self.focus_key = key;
+                    self.focus_changed_at = now;
+                }
                 self.kwin = Some(*snap);
                 self.kwin_last = now;
                 self.kwin_reloading = false;
@@ -302,6 +391,7 @@ impl Tracker {
                 let c = self.ext.entry(conn).or_insert(ExtConn {
                     pid: 0,
                     last: now,
+                    snap_at: 0,
                     windows: vec![],
                 });
                 c.last = now;
@@ -310,7 +400,10 @@ impl Tracker {
                         tracing::info!("browser extension connected (browser pid {browser_pid})");
                         c.pid = browser_pid;
                     }
-                    ExtMsg::Snapshot { windows } => c.windows = windows,
+                    ExtMsg::Snapshot { windows } => {
+                        c.windows = windows;
+                        c.snap_at = now;
+                    }
                 }
             }
             Event::BrowserGone(conn) => {
@@ -324,6 +417,19 @@ impl Tracker {
 
     fn locked(&self) -> bool {
         self.screensaver_locked || self.logind_locked
+    }
+
+    /// When the tracker wants to be woken without an event (see on_deadline).
+    pub fn deadline(&self) -> Option<tokio::time::Instant> {
+        // Re-decide a focused browser window once the extension's grace period is over.
+        let grace_left = self.focus_changed_at + FOCUS_GRACE_MS - now_ms();
+        (grace_left > 0).then(|| {
+            tokio::time::Instant::now() + std::time::Duration::from_millis(grace_left as u64 + 50)
+        })
+    }
+
+    pub fn on_deadline(&mut self) {
+        self.reconcile(now_ms());
     }
 
     pub fn sample_interval_secs(&self) -> u64 {
@@ -528,62 +634,12 @@ impl Tracker {
                 .flat_map(|(id, c)| c.windows.iter().map(move |x| (*id, x)))
                 .filter(|(_, x)| (x.kind == "app") == want_app)
                 .collect();
-            let fits = |t: &ExtTab| {
-                let n = self.norm(&t.title);
-                caption.is_empty() || n == caption || util::titles_match(&n, caption)
-            };
-            let make = |cid: u64, x: &ExtWindow, t: &ExtTab| TabPick {
-                host: t.host.clone(),
-                title: self.norm(&t.title),
-                private: x.incognito,
-                audible: t.audible && !t.muted,
-                conn: Some(cid),
-                tab_id: Some(t.id),
-                split: match t.split {
-                    Some(sid) => x
-                        .tabs
-                        .iter()
-                        .filter(|o| o.id != t.id && o.split == Some(sid))
-                        .map(|o| (o.host.clone(), self.norm(&o.title)))
-                        .collect(),
-                    None => vec![],
-                },
-            };
-            if focused && let Some((cid, x)) = wins.iter().find(|(_, x)| x.focused) {
-                if x.incognito {
-                    return Some(TabPick {
-                        private: true,
-                        ..Default::default()
-                    });
-                }
-                if let Some(t) = x.active_tab()
-                    && fits(t)
-                {
-                    return Some(make(*cid, x, t));
-                }
-            }
-            if let Some((cid, x, t)) = wins
-                .iter()
-                .filter(|(_, x)| !x.incognito)
-                .find_map(|(cid, x)| x.active_tab().filter(|t| fits(t)).map(|t| (*cid, *x, t)))
-            {
-                return Some(make(cid, x, t));
-            }
-            if caption.starts_with("DevTools") {
-                return Some(TabPick {
-                    host: "devtools".into(),
-                    title: caption.into(),
-                    ..Default::default()
-                });
-            }
-            if focused && !wins.iter().any(|(_, x)| x.focused) {
-                // Browser has focus, but no window the extension can see: incognito.
-                return Some(TabPick {
-                    private: true,
-                    ..Default::default()
-                });
-            }
-            return None;
+            // Right after KWin's focus or caption changed, the extension's report may lag.
+            let settled = now - self.focus_changed_at >= FOCUS_GRACE_MS
+                || conns
+                    .iter()
+                    .any(|(_, c)| c.snap_at >= self.focus_changed_at);
+            return pick_ext(&wins, focused, settled, caption, &|t| self.norm(t));
         }
         let p = self.pbi.as_ref()?;
         if (p.pid != 0 && p.pid as i64 != w.pid) || now - p.at > 30_000 {
@@ -860,7 +916,8 @@ impl Tracker {
             .collect();
         for (cid, c) in self.ext.iter().filter(|(_, c)| now - c.last < EXT_ALIVE_MS) {
             let (app, app_name) = self.browser_app(c.pid);
-            for x in &c.windows {
+            // Private windows count as time only: their audio is not recorded at all.
+            for x in c.windows.iter().filter(|x| !x.incognito) {
                 for t in x.tabs.iter().filter(|t| t.audible && !t.muted) {
                     if shown_tabs.contains(&(*cid, t.id)) {
                         continue;
@@ -868,17 +925,8 @@ impl Tracker {
                     let s = Subject {
                         app: app.clone(),
                         app_name: app_name.clone(),
-                        host: if x.incognito {
-                            String::new()
-                        } else {
-                            t.host.clone()
-                        },
-                        title: if x.incognito {
-                            String::new()
-                        } else {
-                            self.norm(&t.title)
-                        },
-                        private: x.incognito,
+                        host: t.host.clone(),
+                        title: self.norm(&t.title),
                         ..Default::default()
                     };
                     bg.extend(self.apply_privacy(s));
@@ -1071,6 +1119,72 @@ mod tests {
         assert_eq!(stored_pause(&st, 6_000), None, "an ended pause is dropped");
         st.set_meta(PAUSE_KEY, None).unwrap();
         assert_eq!(stored_pause(&st, 1_000), None);
+    }
+
+    fn ext_win(id: i64, focused: bool, incognito: bool, host: &str, title: &str) -> ExtWindow {
+        ExtWindow {
+            id,
+            focused,
+            incognito,
+            kind: "normal".into(),
+            tabs: vec![ExtTab {
+                id: id * 10,
+                active: true,
+                host: host.into(),
+                title: title.into(),
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn unseen_focused_window_is_private() {
+        let norm = |t: &str| t.to_string();
+        let normal = ext_win(1, false, false, "docs.example.org", "Getting started");
+        let wins = vec![(1u64, &normal)];
+        // An incognito window (invisible to the extension) shows the same title as a normal
+        // window's active tab, and the extension reports no focused window.
+        let p = pick_ext(&wins, true, true, "Getting started", &norm).unwrap();
+        assert!(p.private && p.host.is_empty() && p.title.is_empty());
+        // While the extension may still lag, the caption match is used.
+        let p = pick_ext(&wins, true, false, "Getting started", &norm).unwrap();
+        assert_eq!(p.host, "docs.example.org");
+        // An unfocused visible window is matched by caption.
+        let p = pick_ext(&wins, false, true, "Getting started", &norm).unwrap();
+        assert_eq!(p.host, "docs.example.org");
+        // Nothing matches: private if focused, unknown otherwise.
+        assert!(
+            pick_ext(&wins, true, false, "Other", &norm)
+                .unwrap()
+                .private
+        );
+        assert!(pick_ext(&wins, false, true, "Other", &norm).is_none());
+        let dt = pick_ext(&wins, true, true, "DevTools - example", &norm).unwrap();
+        assert_eq!(dt.host, "devtools");
+    }
+
+    #[test]
+    fn focused_window_reported_by_the_extension() {
+        let norm = |t: &str| t.to_string();
+        let a = ext_win(1, true, false, "a.example.org", "Alpha page");
+        let b = ext_win(2, false, false, "b.example.org", "Beta page");
+        let wins = vec![(1u64, &a), (1u64, &b)];
+        let p = pick_ext(&wins, true, true, "Alpha page", &norm).unwrap();
+        assert_eq!((p.host.as_str(), p.private), ("a.example.org", false));
+        // The extension says a different window is focused than the one KWin shows.
+        assert!(
+            pick_ext(&wins, true, true, "Beta page", &norm)
+                .unwrap()
+                .private
+        );
+        let a = ext_win(1, false, false, "a.example.org", "Alpha page");
+        let inc = ext_win(3, true, true, "", "");
+        let wins = vec![(1u64, &a), (1u64, &inc)];
+        assert!(
+            pick_ext(&wins, true, false, "Alpha page", &norm)
+                .unwrap()
+                .private
+        );
     }
 
     #[test]
