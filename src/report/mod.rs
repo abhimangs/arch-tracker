@@ -410,11 +410,17 @@ fn build(conn: &Connection, cfg: &Config, date: &str, ds: i64, de: i64) -> Resul
 /// either edge (unclipped): a gap that runs over midnight is judged by its whole length, and pad
 /// (the longest threshold) is as far as that length can matter.
 fn day_spans(conn: &Connection, ds: i64, de: i64, pad: i64) -> Result<Vec<Span>> {
+    let mut out = store::spans_in(conn, ds, de)?;
+    // Before the day: spans that reach into it, and the tail of a gap that ends at midnight.
+    // After it: the head of a gap that started before midnight.
     let mut stmt = conn.prepare_cached(
         "SELECT kind, subject_id, start_ms, end_ms FROM spans
-         WHERE start_ms >= ?1 AND start_ms < ?2 AND end_ms > ?3 ORDER BY start_ms",
+         WHERE (start_ms >= ?1 AND start_ms < ?2 AND end_ms > ?3)
+            OR (kind = ?4 AND start_ms >= ?5 AND start_ms < ?6)",
     )?;
-    let rows = stmt.query_map(params![ds - pad - MAX_SPAN_MS, de + pad, ds - pad], |r| {
+    let idle = Kind::InputIdle as i64;
+    let args = params![ds - pad - MAX_SPAN_MS, ds, ds - pad, idle, de, de + pad];
+    let rows = stmt.query_map(args, |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, i64>(1)?,
@@ -422,7 +428,6 @@ fn day_spans(conn: &Connection, ds: i64, de: i64, pad: i64) -> Result<Vec<Span>>
             r.get::<_, i64>(3)?,
         ))
     })?;
-    let mut out = Vec::new();
     for row in rows {
         let (k, subject, start, end) = row?;
         let Some(kind) = Kind::from_i64(k) else {
@@ -435,11 +440,11 @@ fn day_spans(conn: &Connection, ds: i64, de: i64, pad: i64) -> Result<Vec<Span>>
                 start,
                 end,
             });
-        } else if start < de && end > ds {
+        } else if start < ds && end > ds {
             out.push(Span {
                 kind,
                 subject,
-                start: start.max(ds),
+                start: ds,
                 end: end.min(de),
             });
         }
