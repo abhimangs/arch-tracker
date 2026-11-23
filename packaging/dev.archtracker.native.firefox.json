@@ -1,0 +1,9 @@
+{
+  "name": "dev.archtracker.native",
+  "description": "arch-tracker: receives active-tab host and title from the arch-tracker extension",
+  "path": "/usr/bin/arch-tracker",
+  "type": "stdio",
+  "allowed_extensions": [
+    "arch-tracker@abhimangs.github.io"
+  ]
+}
