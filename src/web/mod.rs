@@ -135,6 +135,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/assets/{file}", get(asset))
         .route("/custom.css", get(custom_css))
         .route("/api/status", get(api_status))
+        .route("/api/live", get(api_live))
         .route("/api/day", get(api_day))
         .route("/api/range", get(api_range))
         .route("/api/settings", get(api_settings).put(api_settings_put))
@@ -263,6 +264,8 @@ fn themed(html: &str, cfg: &Config) -> String {
             "__THEMECATS__",
             if d.theme_categories { "on" } else { "off" },
         )
+        .replace("__DENSITY__", &d.density)
+        .replace("__MOTION__", &d.motion)
         .replace("__VERSION__", env!("CARGO_PKG_VERSION"))
 }
 
@@ -463,9 +466,9 @@ async fn custom_css() -> Response {
         .into_response()
 }
 
-async fn api_status(State(ctx): State<Ctx>) -> Response {
-    let mut v = ctx
-        .web
+/// The tracker's status plus what only the web server knows.
+fn status_value(web: &Web) -> serde_json::Value {
+    let mut v = web
         .shared
         .lock()
         .map(|s| s.status.clone())
@@ -476,10 +479,38 @@ async fn api_status(State(ctx): State<Ctx>) -> Response {
             "extension".into(),
             json!({"id": crate::setup::EXTENSION_ID, "dir": crate::setup::extension_dir()}),
         );
-        let dash_err = ctx.web.error.lock().ok().and_then(|e| e.clone());
+        let dash_err = web.error.lock().ok().and_then(|e| e.clone());
         o.insert("dashboard_error".into(), json!(dash_err));
+        o.insert("server_ms".into(), json!(util::now_ms()));
     }
-    Json(v).into_response()
+    v
+}
+
+async fn api_status(State(ctx): State<Ctx>) -> Response {
+    Json(status_value(&ctx.web)).into_response()
+}
+
+/// Server-sent events: the status now, then again every time the tracker republishes it
+/// (at once on a focus change, otherwise at most once a second).
+async fn api_live(State(ctx): State<Ctx>) -> Response {
+    use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+    let Ok(rx) = ctx.web.shared.lock().map(|s| s.live.subscribe()) else {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "status unavailable");
+    };
+    let web = ctx.web.clone();
+    let stream = futures_util::stream::unfold((rx, web, true), |(mut rx, web, first)| async move {
+        if !first && rx.changed().await.is_err() {
+            return None;
+        }
+        let data = status_value(&web).to_string();
+        let ev: Result<SseEvent, std::convert::Infallible> = Ok(SseEvent::default().data(data));
+        Some((ev, (rx, web, false)))
+    });
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Sse::new(stream).keep_alive(KeepAlive::default()),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -635,6 +666,10 @@ struct AppearanceBody {
     dark_flavor: Option<String>,
     accent: Option<String>,
     theme_categories: Option<bool>,
+    time_format: Option<String>,
+    show_ms: Option<bool>,
+    density: Option<String>,
+    motion: Option<String>,
 }
 
 /// Saves only the look (from the header's theme picker) without touching other settings.
@@ -664,6 +699,18 @@ async fn api_appearance(State(ctx): State<Ctx>, JsonBody(b): JsonBody<Appearance
     }
     if let Some(v) = b.theme_categories {
         d.theme_categories = v;
+    }
+    if let Some(v) = b.time_format {
+        d.time_format = v;
+    }
+    if let Some(v) = b.show_ms {
+        d.show_ms = v;
+    }
+    if let Some(v) = b.density {
+        d.density = v;
+    }
+    if let Some(v) = b.motion {
+        d.motion = v;
     }
     let cfg = cfg.sanitized();
     if let Err(e) = cfg.save() {

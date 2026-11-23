@@ -47,10 +47,21 @@ pub enum Event {
 }
 
 /// State shared with the web server.
-#[derive(Default)]
 pub struct Shared {
     pub status: serde_json::Value,
     pub config: Config,
+    /// Bumped whenever the status is republished: the dashboard's live stream waits on it.
+    pub live: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Shared {
+            status: serde_json::Value::Null,
+            config: Config::default(),
+            live: tokio::sync::watch::channel(0).0,
+        }
+    }
 }
 
 pub type SharedRef = Arc<Mutex<Shared>>;
@@ -79,8 +90,8 @@ async fn run_async() -> Result<()> {
     };
     let store = Store::open(&util::db_path())?;
     let shared: SharedRef = Arc::new(Mutex::new(Shared {
-        status: serde_json::Value::Null,
         config: cfg.clone(),
+        ..Default::default()
     }));
     let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
 

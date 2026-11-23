@@ -200,6 +200,7 @@ async fn serve(db: std::path::PathBuf, port: Option<u16>) -> Result<()> {
     let shared = std::sync::Arc::new(std::sync::Mutex::new(daemon::Shared {
         status,
         config: cfg,
+        ..Default::default()
     }));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let web = web::Web::new(shared, tx, db.clone(), true)?;

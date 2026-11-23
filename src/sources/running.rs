@@ -131,6 +131,10 @@ pub async fn scan(
             let Ok(pid) = dbus.get_connection_unix_process_id(name).await else {
                 continue;
             };
+            // Our own tray icon is not an app you have running.
+            if pid == std::process::id() {
+                continue;
+            }
             if let Some(id) = unit_of_pid(pid).and_then(|u| app_id_from_unit(&u)) {
                 let key = desktop
                     .by_id(&id)

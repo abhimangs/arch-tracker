@@ -276,6 +276,13 @@ pub struct Tracker {
     status_dirty: bool,
     status_at: Option<Instant>,
     focus: Option<Subject>,
+    /// When the focused subject, and the focused app, last changed (for the live timer).
+    focus_since: i64,
+    app_since: i64,
+    /// When the current no-input gap started.
+    idle_since: Option<i64>,
+    /// Next time old history may be pruned (general.keep_days).
+    prune_at: i64,
     visible: Vec<Subject>,
     media_visible: Vec<Subject>,
     bg_audio: Vec<Subject>,
@@ -345,6 +352,10 @@ impl Tracker {
             status_dirty: false,
             status_at: None,
             focus: None,
+            focus_since: now,
+            app_since: now,
+            idle_since: None,
+            prune_at: now + 60_000,
             visible: vec![],
             media_visible: vec![],
             bg_audio: vec![],
@@ -422,6 +433,7 @@ impl Tracker {
                         at
                     };
                     self.ledger.set_flag(Kind::InputIdle, is_idle, start);
+                    self.idle_since = is_idle.then_some(start);
                 } else {
                     self.session_idle = is_idle;
                 }
@@ -580,6 +592,17 @@ impl Tracker {
             && let Some(hint) = self.locked_hint.get(sys).await
         {
             self.logind_locked = hint;
+        }
+        if now >= self.prune_at {
+            self.prune_at = now + 3_600_000;
+            let days = self.cfg.general.keep_days;
+            if days > 0 {
+                match self.store.prune(now - days as i64 * 86_400_000) {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!("deleted {n} intervals older than {days} days"),
+                    Err(e) => tracing::warn!("could not delete old history: {e:#}"),
+                }
+            }
         }
         if self.desktop_loaded.elapsed().as_secs() > 600 {
             self.desktop = DesktopIndex::load();
@@ -1203,6 +1226,13 @@ impl Tracker {
         };
         let running_ids = self.ids(&running);
         self.ledger.reconcile(Kind::Running, &running_ids, now);
+        let focus_changed = self.focus != focus;
+        if focus_changed {
+            if self.focus.as_ref().map(|f| &f.app) != focus.as_ref().map(|f| &f.app) {
+                self.app_since = now;
+            }
+            self.focus_since = now;
+        }
         self.focus = focus;
         self.visible = visible;
         self.media_visible = media_visible;
@@ -1211,7 +1241,8 @@ impl Tracker {
         // The status is for people (dashboard, CLI): rebuilt at most once a second; a change
         // in between is published by on_deadline.
         self.status_dirty = true;
-        if self.status_due() {
+        // A focus change is shown at once (the dashboard's live view); the rest at most 1/s.
+        if focus_changed || self.status_due() {
             self.publish_status(now);
         }
     }
@@ -1225,6 +1256,7 @@ impl Tracker {
         let status = self.status_json(now);
         if let Ok(mut s) = self.shared.lock() {
             s.status = status.clone();
+            s.live.send_modify(|v| *v = v.wrapping_add(1));
         }
         self.status_at = Some(Instant::now());
         self.status_dirty = false;
@@ -1240,6 +1272,9 @@ impl Tracker {
             "paused": self.paused.is_some(),
             "paused_until_ms": self.paused.flatten(),
             "focus": self.focus,
+            "focus_since_ms": self.focus_since,
+            "app_since_ms": self.app_since,
+            "idle_since_ms": self.idle_since,
             "visible": self.visible,
             "media_visible": self.media_visible,
             "background_audio": self.bg_audio,

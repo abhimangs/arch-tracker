@@ -81,6 +81,34 @@ impl Store {
     }
 
     /// A value from the meta table.
+    /// Deletes intervals that ended before `before_ms`, then the titles and other details only
+    /// they used, and cached day summaries. Subjects waiting for the next flush are kept.
+    pub fn prune(&mut self, before_ms: i64) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let n = tx.execute("DELETE FROM spans WHERE end_ms < ?1", params![before_ms])?;
+        if n > 0 {
+            tx.execute(
+                "DELETE FROM subjects WHERE id NOT IN (SELECT DISTINCT subject_id FROM spans)",
+                [],
+            )?;
+            tx.execute("DELETE FROM rollups", [])?;
+        }
+        tx.commit()?;
+        if n > 0 {
+            // Forget ids whose rows are gone; pending ones are written at the next flush.
+            let pending: std::collections::HashSet<i64> =
+                self.new_subjects.iter().map(|(id, _)| *id).collect();
+            let live: std::collections::HashSet<i64> = {
+                let mut st = self.conn.prepare("SELECT id FROM subjects")?;
+                st.query_map([], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?
+            };
+            self.subjects
+                .retain(|_, id| live.contains(id) || pending.contains(id));
+        }
+        Ok(n)
+    }
+
     pub fn meta(&self, key: &str) -> Option<String> {
         self.conn
             .query_row("SELECT value FROM meta WHERE key=?1", params![key], |r| {
