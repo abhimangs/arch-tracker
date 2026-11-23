@@ -18,8 +18,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Instant;
 
-pub use crate::util::next_local_midnight;
-
 /// What kind of app a window belongs to decides how it is enriched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppKind {
@@ -165,7 +163,6 @@ pub struct Tracker {
     last_flush: Instant,
     last_wall: i64,
     last_mono: Instant,
-    next_midnight: i64,
 }
 
 impl Tracker {
@@ -213,7 +210,6 @@ impl Tracker {
             last_flush: Instant::now(),
             last_wall: now,
             last_mono: Instant::now(),
-            next_midnight: next_local_midnight(now),
         }
     }
 
@@ -330,7 +326,8 @@ impl Tracker {
         }
     }
 
-    /// Periodic work: pause expiry, clock jumps, midnight split, sampling, flushing.
+    /// Periodic work: pause expiry, clock jumps, sampling, flushing (the ledger splits spans at
+    /// local midnight itself).
     pub async fn tick(&mut self) {
         let now = now_ms();
         let mono_elapsed = self.last_mono.elapsed().as_millis() as i64;
@@ -340,7 +337,6 @@ impl Tracker {
             // stretch across the jump.
             tracing::info!("clock jump of {} s detected", (now - expected) / 1000);
             self.ledger.close_all(expected.min(now));
-            self.next_midnight = next_local_midnight(now);
         }
         self.last_wall = now;
         self.last_mono = Instant::now();
@@ -350,10 +346,6 @@ impl Tracker {
         {
             tracing::info!("pause expired");
             self.paused = None;
-        }
-        if now >= self.next_midnight {
-            self.ledger.split_all(self.next_midnight);
-            self.next_midnight = next_local_midnight(now);
         }
         self.mic = media::mic_active();
         if self.sys_conn.is_none() {
@@ -985,7 +977,7 @@ mod tests {
     #[test]
     fn midnight_is_in_the_future_and_within_a_day() {
         let now = now_ms();
-        let m = next_local_midnight(now);
+        let m = util::next_local_midnight(now);
         assert!(m > now);
         assert!(m - now <= 25 * 3_600_000);
     }

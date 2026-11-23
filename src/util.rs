@@ -94,6 +94,7 @@ pub fn parse_duration(s: &str) -> Option<i64> {
 }
 
 /// Start of the next local day after now_ms, in ms (DST-safe).
+#[cfg(test)]
 pub fn next_local_midnight(now_ms: i64) -> i64 {
     local_day_bounds(now_ms).1
 }

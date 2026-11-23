@@ -1,6 +1,8 @@
 //! Open/closed bookkeeping for spans. The tracker says "these subjects are now active for this
 //! kind"; the ledger opens and closes rows, and writes them in batches. Open rows get their end
-//! time refreshed on every flush, so a crash loses at most one flush interval.
+//! time refreshed on every flush, so a crash loses at most one flush interval. Spans never cross
+//! local midnight: the ledger cuts them there when they close and when it flushes, whatever the
+//! caller does (back-dated starts, a suspend that ends the next day, a missed tick).
 
 use crate::model::Kind;
 use anyhow::Result;
@@ -9,6 +11,9 @@ use std::collections::{HashMap, HashSet};
 
 /// Spans shorter than this that were never written are dropped (alt-tab flicker).
 const MIN_SPAN_MS: i64 = 500;
+
+/// Upper bound on the days one span is cut into (guards against a wildly wrong clock).
+const MAX_DAYS: usize = 400;
 
 #[derive(Debug)]
 struct Open {
@@ -30,13 +35,39 @@ enum Pending {
     },
 }
 
-#[derive(Default)]
 pub struct Ledger {
     open: HashMap<(Kind, i64), Open>,
     pending: Vec<Pending>,
+    /// [start, end) of the local day containing an instant (swappable in tests).
+    day_bounds: fn(i64) -> (i64, i64),
+    /// Last answer of day_bounds, reused while instants fall inside it.
+    day: (i64, i64),
+}
+
+impl Default for Ledger {
+    fn default() -> Self {
+        Ledger::with_day_bounds(crate::util::local_day_bounds)
+    }
 }
 
 impl Ledger {
+    pub fn with_day_bounds(day_bounds: fn(i64) -> (i64, i64)) -> Self {
+        Ledger {
+            open: HashMap::new(),
+            pending: vec![],
+            day_bounds,
+            day: (0, 0),
+        }
+    }
+
+    /// Start of the day after the one containing t.
+    fn next_day(&mut self, t: i64) -> i64 {
+        if !(self.day.0 <= t && t < self.day.1) {
+            self.day = (self.day_bounds)(t);
+        }
+        self.day.1
+    }
+
     /// Makes exactly the subjects in desired active for kind.
     pub fn reconcile(&mut self, kind: Kind, desired: &HashSet<i64>, now: i64) {
         let stale: Vec<(Kind, i64)> = self
@@ -65,17 +96,32 @@ impl Ledger {
         self.reconcile(kind, &d, now);
     }
 
+    /// Closes an open span at end, cut into one piece per local day.
     fn close(&mut self, key: (Kind, i64), end: i64) {
         let Some(o) = self.open.remove(&key) else {
             return;
         };
         let end = end.max(o.start);
-        match o.row {
+        let (mut start, mut row) = (o.start, o.row);
+        for _ in 0..MAX_DAYS {
+            let m = self.next_day(start);
+            let piece_end = if m > start && m < end { m } else { end };
+            self.piece(key, row.take(), start, piece_end);
+            if piece_end >= end {
+                return;
+            }
+            start = piece_end;
+        }
+        self.piece(key, None, start, end);
+    }
+
+    fn piece(&mut self, key: (Kind, i64), row: Option<i64>, start: i64, end: i64) {
+        match row {
             Some(row) => self.pending.push(Pending::Close { row, end }),
-            None if end - o.start >= MIN_SPAN_MS => self.pending.push(Pending::Insert {
+            None if end - start >= MIN_SPAN_MS => self.pending.push(Pending::Insert {
                 kind: key.0,
                 subject: key.1,
-                start: o.start,
+                start,
                 end,
             }),
             None => {}
@@ -89,20 +135,29 @@ impl Ledger {
         }
     }
 
-    /// Closes every open span at at and reopens it at at (local-midnight split).
-    pub fn split_all(&mut self, at: i64) {
-        let keys: Vec<_> = self.open.keys().copied().collect();
-        for k in keys {
-            let start_after = self.open.get(&k).map(|o| o.start >= at).unwrap_or(true);
-            if start_after {
+    /// Open spans that started before the local day containing now are closed at the last
+    /// midnight (one piece per day) and reopened there.
+    pub fn split_due(&mut self, now: i64) {
+        let starts: Vec<((Kind, i64), i64)> =
+            self.open.iter().map(|(k, o)| (*k, o.start)).collect();
+        for (k, start) in starts {
+            let mut m = self.next_day(start);
+            if m > now || m <= start {
                 continue;
             }
-            self.close(k, at);
+            for _ in 0..MAX_DAYS {
+                let n = self.next_day(m);
+                if n > now || n <= m {
+                    break;
+                }
+                m = n;
+            }
+            self.close(k, m);
             self.open.insert(
                 k,
                 Open {
                     row: None,
-                    start: at,
+                    start: m,
                 },
             );
         }
@@ -114,6 +169,7 @@ impl Ledger {
 
     /// Writes closed spans and refreshes open ones in one transaction.
     pub fn flush(&mut self, conn: &mut Connection, now: i64) -> Result<()> {
+        self.split_due(now);
         let tx = conn.transaction()?;
         let rows = self.write(&tx, now)?;
         tx.commit()?;
@@ -251,16 +307,89 @@ mod tests {
         );
     }
 
+    /// Test days are 100 s long and start at multiples of 100_000 ms (no time zone involved).
+    const D: i64 = 100_000;
+
+    fn test_days(t: i64) -> (i64, i64) {
+        let s = t.div_euclid(D) * D;
+        (s, s + D)
+    }
+
+    fn all(st: &Store) -> Vec<(i64, i64, i64)> {
+        let spans = spans_in(&st.conn, i64::MIN, i64::MAX).unwrap();
+        spans.iter().map(|s| (s.subject, s.start, s.end)).collect()
+    }
+
     #[test]
-    fn split_at_midnight() {
+    fn close_splits_at_midnight() {
+        let mut st = mem();
+        let mut l = Ledger::with_day_bounds(test_days);
+        l.set_flag(Kind::Suspended, true, 90_000);
+        l.set_flag(Kind::Suspended, false, 130_000);
+        // A piece shorter than the flicker limit after midnight is dropped.
+        l.set_flag(Kind::Paused, true, 195_000);
+        l.set_flag(Kind::Paused, false, 200_200);
+        l.flush(&mut st.conn, 210_000).unwrap();
+        assert_eq!(
+            all(&st),
+            vec![
+                (0, 90_000, 100_000),
+                (0, 100_000, 130_000),
+                (0, 195_000, 200_000)
+            ]
+        );
+    }
+
+    #[test]
+    fn flush_splits_open_rows_at_midnight() {
+        let mut st = mem();
+        let mut l = Ledger::with_day_bounds(test_days);
+        l.set_flag(Kind::Paused, true, 1_000);
+        l.flush(&mut st.conn, 95_000).unwrap(); // row written, end 95_000
+        l.flush(&mut st.conn, 105_000).unwrap(); // cut at 100_000, reopened there
+        l.set_flag(Kind::Paused, false, 120_000);
+        l.flush(&mut st.conn, 130_000).unwrap();
+        assert_eq!(all(&st), vec![(0, 1_000, 100_000), (0, 100_000, 120_000)]);
+    }
+
+    #[test]
+    fn back_dated_start_is_split_per_day() {
+        let mut st = mem();
+        let mut l = Ledger::with_day_bounds(test_days);
+        // An idle gap that began two "days" before it was reported.
+        l.set_flag(Kind::InputIdle, true, 50_000);
+        l.flush(&mut st.conn, 250_000).unwrap();
+        assert_eq!(
+            all(&st),
+            vec![
+                (0, 50_000, 100_000),
+                (0, 100_000, 200_000),
+                (0, 200_000, 250_000)
+            ]
+        );
+        l.set_flag(Kind::InputIdle, false, 260_000);
+        l.flush(&mut st.conn, 270_000).unwrap();
+        assert_eq!(all(&st)[2], (0, 200_000, 260_000));
+    }
+
+    #[test]
+    fn real_local_days_are_never_crossed() {
         let mut st = mem();
         let mut l = Ledger::default();
-        l.set_flag(Kind::Paused, true, 1_000);
-        l.split_all(50_000);
-        l.set_flag(Kind::Paused, false, 60_000);
-        l.flush(&mut st.conn, 70_000).unwrap();
-        let spans = spans_in(&st.conn, 0, 100_000).unwrap();
-        let got: Vec<(i64, i64)> = spans.iter().map(|s| (s.start, s.end)).collect();
-        assert_eq!(got, vec![(1_000, 50_000), (50_000, 60_000)]);
+        // 2026-03-07 12:00 UTC, closed three and a half days later: whatever the time zone,
+        // every stored span must end by the local midnight after its start.
+        let start = 1_772_884_800_000;
+        l.set_flag(Kind::Suspended, true, start);
+        l.flush(&mut st.conn, start + 30 * 3_600_000).unwrap();
+        l.set_flag(Kind::Suspended, false, start + 84 * 3_600_000);
+        l.flush(&mut st.conn, start + 85 * 3_600_000).unwrap();
+        let spans = all(&st);
+        assert!(spans.len() >= 4);
+        let mut covered = 0;
+        for (_, s, e) in &spans {
+            assert!(*e <= crate::util::next_local_midnight(*s), "{s}..{e}");
+            covered += e - s;
+        }
+        assert_eq!(covered, 84 * 3_600_000);
     }
 }
