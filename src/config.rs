@@ -79,6 +79,70 @@ pub struct Dashboard {
     pub port: u16,
     /// "system", "dark" or "light".
     pub theme: String,
+    /// "catppuccin", "rose-pine" or "aizome" (the original look).
+    pub palette: String,
+    /// Flavour used in dark mode: mocha/macchiato/frappe, main/moon, or night.
+    pub dark_flavor: String,
+    /// Accent colour name from the palette (mauve, iris, cinnabar, …).
+    pub accent: String,
+    /// Category colours follow the palette instead of the colours set per category.
+    pub theme_categories: bool,
+    /// Show the system-tray icon.
+    pub tray: bool,
+}
+
+/// A dashboard palette: its dark flavours and accents (the first of each is the default).
+#[derive(Debug, Serialize)]
+pub struct Palette {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub dark: &'static [&'static str],
+    /// Light-mode flavour (fixed per palette).
+    pub light: &'static str,
+    pub accents: &'static [&'static str],
+}
+
+pub const PALETTES: &[Palette] = &[
+    Palette {
+        id: "catppuccin",
+        name: "Catppuccin",
+        dark: &["mocha", "macchiato", "frappe"],
+        light: "latte",
+        accents: &[
+            "mauve",
+            "rosewater",
+            "flamingo",
+            "pink",
+            "red",
+            "maroon",
+            "peach",
+            "yellow",
+            "green",
+            "teal",
+            "sky",
+            "sapphire",
+            "blue",
+            "lavender",
+        ],
+    },
+    Palette {
+        id: "rose-pine",
+        name: "Rosé Pine",
+        dark: &["main", "moon"],
+        light: "dawn",
+        accents: &["iris", "love", "gold", "rose", "pine", "foam"],
+    },
+    Palette {
+        id: "aizome",
+        name: "Aizome",
+        dark: &["night"],
+        light: "fog",
+        accents: &["cinnabar", "gold", "jade", "sky", "lilac", "sakura"],
+    },
+];
+
+pub fn palette(id: &str) -> &'static Palette {
+    PALETTES.iter().find(|p| p.id == id).unwrap_or(&PALETTES[0])
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -181,6 +245,11 @@ impl Default for Dashboard {
         Dashboard {
             port: 7600,
             theme: "system".into(),
+            palette: "catppuccin".into(),
+            dark_flavor: "mocha".into(),
+            accent: "mauve".into(),
+            theme_categories: true,
+            tray: true,
         }
     }
 }
@@ -505,6 +574,14 @@ impl Config {
         if !matches!(self.dashboard.theme.as_str(), "system" | "dark" | "light") {
             self.dashboard.theme = "system".into();
         }
+        let pal = palette(&self.dashboard.palette);
+        self.dashboard.palette = pal.id.into();
+        if !pal.dark.contains(&self.dashboard.dark_flavor.as_str()) {
+            self.dashboard.dark_flavor = pal.dark[0].into();
+        }
+        if !pal.accents.contains(&self.dashboard.accent.as_str()) {
+            self.dashboard.accent = pal.accents[0].into();
+        }
         if !matches!(self.privacy.exclude_mode.as_str(), "hide" | "drop") {
             self.privacy.exclude_mode = "hide".into();
         }
@@ -571,6 +648,24 @@ mod tests {
         let text = toml::to_string_pretty(&Config::default()).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back, Config::default());
+    }
+
+    #[test]
+    fn palette_choices_are_sanitized() {
+        let mut cfg = Config::default();
+        cfg.dashboard.palette = "rose-pine".into();
+        cfg.dashboard.dark_flavor = "mocha".into();
+        cfg.dashboard.accent = "mauve".into();
+        let cfg = cfg.sanitized();
+        assert_eq!(cfg.dashboard.dark_flavor, "main");
+        assert_eq!(cfg.dashboard.accent, "iris");
+        let mut cfg = Config::default();
+        cfg.dashboard.palette = "nope".into();
+        assert_eq!(cfg.sanitized().dashboard.palette, "catppuccin");
+        let cfg: Config = toml::from_str("[dashboard]\ntheme = \"dark\"\n").unwrap();
+        assert_eq!(cfg.dashboard.palette, "catppuccin");
+        assert_eq!(cfg.dashboard.accent, "mauve");
+        assert!(cfg.dashboard.tray && cfg.dashboard.theme_categories);
     }
 
     #[test]
