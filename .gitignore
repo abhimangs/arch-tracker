@@ -1,4 +1,5 @@
 /target
+/dist
 /packaging/*.pkg.tar.*
 /packaging/src/
 /packaging/pkg/

@@ -1,0 +1,27 @@
+{
+  "manifest_version": 2,
+  "name": "arch-tracker",
+  "version": "0.1.0",
+  "description": "Tells the local arch-tracker daemon which tab is active: host and title only, never paths, queries or private-window details.",
+  "permissions": [
+    "tabs",
+    "nativeMessaging"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "persistent": true
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "arch-tracker@abhimangs.github.io",
+      "strict_min_version": "115.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  }
+}

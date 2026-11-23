@@ -16,8 +16,9 @@ function event() {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-// Loads background.js in a fresh context. hostUp says whether connectNative reaches a host.
-function load({ windows = [] } = {}) {
+// Loads background.js in a fresh context, as Chromium (chrome.* with promises) or as Firefox
+// (browser.* with promises, callback-only chrome.*, no tabs.onReplaced).
+function load({ windows = [], firefox = false } = {}) {
   let now = 0;
   let seq = 0;
   let timers = [];
@@ -88,13 +89,17 @@ function load({ windows = [] } = {}) {
     },
   };
   for (const name of ["onActivated", "onUpdated", "onRemoved", "onCreated", "onReplaced", "onAttached", "onDetached", "onMoved"]) {
-    api.tabs[name] = event();
+    if (!(firefox && name === "onReplaced")) api.tabs[name] = event();
   }
   for (const name of ["onFocusChanged", "onCreated", "onRemoved"]) {
     api.windows[name] = event();
   }
   b.api = api;
   const ctx = { setTimeout, clearTimeout, setInterval, URL, console, chrome: api };
+  if (firefox) {
+    const callbackOnly = { ...api, windows: { ...api.windows, getAll: (_q, cb) => void cb?.([]) } };
+    Object.assign(ctx, { browser: api, chrome: callbackOnly });
+  }
   vm.createContext(ctx);
   vm.runInContext(SOURCE, ctx);
   return b;
@@ -153,8 +158,8 @@ function tab(url, title, extra = {}) {
 }
 
 // Sends one window holding the given tab and returns what the extension reported for it.
-async function report(t, win = {}) {
-  const b = load({ windows: [{ id: 1, focused: true, type: "normal", tabs: [t], ...win }] });
+async function report(t, win = {}, firefox = false) {
+  const b = load({ windows: [{ id: 1, focused: true, type: "normal", tabs: [t], ...win }], firefox });
   await b.advance(500);
   return b.snapshots().at(-1).windows[0].tabs[0];
 }
@@ -198,6 +203,27 @@ test("real titles that mention the site are kept", async () => {
 test("private windows report time only", async () => {
   const r = await report(tab("https://example.com/x", "Example"), { incognito: true });
   assert.deepEqual(r, { id: 7, active: true, audible: false, muted: false, host: "", title: "", split: null });
+});
+
+test("Firefox: uses browser.* and reports tabs", async () => {
+  const r = await report(tab("https://www.example.com/a?b=c", "Example page"), {}, true);
+  assert.equal(r.host, "www.example.com");
+  assert.equal(r.title, "Example page");
+});
+
+test("internal pages get a host without paths or queries", async () => {
+  const cases = [
+    ["about:newtab", "about:newtab"],
+    ["about:preferences#privacy", "about:preferences"],
+    ["about:reader?url=https%3A%2F%2Fnews.example.com%2Fstory%3Fid%3D3", "news.example.com"],
+    ["chrome://newtab/", "chrome://newtab"],
+    ["brave://settings/privacy", "brave://settings"],
+    ["moz-extension://0d2f4e5a-1111-2222-3333-444455556666/page.html", "moz-extension://0d2f4e5a-1111-2222-3333-444455556666"],
+    ["file:///srv/shared/notes/plan.txt", "file://"],
+  ];
+  for (const [url, host] of cases) {
+    assert.equal((await report(tab(url, "Page"), {}, true)).host, host, url);
+  }
 });
 
 let failed = 0;

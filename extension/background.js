@@ -2,6 +2,12 @@
 // to the local arch-tracker daemon through native messaging. Nothing leaves this machine.
 // Paths and queries are never sent, not even as the URL a loading tab shows as its title.
 // Private (incognito) windows only report that time was spent: no host, title or audio.
+//
+// One script for both builds: Chromium-family browsers run it as an MV3 service worker
+// (manifest.json), Firefox-family browsers as a persistent MV2 background page
+// (manifest.firefox.json). Firefox's chrome.* is callback-only there; browser.* returns promises.
+
+const api = globalThis.browser ?? globalThis.chrome;
 
 const HOST = "dev.archtracker.native";
 // A missing or crashing host is only reported later, through onDisconnect. So the backoff is
@@ -19,7 +25,12 @@ function hostOf(url) {
     const u = new URL(url);
     if (u.protocol === "http:" || u.protocol === "https:") return u.host.toLowerCase();
     if (u.protocol === "file:") return "file://";
-    return u.protocol + "//" + u.hostname; // brave://newtab, chrome-extension://<id>
+    if (u.protocol === "about:") {
+      // Firefox reader view wraps the page: count it as that site.
+      if (u.pathname === "reader") return hostOf(u.searchParams.get("url"));
+      return "about:" + u.pathname; // about:newtab, about:preferences (no query)
+    }
+    return u.protocol + "//" + u.hostname; // brave://newtab, chrome-extension://<id>, moz-extension://<uuid>
   } catch {
     return "";
   }
@@ -79,7 +90,7 @@ async function sendSnapshot() {
   if (!port) return;
   let wins;
   try {
-    wins = await chrome.windows.getAll({ populate: true, windowTypes: ["normal", "popup", "app"] });
+    wins = await api.windows.getAll({ populate: true, windowTypes: ["normal", "popup", "app"] });
   } catch {
     return;
   }
@@ -105,7 +116,7 @@ function connect() {
   retryTimer = null;
   let p;
   try {
-    p = chrome.runtime.connectNative(HOST);
+    p = api.runtime.connectNative(HOST);
   } catch {
     port = null;
     return reconnectLater();
@@ -116,7 +127,7 @@ function connect() {
   }, STABLE_MS);
   p.onDisconnect.addListener(() => {
     clearTimeout(stable);
-    void chrome.runtime.lastError; // read it, or Chromium logs "Unchecked runtime.lastError"
+    void api.runtime.lastError; // read it, or Chromium logs "Unchecked runtime.lastError"
     if (port === p) port = null;
     reconnectLater();
   });
@@ -130,19 +141,19 @@ function reconnectLater() {
 }
 
 for (const ev of [
-  chrome.tabs.onActivated,
-  chrome.tabs.onUpdated,
-  chrome.tabs.onRemoved,
-  chrome.tabs.onCreated,
-  chrome.tabs.onReplaced,
-  chrome.tabs.onAttached,
-  chrome.tabs.onDetached,
-  chrome.tabs.onMoved,
-  chrome.windows.onFocusChanged,
-  chrome.windows.onCreated,
-  chrome.windows.onRemoved,
+  api.tabs.onActivated,
+  api.tabs.onUpdated,
+  api.tabs.onRemoved,
+  api.tabs.onCreated,
+  api.tabs.onReplaced, // not in Firefox
+  api.tabs.onAttached,
+  api.tabs.onDetached,
+  api.tabs.onMoved,
+  api.windows.onFocusChanged,
+  api.windows.onCreated,
+  api.windows.onRemoved,
 ]) {
-  ev.addListener(schedule);
+  if (ev) ev.addListener(schedule);
 }
 
 // Heartbeat: lets the daemon know the extension is alive (and keeps the worker awake).
@@ -150,7 +161,7 @@ setInterval(() => {
   if (port) schedule();
 }, 20000);
 
-chrome.runtime.onStartup.addListener(() => {
+api.runtime.onStartup.addListener(() => {
   if (!port && !retryTimer) connect();
 });
 connect();
