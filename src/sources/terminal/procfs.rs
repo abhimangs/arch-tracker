@@ -14,6 +14,8 @@ pub struct Stat {
     pub stime: u64,
     pub cutime: u64,
     pub cstime: u64,
+    /// Start time in clock ticks after boot.
+    pub start: u64,
 }
 
 pub fn stat(pid: u32) -> Option<Stat> {
@@ -39,7 +41,18 @@ fn parse_stat(pid: u32, s: &str) -> Option<Stat> {
         stime: g(15).parse().ok()?,
         cutime: g(16).parse().ok()?,
         cstime: g(17).parse().ok()?,
+        start: g(22).parse().unwrap_or(0),
     })
+}
+
+/// Seconds since boot.
+pub fn uptime_secs() -> Option<f64> {
+    std::fs::read_to_string("/proc/uptime")
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 pub fn cmdline(pid: u32) -> Vec<String> {
@@ -181,6 +194,7 @@ mod tests {
         assert_eq!(s.tty_nr, 34817);
         assert_eq!(s.tpgid, 1234);
         assert_eq!((s.utime, s.stime, s.cutime, s.cstime), (7, 3, 1, 2));
+        assert_eq!(s.start, 12345);
     }
 
     #[test]

@@ -598,7 +598,7 @@
         <legend>AI agents</legend>
         ${field("Working when CPU is", "", num("acpu", c.agents.busy_cpu_percent, "% of one core or more", 0.1, 400, 0.1))}
         ${field("…or its builds use", "Processes the agent started, like tests and compilers.", num("akid", c.agents.busy_child_cpu_percent, "% of one core or more", 0.1, 1600, 0.1))}
-        ${field("…or it writes", "Output to its terminal per check.", num("awrite", c.agents.busy_write_bytes, "bytes or more", 0, 10000000))}
+        ${field("…or it writes", "Output to its terminal per 10 seconds.", num("awrite", c.agents.busy_write_bytes, "bytes or more", 0, 10000000))}
         ${field("Known agents", "One per line: id | name | names to match", `<textarea id="tools" class="code">${esc(tools)}</textarea>`)}
       </fieldset>
 

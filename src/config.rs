@@ -58,7 +58,7 @@ pub struct Visibility {
 pub struct Agents {
     /// Agent process CPU usage (percent of one core) that counts as "working".
     pub busy_cpu_percent: f64,
-    /// Bytes the agent writes to its terminal per sample that count as "working".
+    /// Bytes the agent writes to its terminal per 10 seconds that count as "working".
     pub busy_write_bytes: u64,
     /// CPU of the agent's child processes (builds, tests) that counts as "working".
     pub busy_child_cpu_percent: f64,
