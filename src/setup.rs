@@ -542,9 +542,37 @@ fn register(exe: &Path) -> Registration {
     reg
 }
 
-/// Registers this binary as the native host. Returns the manifest paths written.
+/// Installed binaries: packaged (/usr, /opt) or `cargo install`ed / copied into a bin dir.
+/// Anything else, like target/debug during `cargo run -- daemon`, is a development build.
+fn is_installed(exe: &Path, home: &Path) -> bool {
+    let cargo_bin = std::env::var_os("CARGO_HOME")
+        .map(|c| PathBuf::from(c).join("bin"))
+        .unwrap_or_else(|| home.join(".cargo/bin"));
+    [
+        Path::new("/usr"),
+        Path::new("/opt"),
+        &cargo_bin,
+        &home.join(".cargo/bin"),
+        &home.join(".local/bin"),
+    ]
+    .iter()
+    .any(|d| exe.starts_with(d))
+}
+
+/// Called by the daemon on start: registers this binary with every browser found, but only an
+/// installed one, so a development run doesn't point real browsers at target/debug.
+/// `arch-tracker setup` always registers the binary it runs from. Returns the manifests written.
 pub fn register_native_host() -> Result<Vec<PathBuf>> {
-    let reg = register(&own_exe()?);
+    let exe = own_exe()?;
+    if !is_installed(&exe, &util::home()) {
+        tracing::info!(
+            "not registering {} as the browser bridge: not an installed binary (run \"{} setup\" to use it anyway)",
+            exe.display(),
+            exe.display()
+        );
+        return Ok(vec![]);
+    }
+    let reg = register(&exe);
     for (file, e) in &reg.failed {
         tracing::warn!("could not write {}: {e}", file.display());
     }
@@ -570,6 +598,11 @@ pub fn run() -> Result<()> {
     }
     for (file, e) in &reg.failed {
         println!("  could not write {}: {e}", file.display());
+    }
+    if !is_installed(&exe, &util::home()) {
+        println!(
+            "  (a development build: the installed daemon points browsers back at itself when it starts)"
+        );
     }
     let sandboxed = sandboxed_browsers();
     if !sandboxed.is_empty() {
@@ -795,6 +828,26 @@ mod tests {
             at += 46 + n;
         }
         assert_eq!(at, eocd);
+    }
+
+    #[test]
+    fn only_installed_binaries_count() {
+        let home = Path::new("/home/someone");
+        for exe in [
+            "/usr/bin/arch-tracker",
+            "/opt/arch-tracker/arch-tracker",
+            "/home/someone/.cargo/bin/arch-tracker",
+            "/home/someone/.local/bin/arch-tracker",
+        ] {
+            assert!(is_installed(Path::new(exe), home), "{exe}");
+        }
+        for exe in [
+            "/home/someone/src/arch-tracker/target/debug/arch-tracker",
+            "/home/someone/src/arch-tracker/target/release/arch-tracker",
+            "/tmp/arch-tracker",
+        ] {
+            assert!(!is_installed(Path::new(exe), home), "{exe}");
+        }
     }
 
     #[test]
