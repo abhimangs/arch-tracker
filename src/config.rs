@@ -502,6 +502,8 @@ pub fn default_categories() -> Vec<Category> {
                 "org.kde.krunner",
                 "ulauncher",
                 "vicinae",
+                "vicinae-server",
+                "ksplashqml",
                 "org.kde.discover",
                 "org.kde.spectacle",
                 "com.github.wwmm.easyeffects",
