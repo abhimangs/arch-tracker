@@ -246,12 +246,12 @@ fn is_project_dir(path: &str) -> bool {
 /// A path in the form the tracker stores: "~" for home, no trailing slash.
 fn norm_path(p: &str) -> String {
     let p = p.trim().trim_end_matches('/');
-    match p.strip_prefix('~') {
-        Some(rest) => {
-            crate::util::abbreviate_home(&crate::util::home().join(rest.trim_start_matches('/')))
-        }
-        None => p.to_string(),
-    }
+    // Stored paths write the home folder as "~", so an absolute path is abbreviated the same way.
+    let path = match p.strip_prefix('~') {
+        Some(rest) => crate::util::home().join(rest.trim_start_matches('/')),
+        None => std::path::PathBuf::from(p),
+    };
+    crate::util::abbreviate_home(&path)
 }
 
 impl<'a> ProjectRules<'a> {
@@ -284,7 +284,7 @@ impl<'a> ProjectRules<'a> {
             .cfg
             .ignore
             .iter()
-            .any(|i| i.trim().trim_end_matches('/') == path)
+            .any(|i| norm_path(i) == norm_path(path))
         {
             return None;
         }
@@ -340,7 +340,7 @@ impl<'a> ProjectRules<'a> {
         self.cfg.aliases.iter().find_map(|line| {
             let (from, to) = line.split_once('=')?;
             let from = from.trim().trim_end_matches('/');
-            (from == path || from.eq_ignore_ascii_case(name))
+            (norm_path(from) == norm_path(path) || from.eq_ignore_ascii_case(name))
                 .then(|| (to.trim().to_lowercase(), to.trim().to_string()))
         })
     }
@@ -1698,6 +1698,28 @@ mod tests {
             Some("Notes Book")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ignored_and_renamed_folders_match_any_spelling_of_their_path() {
+        let home = crate::util::home();
+        let p = |x: &std::path::Path| x.to_string_lossy().into_owned();
+        let ignored = crate::config::Projects {
+            ignore: vec![p(&home.join("x"))],
+            ..Default::default()
+        };
+        assert_eq!(ProjectRules::new(&ignored).of_path("~/x"), None);
+        let renamed = crate::config::Projects {
+            aliases: vec![format!("{}=Why", p(&home.join("y")))],
+            ..Default::default()
+        };
+        assert_eq!(
+            ProjectRules::new(&renamed)
+                .of_path("~/y")
+                .map(|x| x.1)
+                .as_deref(),
+            Some("Why")
+        );
     }
 
     #[test]
