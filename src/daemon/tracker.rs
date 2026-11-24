@@ -1143,6 +1143,13 @@ impl Tracker {
         (vis, bg)
     }
 
+    /// Input is idle but the compositor's idle clock is not: an inhibitor (a video, a call) is
+    /// holding the screen awake. Only protocol v2 reports the two clocks apart; with v1 the one
+    /// notification respects inhibitors, so an input gap would look inhibited.
+    fn inhibited(&self) -> bool {
+        self.idle_version >= 2 && self.input_idle && !self.session_idle
+    }
+
     /// Recomputes which spans should be open right now.
     fn reconcile(&mut self, now: i64) {
         let paused = self.paused.is_some();
@@ -1153,11 +1160,8 @@ impl Tracker {
         self.ledger
             .set_flag(Kind::Locked, locked && !suspended, now);
         self.ledger.set_flag(Kind::Suspended, suspended, now);
-        self.ledger.set_flag(
-            Kind::Inhibited,
-            self.input_idle && !self.session_idle && !suspended,
-            now,
-        );
+        self.ledger
+            .set_flag(Kind::Inhibited, self.inhibited() && !suspended, now);
         self.ledger
             .set_flag(Kind::Mic, self.mic && !suspended && !paused, now);
 
@@ -1281,7 +1285,7 @@ impl Tracker {
             "media_visible": self.media_visible,
             "background_audio": self.bg_audio,
             "idle": {"input_idle": self.input_idle, "session_idle": self.session_idle,
-                     "inhibited": self.input_idle && !self.session_idle},
+                     "inhibited": self.inhibited()},
             "locked": self.locked(),
             "suspended": self.suspended,
             "mic": self.mic,
@@ -1401,6 +1405,22 @@ mod tests {
         let idle = kinds_in_db(&t, Kind::InputIdle);
         assert_eq!(idle.len(), 1);
         assert!(idle[0].1 <= now_ms(), "the idle span was closed");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v1_idle_gaps_are_not_inhibited() {
+        let mut t = test_tracker();
+        t.idle_version = 1;
+        let at = now_ms();
+        t.handle(Event::Idle {
+            input: true,
+            idle: true,
+            at,
+        })
+        .await;
+        t.flush(now_ms() + 1_000);
+        assert_eq!(kinds_in_db(&t, Kind::InputIdle).len(), 1);
+        assert!(kinds_in_db(&t, Kind::Inhibited).is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
