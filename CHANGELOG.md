@@ -31,6 +31,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- A session is an unbroken stretch of screen time: switching apps or sites no longer ends one (the
+  Timeline still lists each app), so session counts and deep work mean something.
+- The Now page's window clock follows the window or tab, not its title; plainer labels, and the
+  tracker's own memory and CPU use.
+- Thin scrollbars in the theme's colours.
 - The dashboard is locked to you and served as `http://arch-tracker.localhost:<port>/`.
 - A dashboard port change applies however the config changes, not only from Settings.
 - A broken `config.toml` no longer stops the daemon: it starts with defaults and says why.
@@ -67,6 +72,8 @@ All notable changes to this project are documented here. The format follows
 - Kitty windows are never matched to another kitty instance.
 - Compositors with idle protocol v1 no longer record every idle gap as "inhibited".
 - An unfocused private window is no longer recorded as a normal tab with the same title.
+- The dashboard's tab title no longer changes with the page, which restarted the window clock every
+  time you opened Now.
 
 ## [0.1.1] - 2026-11-22
 

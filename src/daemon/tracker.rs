@@ -304,7 +304,12 @@ pub struct Tracker {
     focus: Option<Subject>,
     /// When the focused subject, and the focused app, last changed (for the live timer).
     focus_since: i64,
+    /// The focused KWin window and browser tab: "On this window" restarts only when it changes,
+    /// not when a title does.
+    shown_key: Option<(String, Option<i64>)>,
     app_since: i64,
+    /// The daemon's own memory and CPU, measured every tick.
+    usage: SelfUsage,
     /// When the current no-input gap started.
     idle_since: Option<i64>,
     /// Next time old history may be pruned (general.keep_days).
@@ -379,7 +384,9 @@ impl Tracker {
             status_at: None,
             focus: None,
             focus_since: now,
+            shown_key: None,
             app_since: now,
+            usage: SelfUsage::default(),
             idle_since: None,
             prune_at: now + 60_000,
             visible: vec![],
@@ -632,6 +639,7 @@ impl Tracker {
                 }
             }
         }
+        self.usage.measure();
         if self.desktop_loaded.elapsed().as_secs() > 600 {
             self.desktop = DesktopIndex::load();
             self.desktop_loaded = Instant::now();
@@ -1245,6 +1253,7 @@ impl Tracker {
 
         let mut shown: Vec<(&Win, Subject, Option<TabPick>)> = vec![];
         let mut focus = None;
+        let mut shown_key = None;
         // A stale snapshot no longer says what is on screen: record no focus rather than piling
         // time onto the last known window.
         let kwin_fresh = now - self.kwin_last <= KWIN_STALE_MS;
@@ -1253,6 +1262,7 @@ impl Tracker {
                 && let Some((s, p)) = self.window_subject_ex(w, true, now)
             {
                 focus = Some(s.clone());
+                shown_key = Some((w.id.clone(), p.as_ref().and_then(|p| p.tab_id)));
                 shown.push((w, s, p));
             }
             for w in self.visible_wins() {
@@ -1312,11 +1322,16 @@ impl Tracker {
         self.ledger.reconcile(Kind::Running, &running_ids, now);
         let focus_changed = self.focus != focus;
         if focus_changed {
-            if self.focus.as_ref().map(|f| &f.app) != focus.as_ref().map(|f| &f.app) {
+            let app_changed = self.focus.as_ref().map(|f| &f.app) != focus.as_ref().map(|f| &f.app);
+            if app_changed {
                 self.app_since = now;
             }
-            self.focus_since = now;
+            // A new title in the same window or tab (a counter, another file) keeps the clock.
+            if app_changed || self.shown_key != shown_key || focus.is_none() {
+                self.focus_since = now;
+            }
         }
+        self.shown_key = shown_key;
         self.focus = focus;
         self.visible = visible;
         self.media_visible = media_visible;
@@ -1352,6 +1367,7 @@ impl Tracker {
             "version": env!("CARGO_PKG_VERSION"),
             "now_ms": now,
             "started_ms": self.started_ms,
+            "usage": {"rss_bytes": self.usage.rss_bytes, "cpu_percent": self.usage.cpu_percent},
             "config_error": self.config_error,
             "paused": self.paused.is_some(),
             "paused_until_ms": self.paused.flatten(),
@@ -1396,12 +1412,60 @@ impl Tracker {
                 "idle": {"ok": self.idle_version > 0, "protocol_version": self.idle_version, "error": self.idle_error},
                 "logind": {"ok": self.sys_conn.is_some()},
                 "browser_extension": self.ext.values().map(|c| json!({"browser_pid": c.pid,
+                    "name": if c.pid == 0 { "Browser".to_string() } else { self.browser_app(c.pid).1 },
                     "alive": now - c.last < EXT_ALIVE_MS, "last_ms": c.last, "windows": c.windows.len(),
                     "tabs": c.windows.iter().map(|w| w.tabs.len()).sum::<usize>()})).collect::<Vec<_>>(),
                 "plasma_browser_integration": self.pbi.as_ref().map(|p| json!({"browser_pid": p.pid, "tabs": p.tabs.len(), "at_ms": p.at})),
             },
         })
     }
+}
+
+/// The daemon's own resident memory and CPU share, from /proc/self (one small read per tick).
+#[derive(Default)]
+struct SelfUsage {
+    rss_bytes: u64,
+    /// Share of one core since the previous measurement.
+    cpu_percent: f64,
+    last: Option<(Instant, u64)>,
+}
+
+impl SelfUsage {
+    fn measure(&mut self) {
+        if let Ok(s) = std::fs::read_to_string("/proc/self/statm")
+            && let Some(pages) = s
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse::<u64>().ok())
+        {
+            // SAFETY: sysconf has no preconditions.
+            let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
+            self.rss_bytes = pages * page;
+        }
+        let Some(ticks) = std::fs::read_to_string("/proc/self/stat")
+            .ok()
+            .and_then(|s| cpu_ticks(&s))
+        else {
+            return;
+        };
+        let now = Instant::now();
+        if let Some((at, before)) = self.last {
+            let secs = now.duration_since(at).as_secs_f64();
+            // SAFETY: sysconf has no preconditions.
+            let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+            if secs > 0.0 {
+                self.cpu_percent = ticks.saturating_sub(before) as f64 / hz / secs * 100.0;
+            }
+        }
+        self.last = Some((now, ticks));
+    }
+}
+
+/// utime + stime from /proc/<pid>/stat (fields 14 and 15, after the parenthesised name).
+fn cpu_ticks(stat: &str) -> Option<u64> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    Some(f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?)
 }
 
 #[cfg(test)]
@@ -1475,6 +1539,31 @@ mod tests {
         let want = vec![(1_000, 10_000), (20_000, 30_000)];
         assert_eq!(kinds_in_db(&t, Kind::AgentBusy), want);
         assert_eq!(kinds_in_db(&t, Kind::Running), want);
+    }
+
+    #[test]
+    fn window_clock_follows_the_window_not_its_title() {
+        let mut t = test_tracker();
+        let now = t.kwin_last;
+        t.kwin = Some(one_window("test-editor", "a.rs - demo"));
+        t.reconcile(now);
+        assert_eq!(t.focus_since, now);
+        // Another file in the same window: a new title, the same clock.
+        t.kwin = Some(one_window("test-editor", "b.rs - demo"));
+        t.reconcile(now + 4_000);
+        assert_eq!(
+            t.focus.as_ref().map(|f| f.title.as_str()),
+            Some("b.rs - demo")
+        );
+        assert_eq!(t.focus_since, now);
+        // Another window of the same app starts it over.
+        let mut snap = one_window("test-editor", "c.rs - demo");
+        snap.windows[0].id = "w2".into();
+        snap.active = Some("w2".into());
+        t.kwin = Some(snap);
+        t.reconcile(now + 8_000);
+        assert_eq!(t.focus_since, now + 8_000);
+        assert_eq!(t.app_since, now, "still the same app");
     }
 
     #[tokio::test(flavor = "current_thread")]

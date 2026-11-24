@@ -70,6 +70,7 @@
     parseYmd(s).toLocaleDateString(undefined, opts || { weekday: "long", day: "numeric", month: "long" });
   const rawColor = (c) => (/^#[0-9a-fA-F]{3,8}$/.test(c || "") ? c : "#6b7392");
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
   const projName = (p) => String(p || "").replace(/\/+$/, "").split("/").pop() || p;
 
   function dur(secs) {
@@ -552,7 +553,7 @@
       : '<p class="empty">Only the focused window is on screen.</p>';
     const terms = (s.terminals || []).length
       ? `<ul class="list">${s.terminals
-          .map((t) => `<li><span class="n">${esc(t.program || "shell")}<em>${esc(t.project ? projName(t.project) : "")}</em></span><span class="v">${t.source === "kitty" ? "exact" : "best guess"}</span></li>`)
+          .map((t) => `<li><span class="n">${esc(t.program || "shell")}<em>${esc(t.project ? projName(t.project) : "")}</em></span>${t.source === "kitty" ? "" : '<span class="v" title="Read from running processes; kitty reports it exactly">estimated</span>'}</li>`)
           .join("")}</ul>`
       : '<p class="empty">No terminal on screen.</p>';
     const agents = (s.agents || []).length
@@ -573,36 +574,38 @@
       <dt>Input</dt><dd>${idle.input_idle ? (s.idle_since_ms ? `none for <span data-since="${s.idle_since_ms}"></span>` : "none") : "active"}</dd>
       <dt>Microphone</dt><dd>${s.mic ? "in use" : "off"}</dd>
       <dt>Screen</dt><dd>${s.locked ? "locked" : "unlocked"}</dd>
-      <dt>Awake request</dt><dd>${idle.inhibited ? "an app keeps the screen on" : "none"}</dd>
+      <dt>Screen kept on</dt><dd>${idle.inhibited ? "yes, by an app (a video or a call)" : "no"}</dd>
       <dt>Tracking</dt><dd>${s.paused ? (s.paused_until_ms ? `paused until ${hm(s.paused_until_ms)}` : "paused") : "on"}</dd>
     </dl>`;
     const src = s.sources || {};
     const ext = src.browser_extension || [];
     const browsers = ext.length || src.plasma_browser_integration
       ? `<ul class="list">${ext
-          .map((e) => `<li><span class="n">Browser ${e.browser_pid}<em>${e.windows} windows, ${e.tabs} tabs</em></span><span class="v"><span class="pill" data-on="${e.alive}">${e.alive ? "Connected" : "Silent"}</span></span></li>`)
-          .join("")}${src.plasma_browser_integration ? `<li><span class="n">Plasma Browser Integration<em>${src.plasma_browser_integration.tabs} tabs</em></span><span class="v">fallback</span></li>` : ""}</ul>`
+          .map((e) => `<li><span class="n">${esc(e.name || "Browser")}<em>${plural(e.windows, "window")}, ${plural(e.tabs, "tab")}</em></span><span class="v"><span class="pill" data-on="${e.alive}">${e.alive ? "Extension connected" : "Extension silent"}</span></span></li>`)
+          .join("")}${src.plasma_browser_integration && !ext.some((e) => e.alive) ? `<li><span class="n">Plasma Browser Integration<em>${plural(src.plasma_browser_integration.tabs, "tab")}</em></span><span class="v">used without the extension</span></li>` : ""}</ul>`
       : '<p class="empty">No browser extension is connected.</p>';
     const running = (s.running || []).length
       ? `<div class="tags">${s.running.map((r) => `<span>${esc(r)}</span>`).join("")}</div>`
       : '<p class="empty">Nothing else is running.</p>';
+    const u = s.usage || {};
     const health = `<dl class="facts">
-      <dt>Windows</dt><dd>${src.kwin ? `${src.kwin.windows} from KWin, ${src.kwin.ok ? "up to date" : "stale"}` : "unknown"}</dd>
-      <dt>Idle detection</dt><dd>${src.idle && src.idle.ok ? `ext-idle-notify v${src.idle.protocol_version}` : esc((src.idle && src.idle.error) || "unavailable")}</dd>
-      <dt>Lock and sleep</dt><dd>${src.logind && src.logind.ok ? "logind connected" : "unavailable"}</dd>
-      <dt>Open intervals</dt><dd>${s.open_spans ?? 0}</dd>
-      <dt>Running for</dt><dd><span data-since="${s.started_ms}"></span></dd>
+      <dt>Memory</dt><dd>${u.rss_bytes ? `${(u.rss_bytes / 1048576).toFixed(1)} MB` : "…"}</dd>
+      <dt>CPU</dt><dd>${u.cpu_percent != null ? `${u.cpu_percent.toFixed(1)}% of one core` : "…"}</dd>
+      <dt>Windows</dt><dd>${src.kwin ? `${plural(src.kwin.windows, "window")} seen, ${src.kwin.ok ? "up to date" : "out of date"}` : "unknown"}</dd>
+      <dt>Idle detection</dt><dd>${src.idle && src.idle.ok ? "working" : esc((src.idle && src.idle.error) || "not available")}</dd>
+      <dt>Lock and sleep</dt><dd>${src.logind && src.logind.ok ? "working" : "not available"}</dd>
+      <dt>Started</dt><dd>${esc(hm(s.started_ms))}</dd>
       <dt>Version</dt><dd>${esc(s.version || "")}</dd>
     </dl>`;
     return [
-      panel("Beside it", visible, { w: "w4", aside: `${(s.visible || []).length} visible` }),
+      panel("Beside it", visible, { w: "w4", aside: `${(s.visible || []).length} visible`, sub: "Other windows you can see. Visible time, not screen time." }),
       panel("Terminals", terms, { w: "w4" }),
       panel("AI agents", agents, { w: "w4" }),
       panel("Media", media, { w: "w4" }),
       panel("Input and session", facts, { w: "w4" }),
-      panel("Browsers", browsers, { w: "w4" }),
-      panel("Running apps", running, { w: "w8", aside: `${(s.running || []).length} open` }),
-      panel("Tracker", health, { w: "w4" }),
+      panel("Browsers", browsers, { w: "w4", sub: "Where tab names and sites come from." }),
+      panel("Running apps", running, { w: "w8", aside: `${(s.running || []).length} open`, sub: "Open, even in the tray. Never counted as use." }),
+      panel("Tracker", health, { w: "w4", sub: "The tracker itself." }),
     ].join("");
   }
 
@@ -698,7 +701,7 @@
     const st = d.stats || {};
     if (!st.sessions) return '<p class="empty">No sessions yet.</p>';
     return `<dl class="facts">
-      <dt>Longest stretch</dt><dd>${dur(st.longest)} in ${esc(st.longest_app)}</dd>
+      <dt>Longest stretch</dt><dd>${dur(st.longest)}${st.longest_app ? `, mostly in ${esc(st.longest_app)}` : ""}</dd>
       <dt>Average session</dt><dd>${dur(st.avg_session)}</dd>
       <dt>Busiest hour</dt><dd>${st.peak_hour ? esc(hourLabel(st.peak_hour)) : "–"}</dd>
       <dt>First activity</dt><dd>${st.first_ms ? clock(st.first_ms, true) : "–"}</dd>
@@ -1177,8 +1180,8 @@
       `, "These rules are applied when you look at the data, so changing them updates every past day too.")}
       ${sec("goals", "Goals and sessions", `
         ${field("Daily goal", "Screen time you aim to stay under; Today shows how close you are. 0 turns it off.", num("goal", (c.insights.daily_goal_mins || 0) / 60, "hours", 0, 24, "any"))}
-        ${field("Session break", "A pause shorter than this doesn't end a session in the Timeline.", num("sgap", c.insights.session_gap_secs, "seconds", 5, 3600))}
-        ${field("Deep work", "A session at least this long counts as deep work.", num("deep", c.insights.deep_work_mins, "minutes", 5, 480))}
+        ${field("Session break", "A pause shorter than this doesn't end a session. Switching apps never does.", num("sgap", c.insights.session_gap_secs, "seconds", 5, 3600))}
+        ${field("Deep work", "An unbroken session at least this long counts as deep work.", num("deep", c.insights.deep_work_mins, "minutes", 5, 480))}
       `, "Per-category limits are in Categories below.")}
       ${sec("projects", "Projects", `
         ${field("Code editors", "Apps whose window titles name the open project. One per line, by app id or name.", `<textarea id="editors">${esc(lines(c.projects.editors))}</textarea>`)}
@@ -1750,7 +1753,9 @@
       else a.removeAttribute("aria-current");
     });
     moveGlide();
-    document.title = `${cap(key === "apps" ? "Apps and sites" : key)}: arch-tracker`;
+    // One title for every page: the tracker records this tab too, and a title that changed with the
+    // page would show up as a new window each time you moved around.
+    document.title = "arch-tracker";
     const date = /^\d{4}-\d{2}-\d{2}$/.test(arg || "") ? arg : today();
     const valid = (r, list) => (list.some(([v]) => v === r) ? r : null);
     switch (page) {

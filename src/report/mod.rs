@@ -199,6 +199,7 @@ pub struct DayStats {
     pub longest: i64,
     pub longest_app: String,
     pub avg_session: i64,
+    /// Unbroken stretches of screen time (any apps; a break of session_gap ends one).
     /// Time in sessions of at least insights.deep_work_mins, and how many.
     pub deep_work: i64,
     pub deep_sessions: usize,
@@ -1138,32 +1139,51 @@ fn sessions_and_stats(
     }
     let deep = cfg.insights.deep_work_mins as i64 * 60;
     let mut st = DayStats {
-        sessions: out.len(),
         switches: out.windows(2).filter(|w| w[0].app != w[1].app).count(),
         first_ms: out.first().map(|s| s.start_ms),
         last_ms: out.last().map(|s| s.end_ms),
         goal_secs: cfg.insights.daily_goal_mins as i64 * 60,
         ..Default::default()
     };
+    // The Timeline lists every app, site and program; a session in the stats is an unbroken
+    // stretch of screen time, whatever was used in it. Only a break of session_gap ends one, so
+    // switching between an editor, a terminal and the docs is still one session of deep work.
+    let mut blocks: Vec<(i64, i64, HashMap<String, i64>)> = vec![];
     for s in &out {
-        if s.counted > st.longest {
-            st.longest = s.counted;
-            st.longest_app = if s.project.is_empty() {
-                s.app_name.clone()
-            } else {
-                format!("{} ({})", s.app_name, s.project)
-            };
+        let label = if s.project.is_empty() {
+            s.app_name.clone()
+        } else {
+            format!("{} ({})", s.app_name, s.project)
+        };
+        match blocks.last_mut() {
+            Some(b) if s.start_ms - b.0 <= gap => {
+                b.0 = b.0.max(s.end_ms);
+                b.1 += s.counted;
+                *b.2.entry(label).or_default() += s.counted;
+            }
+            _ => blocks.push((s.end_ms, s.counted, HashMap::from([(label, s.counted)]))),
         }
-        if s.counted >= deep {
-            st.deep_work += s.counted;
+    }
+    st.sessions = blocks.len();
+    for (_, counted, by) in &blocks {
+        if *counted > st.longest {
+            st.longest = *counted;
+            st.longest_app = by
+                .iter()
+                .max_by_key(|(_, secs)| **secs)
+                .map(|(l, _)| l.clone())
+                .unwrap_or_default();
+        }
+        if *counted >= deep {
+            st.deep_work += counted;
             st.deep_sessions += 1;
         }
     }
-    let total: i64 = out.iter().map(|s| s.counted).sum();
-    st.avg_session = if out.is_empty() {
+    let total: i64 = blocks.iter().map(|b| b.1).sum();
+    st.avg_session = if blocks.is_empty() {
         0
     } else {
-        total / out.len() as i64
+        total / blocks.len() as i64
     };
     st.peak_hour = hourly
         .iter()
@@ -1997,6 +2017,33 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(categorize(&cats, &s).unwrap().name, "Development");
+    }
+
+    #[test]
+    fn a_session_is_an_unbroken_stretch_across_apps() {
+        let mut subjects = HashMap::new();
+        for id in [1, 2] {
+            subjects.insert(id, Subject::app(&format!("app{id}"), &format!("App {id}")));
+        }
+        // Editor and terminal back and forth for 50 minutes, then a 20-minute break, then 10 more.
+        let mut spans = vec![];
+        for i in 0..10 {
+            spans.push(sp(Kind::Focus, 1 + i % 2, i * 5 * M, (i + 1) * 5 * M));
+        }
+        spans.push(sp(Kind::Focus, 1, 70 * M, 80 * M));
+        let mut cfg = Config::default();
+        cfg.insights.session_gap_secs = 120;
+        cfg.insights.deep_work_mins = 45;
+        let r = compute(&cfg, "x", DS, DS + 2 * H, &spans, &subjects);
+        assert_eq!(r.stats.sessions, 2);
+        assert_eq!(
+            r.stats.switches, 10,
+            "nine in the stretch, one after the break"
+        );
+        assert_eq!(r.stats.longest, 50 * 60);
+        assert_eq!(r.stats.deep_work, 50 * 60);
+        assert_eq!(r.stats.deep_sessions, 1);
+        assert!(r.sessions.len() > 2, "the Timeline still lists each app");
     }
 
     #[test]
