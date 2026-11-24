@@ -1508,9 +1508,16 @@ const ROLLUP_SCHEMA: u32 = 4;
 /// Hash of everything that changes how a day is classified (for the rollup cache). The app
 /// version is part of it: a new release may count differently, so it starts a fresh cache.
 pub fn settings_hash(cfg: &Config) -> String {
+    // Day bounds and hour marks follow the system zone, so a zone change makes cached days stale.
+    let tz = jiff::tz::TimeZone::system();
+    let zone = match tz.iana_name() {
+        Some(name) => name.to_string(),
+        None => format!("offset {}", tz.to_offset(jiff::Timestamp::now()).seconds()),
+    };
     let v = serde_json::json!({
         "v": ROLLUP_SCHEMA,
         "app": env!("CARGO_PKG_VERSION"),
+        "tz": zone,
         "idle": cfg.idle,
         "categories": cfg.categories,
         "tools": cfg.agents.tools,
