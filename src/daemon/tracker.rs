@@ -1286,8 +1286,12 @@ impl Tracker {
             "agents": self.agents,
             "running": self.running.iter().map(|s| &s.app_name).collect::<Vec<_>>(),
             "terminals": self.term_cache.values().map(|(_, _, i)| i).collect::<Vec<_>>(),
-            "players": self.players.iter().map(|p| json!({"name": if p.identity.is_empty() { &p.bus } else { &p.identity },
-                "playing": p.playing, "pid": p.pid, "host": media::url_host(&p.url), "title": p.title})).collect::<Vec<_>>(),
+            // Private-window titles and excluded players are dropped by player_subject.
+            "players": self.players.iter().filter_map(|p| {
+                let s = self.player_subject(p, now)?;
+                Some(json!({"name": if p.identity.is_empty() { &p.bus } else { &p.identity },
+                    "playing": p.playing, "pid": p.pid, "host": s.host, "title": s.title}))
+            }).collect::<Vec<_>>(),
             "open_spans": self.ledger.open_count(),
             "sources": {
                 "kwin": {"ok": now - self.kwin_last <= KWIN_STALE_MS, "last_ms": self.kwin_last,
