@@ -589,8 +589,9 @@ async fn api_settings(State(ctx): State<Ctx>) -> Response {
 #[derive(Deserialize)]
 struct SettingsBody {
     config: Config,
+    // Missing means "leave custom.css alone", so an older client cannot erase it.
     #[serde(default)]
-    custom_css: String,
+    custom_css: Option<String>,
 }
 
 /// Larger custom.css files are refused.
@@ -607,7 +608,11 @@ async fn api_settings_put(
     if let Err(e) = body.config.validate() {
         return err_field(StatusCode::BAD_REQUEST, e.message, e.field);
     }
-    if body.custom_css.len() > CSS_LIMIT {
+    if body
+        .custom_css
+        .as_ref()
+        .is_some_and(|css| css.len() > CSS_LIMIT)
+    {
         return err_field(
             StatusCode::PAYLOAD_TOO_LARGE,
             "Custom CSS is limited to 200 KB.",
@@ -624,7 +629,9 @@ async fn api_settings_put(
             "dashboard.port",
         );
     }
-    if let Err(e) = std::fs::write(config::custom_css_path(), &body.custom_css) {
+    if let Some(css) = &body.custom_css
+        && let Err(e) = std::fs::write(config::custom_css_path(), css)
+    {
         return err_field(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Could not save custom.css: {e}"),
