@@ -167,6 +167,16 @@ impl Ledger {
         self.open.len()
     }
 
+    /// Subjects that open spans and spans not yet written still refer to.
+    pub fn subjects_in_use(&self) -> HashSet<i64> {
+        let open = self.open.keys().map(|(_, s)| *s);
+        let pending = self.pending.iter().filter_map(|p| match p {
+            Pending::Insert { subject, .. } => Some(*subject),
+            Pending::Close { .. } => None,
+        });
+        open.chain(pending).collect()
+    }
+
     /// Writes closed spans and refreshes open ones in one transaction.
     #[cfg(test)]
     pub fn flush(&mut self, conn: &mut Connection, now: i64) -> Result<()> {

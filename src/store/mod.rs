@@ -6,7 +6,7 @@ use crate::model::{Kind, Span, Subject};
 use anyhow::{Context, Result};
 use ledger::Ledger;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 const SCHEMA_VERSION: i64 = 1;
@@ -80,17 +80,26 @@ impl Store {
         Ok(id)
     }
 
-    /// A value from the meta table.
     /// Deletes intervals that ended before `before_ms`, then the titles and other details only
-    /// they used, and cached day summaries. Subjects waiting for the next flush are kept.
-    pub fn prune(&mut self, before_ms: i64) -> Result<usize> {
+    /// they used, and cached day summaries. Subjects waiting for the next flush are kept, and so
+    /// are the subjects in `keep` (those the ledger's open spans still refer to).
+    pub fn prune(&mut self, before_ms: i64, keep: &HashSet<i64>) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let n = tx.execute("DELETE FROM spans WHERE end_ms < ?1", params![before_ms])?;
         if n > 0 {
-            tx.execute(
-                "DELETE FROM subjects WHERE id NOT IN (SELECT DISTINCT subject_id FROM spans)",
-                [],
-            )?;
+            let orphans: Vec<i64> = {
+                let mut st = tx.prepare(
+                    "SELECT id FROM subjects WHERE id NOT IN (SELECT DISTINCT subject_id FROM spans)",
+                )?;
+                st.query_map([], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?
+            };
+            {
+                let mut del = tx.prepare("DELETE FROM subjects WHERE id=?1")?;
+                for id in orphans.iter().filter(|id| !keep.contains(id)) {
+                    del.execute(params![id])?;
+                }
+            }
             tx.execute("DELETE FROM rollups", [])?;
         }
         tx.commit()?;
@@ -303,5 +312,28 @@ mod tests {
         assert_eq!(st.subject_id(&b).unwrap(), ib);
         let c = st.subject_id(&Subject::app("other", "Other")).unwrap();
         assert!(c > ia.max(ib));
+    }
+
+    #[test]
+    fn prune_keeps_subjects_that_open_spans_use() {
+        let p = path();
+        let mut st = Store::open(&p).unwrap();
+        let a = Subject::app("editor", "Editor");
+        let ia = st.subject_id(&a).unwrap();
+        let mut l = Ledger::default();
+        l.reconcile(Kind::Focus, &[ia].into_iter().collect(), 1_000);
+        l.reconcile(Kind::Focus, &Default::default(), 5_000);
+        st.flush(&mut l, 6_000).unwrap(); // the old span is stored
+        // Focused again: the span is open in the ledger and not written yet.
+        l.reconcile(Kind::Focus, &[ia].into_iter().collect(), 20_000);
+        assert!(l.subjects_in_use().contains(&ia));
+        assert_eq!(st.prune(10_000, &l.subjects_in_use()).unwrap(), 1);
+        assert_eq!(subjects_by_id(&st.conn, &[ia]).unwrap()[&ia], a);
+        st.flush(&mut l, 30_000).unwrap();
+        let spans = spans_in(&st.conn, 0, 100_000).unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].subject, ia);
+        assert_eq!(subjects_by_id(&st.conn, &[ia]).unwrap()[&ia], a);
+        assert_eq!(st.subject_id(&a).unwrap(), ia);
     }
 }
