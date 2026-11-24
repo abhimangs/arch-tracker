@@ -15,6 +15,7 @@ node --check web-ui/app.js
 ```
 
 CI runs the same checks and builds the Arch package on every push.
+A weekly cargo-audit run checks dependencies for known vulnerabilities, and Dependabot proposes updates monthly.
 
 ## Running a development build
 
