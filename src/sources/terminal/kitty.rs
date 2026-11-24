@@ -73,10 +73,19 @@ pub fn socket_for(pid: i64) -> Option<PathBuf> {
             if name.ends_with(&suffix) {
                 return Some(e.path());
             }
-            any.push(e.path());
+            // A socket named for another pid belongs to another kitty instance.
+            if !has_pid_suffix(&name) {
+                any.push(e.path());
+            }
         }
     }
     (any.len() == 1).then(|| any.remove(0))
+}
+
+/// Whether a socket name ends in "-<pid>", as kitty names the sockets it opens by default.
+fn has_pid_suffix(name: &str) -> bool {
+    let digits = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    digits.len() < name.len() && digits.ends_with('-')
 }
 
 /// "kitty @ ls" over the socket.
@@ -146,4 +155,17 @@ pub fn pick(osws: &[OsWindow], focused: bool, caption: &str) -> Option<KWindow> 
         .filter_map(active_pane)
         .find(|w| w.title == caption)
         .or_else(|| osws.iter().find(|o| o.is_active).and_then(active_pane))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn socket_names_with_a_pid_are_not_borrowed() {
+        assert!(has_pid_suffix("kitty.sock-1234"));
+        assert!(!has_pid_suffix("kitty.sock"));
+        assert!(!has_pid_suffix("kitty-main"));
+        assert!(!has_pid_suffix("kitty-"));
+    }
 }
