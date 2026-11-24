@@ -121,7 +121,7 @@ pub struct Dashboard {
     pub tray: bool,
     /// "24h" or "12h" clock.
     pub time_format: String,
-    /// Page the dashboard opens on: today, timeline, apps, projects, agents or trends.
+    /// Page the dashboard opens on: now, today, timeline, apps, projects, agents or trends.
     pub start_page: String,
     /// "comfortable" or "compact" spacing.
     pub density: String,
@@ -723,7 +723,7 @@ impl Config {
         }
         if !matches!(
             d.start_page.as_str(),
-            "today" | "timeline" | "apps" | "projects" | "agents" | "trends"
+            "now" | "today" | "timeline" | "apps" | "projects" | "agents" | "trends"
         ) {
             d.start_page = "today".into();
         }
@@ -1035,6 +1035,14 @@ mod tests {
         assert_eq!(cfg.dashboard.palette, "catppuccin");
         assert_eq!(cfg.dashboard.accent, "mauve");
         assert!(cfg.dashboard.tray && cfg.dashboard.theme_categories);
+    }
+
+    #[test]
+    fn start_page_now_is_kept() {
+        let cfg: Config = toml::from_str("[dashboard]\nstart_page = \"now\"\n").unwrap();
+        assert_eq!(cfg.sanitized().dashboard.start_page, "now");
+        let cfg: Config = toml::from_str("[dashboard]\nstart_page = \"nope\"\n").unwrap();
+        assert_eq!(cfg.sanitized().dashboard.start_page, "today");
     }
 
     #[test]
