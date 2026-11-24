@@ -257,6 +257,75 @@ pub struct Category {
     pub goal_mins: u64,
 }
 
+/// A one-click change from a dashboard row's menu, saved at once to config.toml.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Rule {
+    /// Puts an app, site or terminal program in a category, taking it out of the others.
+    Category {
+        target: Target,
+        value: String,
+        name: Option<String>,
+        category: String,
+    },
+    /// Stops recording an app or a site in detail.
+    Exclude {
+        target: Target,
+        value: String,
+        name: Option<String>,
+    },
+    /// Counts a project under another name (an existing name merges the two).
+    Rename { project: String, to: String },
+    /// Leaves a folder out of the projects.
+    NotProject { project: String },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Target {
+    App,
+    Site,
+    Program,
+}
+
+/// Longest value a rule takes.
+const RULE_MAX: usize = 300;
+
+/// A value from a menu, trimmed. With `keyed`, a program key ("program\u{1f}project") keeps
+/// only the program part; the separator is the one control character allowed.
+fn rule_text(field: &'static str, what: &str, value: &str, keyed: bool) -> Result<String, Invalid> {
+    if value.chars().count() > RULE_MAX {
+        return Err(invalid(
+            field,
+            format!("{what} is longer than {RULE_MAX} characters."),
+        ));
+    }
+    if value
+        .chars()
+        .any(|c| c.is_control() && !(keyed && c == '\u{1f}'))
+    {
+        return Err(invalid(
+            field,
+            format!("{what} has a control character in it."),
+        ));
+    }
+    let head = if keyed {
+        value.split('\u{1f}').next().unwrap_or("")
+    } else {
+        value
+    };
+    let head = head.trim();
+    if head.is_empty() {
+        return Err(invalid(field, format!("{what} can't be empty.")));
+    }
+    Ok(head.to_string())
+}
+
+/// Names are compared without case and outside spaces.
+fn same_name(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
 fn is_zero(v: &u64) -> bool {
     *v == 0
 }
@@ -985,7 +1054,126 @@ impl Config {
         }
         Ok(())
     }
+}
 
+impl Config {
+    /// Applies a menu rule. Every check runs before anything changes, so a refused rule changes nothing.
+    pub fn apply_rule(&mut self, rule: &Rule) -> Result<(), Invalid> {
+        match rule {
+            Rule::Category {
+                target,
+                value,
+                name,
+                category,
+            } => {
+                let what = match target {
+                    Target::App => "The app",
+                    Target::Site => "The site",
+                    Target::Program => "The program",
+                };
+                let keyed = *target == Target::Program;
+                let mut key = rule_text("categories", what, value, keyed)?;
+                if *target == Target::Site {
+                    key = key.to_lowercase();
+                }
+                let name = match name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                    Some(n) => Some(rule_text("categories", "The name", n, false)?),
+                    None => None,
+                };
+                let wanted = category.trim();
+                let Some(pos) = self
+                    .categories
+                    .iter()
+                    .position(|c| same_name(&c.name, wanted))
+                else {
+                    return Err(invalid(
+                        "categories",
+                        format!("There is no category called {wanted}."),
+                    ));
+                };
+                // An app also matches by its display name, as the classifier does.
+                let gone = |v: &str| {
+                    same_name(v, &key)
+                        || (*target == Target::App
+                            && name.as_deref().is_some_and(|n| same_name(v, n)))
+                };
+                for c in &mut self.categories {
+                    match target {
+                        Target::App => c.apps.retain(|v| !gone(v)),
+                        Target::Site => c.hosts.retain(|v| !gone(v)),
+                        Target::Program => c.programs.retain(|v| !gone(v)),
+                    }
+                }
+                let c = &mut self.categories[pos];
+                match target {
+                    Target::App => c.apps.push(key),
+                    Target::Site => c.hosts.push(key),
+                    Target::Program => c.programs.push(key),
+                }
+            }
+            Rule::Exclude { target, value, .. } => match target {
+                Target::App => {
+                    let app = rule_text("privacy.exclude_apps", "The app", value, false)?;
+                    if !self.privacy.exclude_apps.iter().any(|a| same_name(a, &app)) {
+                        self.privacy.exclude_apps.push(app);
+                    }
+                }
+                Target::Site => {
+                    let host = rule_text("privacy.exclude_hosts", "The site", value, false)?
+                        .to_lowercase();
+                    if !self
+                        .privacy
+                        .exclude_hosts
+                        .iter()
+                        .any(|h| same_name(h, &host))
+                    {
+                        self.privacy.exclude_hosts.push(host);
+                    }
+                }
+                Target::Program => {
+                    return Err(invalid(
+                        "privacy",
+                        "Only apps and sites can be left out from a menu.",
+                    ));
+                }
+            },
+            Rule::Rename { project, to } => {
+                let project = rule_text("projects.aliases", "The project", project, false)?;
+                let to = rule_text("projects.aliases", "The new name", to, false)?;
+                if project.contains('=') {
+                    return Err(invalid(
+                        "projects.aliases",
+                        "A project name can't contain =.",
+                    ));
+                }
+                if to.contains('=') {
+                    return Err(invalid("projects.aliases", "The new name can't contain =."));
+                }
+                // Replaces the project's old alias line, if it had one.
+                self.projects
+                    .aliases
+                    .retain(|line| !matches!(line.split_once('='), Some((from, _)) if from.trim() == project));
+                self.projects.aliases.push(format!("{project}={to}"));
+            }
+            Rule::NotProject { project } => {
+                let project = rule_text("projects.ignore", "The folder", project, false)?;
+                if !(project.starts_with('/') || project.starts_with('~')) {
+                    return Err(invalid(
+                        "projects.ignore",
+                        "Only folders (paths starting with / or ~) can be marked as not a project.",
+                    ));
+                }
+                self.projects.include.retain(|p| p.trim() != project);
+                if !self.projects.ignore.iter().any(|p| p.trim() == project) {
+                    self.projects.ignore.push(project);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Config {
     /// Writes the config atomically, keeping comments and unknown keys already in the file.
     pub fn save(&self) -> Result<()> {
         let path = config_path();
@@ -1180,5 +1368,176 @@ mod tests {
         assert!(out.contains("# how long"));
         assert!(out.contains("threshold_secs = 60"));
         assert!(out.contains("extra = 1"));
+    }
+
+    fn two_categories() -> Config {
+        Config {
+            categories: vec![
+                cat("Work", "#5fb4e0", &["work.example.test"], &["Notes"], &[]),
+                cat("Play", "#e07a5f", &[], &[], &["htop"]),
+            ],
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn rule_moves_a_site_between_categories() {
+        let mut c = two_categories();
+        let rule = Rule::Category {
+            target: Target::Site,
+            value: " Work.Example.TEST ".into(),
+            name: None,
+            category: "play".into(),
+        };
+        c.apply_rule(&rule).unwrap();
+        assert!(c.categories[0].hosts.is_empty());
+        assert_eq!(c.categories[1].hosts, vec!["work.example.test"]);
+    }
+
+    #[test]
+    fn rule_matches_an_app_by_its_name() {
+        let mut c = two_categories();
+        let rule = Rule::Category {
+            target: Target::App,
+            value: "org.example.notes".into(),
+            name: Some("Notes".into()),
+            category: "Play".into(),
+        };
+        c.apply_rule(&rule).unwrap();
+        assert!(c.categories[0].apps.is_empty());
+        assert_eq!(c.categories[1].apps, vec!["org.example.notes"]);
+    }
+
+    #[test]
+    fn rule_program_key_keeps_only_the_program() {
+        let mut c = two_categories();
+        let rule = Rule::Category {
+            target: Target::Program,
+            value: "htop\u{1f}tracker".into(),
+            name: None,
+            category: "Work".into(),
+        };
+        c.apply_rule(&rule).unwrap();
+        assert!(c.categories[1].programs.is_empty());
+        assert_eq!(c.categories[0].programs, vec!["htop"]);
+    }
+
+    #[test]
+    fn rule_excludes_apps_and_sites_once() {
+        let mut c = Config::default();
+        let app = |value: &str| Rule::Exclude {
+            target: Target::App,
+            value: value.into(),
+            name: None,
+        };
+        c.apply_rule(&app("org.example.game")).unwrap();
+        c.apply_rule(&app("ORG.example.game")).unwrap();
+        assert_eq!(c.privacy.exclude_apps, vec!["org.example.game"]);
+        let site = Rule::Exclude {
+            target: Target::Site,
+            value: "Ads.example.test".into(),
+            name: None,
+        };
+        c.apply_rule(&site).unwrap();
+        assert_eq!(c.privacy.exclude_hosts, vec!["ads.example.test"]);
+        let program = Rule::Exclude {
+            target: Target::Program,
+            value: "htop".into(),
+            name: None,
+        };
+        assert!(c.apply_rule(&program).is_err());
+    }
+
+    #[test]
+    fn rule_rename_replaces_the_old_alias() {
+        let mut c = Config::default();
+        c.projects.aliases = vec!["~/code/old=Old name".into(), "~/code/other=Other".into()];
+        let rename = Rule::Rename {
+            project: "~/code/old".into(),
+            to: "Shiny".into(),
+        };
+        c.apply_rule(&rename).unwrap();
+        assert_eq!(
+            c.projects.aliases,
+            vec!["~/code/other=Other", "~/code/old=Shiny"]
+        );
+        let bad = Rule::Rename {
+            project: "~/code/x".into(),
+            to: "a=b".into(),
+        };
+        assert_eq!(c.apply_rule(&bad).unwrap_err().field, "projects.aliases");
+        assert_eq!(c.projects.aliases.len(), 2);
+    }
+
+    #[test]
+    fn rule_not_project_moves_a_folder_to_ignore() {
+        let mut c = Config::default();
+        c.projects.include = vec!["~/scratch".into(), "~/keep".into()];
+        let rule = Rule::NotProject {
+            project: "~/scratch".into(),
+        };
+        c.apply_rule(&rule).unwrap();
+        assert_eq!(c.projects.ignore, vec!["~/scratch"]);
+        assert_eq!(c.projects.include, vec!["~/keep"]);
+        let bare = Rule::NotProject {
+            project: "scratch".into(),
+        };
+        assert!(c.apply_rule(&bare).is_err());
+    }
+
+    #[test]
+    fn rule_refuses_unknown_categories_and_bad_values() {
+        let mut c = two_categories();
+        let nope = Rule::Category {
+            target: Target::App,
+            value: "x".into(),
+            name: None,
+            category: "Nope".into(),
+        };
+        let err = c.apply_rule(&nope).unwrap_err();
+        assert_eq!(
+            err,
+            invalid("categories", "There is no category called Nope.")
+        );
+        let long = Rule::Category {
+            target: Target::Site,
+            value: "a".repeat(301),
+            name: None,
+            category: "Work".into(),
+        };
+        assert!(c.apply_rule(&long).is_err());
+        let control = Rule::Category {
+            target: Target::Site,
+            value: "bad\nhost".into(),
+            name: None,
+            category: "Work".into(),
+        };
+        assert!(c.apply_rule(&control).is_err());
+        assert_eq!(c, two_categories());
+    }
+
+    #[test]
+    fn rules_parse_from_the_dashboard_json() {
+        let r: Rule = serde_json::from_str(
+            r#"{"kind":"category","target":"program","value":"htop\u001ftracker","category":"Work"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            Rule::Category {
+                target: Target::Program,
+                value: "htop\u{1f}tracker".into(),
+                name: None,
+                category: "Work".into(),
+            }
+        );
+        let r: Rule =
+            serde_json::from_str(r#"{"kind":"not_project","project":"~/scratch"}"#).unwrap();
+        assert_eq!(
+            r,
+            Rule::NotProject {
+                project: "~/scratch".into()
+            }
+        );
     }
 }

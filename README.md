@@ -158,6 +158,8 @@ are picked up live. You can change:
 - AI agent names to recognise, and when an agent counts as working; whether to show Claude Code's
   cost, and your own prices (`[agents.prices]`) for models the built-in table lacks
 - apps and sites never to record
+- categories, apps and sites never to record, project renames and "not a project" can also be set
+  from a row's ⋯ menu on Today, Apps and sites, and Projects, without opening Settings
 - the dashboard port (applied at once, whichever way you change it), your own CSS and the tray icon
 - the page it opens on, a 12- or 24-hour clock, milliseconds on live timers, density and motion
 - a daily screen-time goal, per-category daily limits, what counts as a session and as deep work

@@ -141,6 +141,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/claude", get(api_claude))
         .route("/api/settings", get(api_settings).put(api_settings_put))
         .route("/api/appearance", axum::routing::put(api_appearance))
+        .route("/api/rule", post(api_rule))
         .route("/api/pause", post(api_pause))
         .route("/api/recompute", post(api_recompute))
         .route("/api/notify-test", post(api_notify_test))
@@ -753,6 +754,38 @@ async fn api_appearance(State(ctx): State<Ctx>, JsonBody(b): JsonBody<Appearance
     let dashboard = cfg.dashboard.clone();
     let _ = ctx.web.tx.send(Event::ConfigChanged(Box::new(cfg)));
     Json(json!({"ok": true, "dashboard": dashboard})).into_response()
+}
+
+/// A one-click rule from a dashboard row's menu. The file is the newest truth, as for the look.
+async fn api_rule(State(ctx): State<Ctx>, JsonBody(rule): JsonBody<config::Rule>) -> Response {
+    if ctx.web.viewer {
+        return err(StatusCode::FORBIDDEN, VIEWER_MSG);
+    }
+    let mut cfg = match Config::load() {
+        Ok(c) => c,
+        Err(_) if !config::config_path().exists() => ctx.web.config(),
+        Err(_) => {
+            return err(
+                StatusCode::CONFLICT,
+                "config.toml has an error, so this rule wasn't saved. Fix the file, or save Settings to replace it.",
+            );
+        }
+    };
+    if let Err(e) = cfg.apply_rule(&rule) {
+        return err_field(StatusCode::BAD_REQUEST, e.message, e.field);
+    }
+    if let Err(e) = cfg.validate() {
+        return err_field(StatusCode::BAD_REQUEST, e.message, e.field);
+    }
+    let cfg = cfg.sanitized();
+    if let Err(e) = cfg.save() {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not save settings: {e:#}"),
+        );
+    }
+    let _ = ctx.web.tx.send(Event::ConfigChanged(Box::new(cfg)));
+    Json(json!({"ok": true})).into_response()
 }
 
 const VIEWER_MSG: &str = "This is a read-only view (arch-tracker serve). Change settings in the tracker's own dashboard.";

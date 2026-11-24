@@ -242,6 +242,15 @@
 
   // ---------- shared pieces ----------
 
+  // One-click rules: the ⋯ menu on rows. Apps, sites and terminal programs take a category or a
+  // "don't record" rule; projects take a rename or "not a project". Viewers get no menu, and private
+  // and hidden rows have no single app or site behind them, so they get none either.
+  const RULE_TARGET = { app: "app", site: "site", prog: "program" };
+  const canRule = (key) => !(status && status.viewer) && key !== "(private)" && key !== "hidden";
+  function ruleButton(rule, key, name, cat) {
+    return `<button type="button" class="rowmenu" data-rule="${rule}" data-key="${esc(key)}" data-name="${esc(name)}" data-cat="${esc(cat || "")}" aria-haspopup="menu" aria-label="Rules for ${esc(name)}">⋯</button>`;
+  }
+
   function rowHtml(r, top, prefix, opts = {}) {
     const c = safeColor(r.color);
     const w = (x) => `${((x / top) * 100).toFixed(2)}%`;
@@ -264,6 +273,7 @@
         <span class="rd">${dur(r.total)}</span>
         <span class="rb" aria-hidden="true"><i style="--w:${w(r.active)};--c:${c}"></i><i class="p" style="--w:${w(r.passive)};--c:${c}"></i><i class="k" style="--w:${w(r.call)};--c:${c}"></i></span>
       </button>
+      ${RULE_TARGET[prefix] && canRule(r.key) ? ruleButton(prefix, r.key, name, r.category) : ""}
       ${titles.length ? `<div class="rx"><div><ul class="titles">${titles.map((t) => `<li><span>${esc(t.title)}</span><span>${dur(t.secs)}</span></li>`).join("")}</ul></div></div>` : ""}
     </li>`;
   }
@@ -337,7 +347,7 @@
       .map((p) => {
         const tools = [...(p.editors || []), ...(p.programs || [])].sort((a, b) => b.secs - a.secs).slice(0, 5);
         const spark = opts.days ? sparkHtml(opts.days, p.key) : "";
-        return `<div class="proj" data-id="proj:${esc(p.key)}">
+        return `<div class="proj" data-id="proj:${esc(p.key)}">${canRule(p.key) ? ruleButton("project", p.key, p.name, "") : ""}
           <div class="top"><b title="${esc(p.key)}">${esc(p.name)}</b><span>${dur(p.total)}</span></div>
           <div class="split" aria-hidden="true"><i class="e" style="--w:${w(p.editor)}"></i><i class="t" style="--w:${w(p.terminal)}"></i></div>
           ${p.agent_busy ? `<div class="split" aria-hidden="true"><i class="a" style="--w:${w(p.agent_busy)}"></i></div>` : ""}
@@ -1792,7 +1802,7 @@
     if (!e.target.isConnected) return;
     for (const p of pops) {
       const btn = document.querySelector(`[aria-controls="${p.id}"]`);
-      if (!p.hidden && !p.contains(e.target) && !btn.contains(e.target)) p._open(false);
+      if (!p.hidden && !p.contains(e.target) && !btn?.contains(e.target)) p._open(false);
     }
   });
 
@@ -1831,6 +1841,131 @@
   });
   pauseMenu.addEventListener("keydown", (e) => {
     const items = [...pauseMenu.querySelectorAll("button")];
+    const i = items.indexOf(document.activeElement);
+    const to = { ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: items.length - 1 }[e.key];
+    if (to === undefined || !items.length) return;
+    e.preventDefault();
+    items[(to + items.length) % items.length].focus();
+  });
+
+  // ---------- one-click rules: the ⋯ menu on rows and projects ----------
+
+  // One menu for every row. It moves to the row's ⋯ button when it opens.
+  const ruleMenu = document.createElement("div");
+  ruleMenu.className = "pop menu";
+  ruleMenu.id = "rulemenu";
+  ruleMenu.setAttribute("role", "menu");
+  ruleMenu.setAttribute("aria-label", "Rules");
+  ruleMenu.hidden = true;
+  document.body.append(ruleMenu);
+  let ruleBtn = null; // the ⋯ button the open menu belongs to
+  // Escape and outside clicks close it through pops, like the other menus.
+  ruleMenu._open = (show) => {
+    if (!show) ruleClose();
+  };
+  pops.push(ruleMenu);
+
+  function ruleClose() {
+    if (ruleMenu.hidden) return;
+    ruleMenu.hidden = true;
+    if (ruleBtn) ruleBtn.setAttribute("aria-expanded", "false");
+  }
+
+  // Shown above the menu's items, so the form or list stays as it was.
+  function ruleError(msg) {
+    let p = ruleMenu.querySelector(".rule-err");
+    if (!p) {
+      p = document.createElement("p");
+      p.className = "sub rule-err";
+      ruleMenu.prepend(p);
+    }
+    p.textContent = msg;
+  }
+
+  function ruleCategoryHtml(btn) {
+    const cur = btn.dataset.cat;
+    const items = (prefs().categories || [])
+      .map((c) => `<button type="button" role="menuitemradio" aria-checked="${c.name === cur}" data-set-cat="${esc(c.name)}"><span class="mi"><i class="sw" style="--c:${safeColor(c.color, c.name)}"></i>${esc(c.name)}</span></button>`)
+      .join("");
+    const leave = btn.dataset.rule === "app" ? "Don't record this app" : btn.dataset.rule === "site" ? "Don't record this site" : "";
+    return `<div class="psec">Category</div>${items}${leave ? `<hr><button type="button" role="menuitem" data-exclude>${leave}</button>` : ""}`;
+  }
+
+  function ruleProjectHtml(btn) {
+    const key = btn.dataset.key;
+    const folder = key.startsWith("/") || key.startsWith("~");
+    return `<button type="button" role="menuitem" data-rename>Rename or merge…</button>${folder ? `<button type="button" role="menuitem" data-not-project>Not a project</button>` : ""}`;
+  }
+
+  function ruleRenameHtml(btn) {
+    return `<form class="rule-form"><label for="rulename">New name</label><input id="rulename" type="text" value="${esc(btn.dataset.name)}" spellcheck="false" autocomplete="off"><p class="sub">Give it another project's name to merge the two.</p><div class="rule-actions"><button type="button" class="btn ghost" data-cancel>Cancel</button><button type="submit" class="btn primary">Save</button></div></form>`;
+  }
+
+  function ruleOpen(btn) {
+    if (!ruleMenu.hidden && ruleBtn === btn) return ruleClose();
+    document.querySelectorAll('[aria-controls="rulemenu"]').forEach((b) => {
+      b.removeAttribute("aria-controls");
+      b.setAttribute("aria-expanded", "false");
+    });
+    pops.forEach((p) => p !== ruleMenu && closeOf(p)(false));
+    ruleBtn = btn;
+    btn.setAttribute("aria-controls", "rulemenu");
+    btn.setAttribute("aria-expanded", "true");
+    ruleMenu.innerHTML = btn.dataset.rule === "project" ? ruleProjectHtml(btn) : ruleCategoryHtml(btn);
+    ruleMenu.hidden = false;
+    place(ruleMenu, btn);
+    popIn(ruleMenu);
+    (ruleMenu.querySelector('[aria-checked="true"]') || ruleMenu.querySelector("button"))?.focus();
+  }
+
+  // Saves a rule. On success the menu closes and the page is drawn again with the new settings.
+  async function ruleSave(body) {
+    try {
+      await send("POST", "/api/rule", body);
+    } catch (err) {
+      ruleError(err.message);
+      return;
+    }
+    ruleClose();
+    await loadSettings().catch(() => null);
+    route(true);
+  }
+
+  view.addEventListener("click", (e) => {
+    const b = e.target.closest(".rowmenu");
+    if (b && view.contains(b)) ruleOpen(b);
+  });
+  ruleMenu.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b || !ruleBtn) return;
+    const target = RULE_TARGET[ruleBtn.dataset.rule];
+    const key = ruleBtn.dataset.key;
+    const name = ruleBtn.dataset.name;
+    if (b.hasAttribute("data-rename")) {
+      ruleMenu.innerHTML = ruleRenameHtml(ruleBtn);
+      const input = ruleMenu.querySelector("input");
+      input.focus();
+      input.select();
+    } else if (b.hasAttribute("data-cancel")) {
+      ruleMenu.innerHTML = ruleProjectHtml(ruleBtn);
+      ruleMenu.querySelector("button")?.focus();
+    } else if (b.hasAttribute("data-not-project")) {
+      ruleSave({ kind: "not_project", project: key });
+    } else if (b.hasAttribute("data-exclude")) {
+      ruleSave({ kind: "exclude", target, value: key, name });
+    } else if (b.dataset.setCat !== undefined) {
+      ruleSave({ kind: "category", target, value: key, name, category: b.dataset.setCat });
+    }
+  });
+  ruleMenu.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (!ruleBtn) return;
+    const to = ruleMenu.querySelector("#rulename").value.trim();
+    ruleSave({ kind: "rename", project: ruleBtn.dataset.key, to });
+  });
+  ruleMenu.addEventListener("keydown", (e) => {
+    if (e.target.matches("input")) return;
+    const items = [...ruleMenu.querySelectorAll("button")];
     const i = items.indexOf(document.activeElement);
     const to = { ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: items.length - 1 }[e.key];
     if (to === undefined || !items.length) return;
@@ -1973,6 +2108,7 @@
 
   const PAGES = ["now", "today", "timeline", "apps", "projects", "agents", "trends", "settings"];
   function route(sameView) {
+    ruleClose();
     clearInterval(refreshTimer);
     refreshTimer = null;
     currentDay = null;

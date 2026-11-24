@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- One-click rules: the ⋯ menu on a row in Today, Apps and sites, and Projects sets its category,
+  stops recording an app or site, or renames or ignores a project, saved to config.toml at once.
 - Dashboard redesign: a sidebar with a sliding highlight, and new Now (live, to the millisecond),
   Timeline (sessions with exact start and end) and Projects (coding time per project) pages. Today
   adds focus stats, a daily goal and category limits.
