@@ -702,6 +702,8 @@ impl Config {
     /// Clamps values that would break the daemon.
     pub fn sanitized(mut self) -> Config {
         self.general.sample_interval_secs = self.general.sample_interval_secs.clamp(2, 300);
+        // A huge hand-edited value would overflow the prune cutoff (0 keeps everything).
+        self.general.keep_days = self.general.keep_days.min(36_500);
         self.general.flush_interval_secs = self.general.flush_interval_secs.clamp(5, 600);
         self.idle.threshold_secs = self.idle.threshold_secs.clamp(30, 3600 * 4);
         self.idle.call_threshold_secs = self.idle.call_threshold_secs.clamp(30, 3600 * 8);
@@ -1019,6 +1021,14 @@ mod tests {
         assert_eq!(cfg.dashboard.palette, "catppuccin");
         assert_eq!(cfg.dashboard.accent, "mauve");
         assert!(cfg.dashboard.tray && cfg.dashboard.theme_categories);
+    }
+
+    #[test]
+    fn huge_keep_days_is_clamped() {
+        let cfg: Config = toml::from_str("[general]\nkeep_days = 150000000000\n").unwrap();
+        assert_eq!(cfg.sanitized().general.keep_days, 36_500);
+        let cfg: Config = toml::from_str("[general]\nkeep_days = 0\n").unwrap();
+        assert_eq!(cfg.sanitized().general.keep_days, 0);
     }
 
     #[test]

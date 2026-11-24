@@ -597,10 +597,9 @@ impl Tracker {
             self.prune_at = now + 3_600_000;
             let days = self.cfg.general.keep_days;
             if days > 0 {
-                match self.store.prune(
-                    now - days as i64 * 86_400_000,
-                    &self.ledger.subjects_in_use(),
-                ) {
+                // Saturating: a corrupt value must not wrap the cutoff into the future.
+                let cutoff = now.saturating_sub((days as i64).saturating_mul(86_400_000));
+                match self.store.prune(cutoff, &self.ledger.subjects_in_use()) {
                     Ok(0) => {}
                     Ok(n) => tracing::info!("deleted {n} intervals older than {days} days"),
                     Err(e) => tracing::warn!("could not delete old history: {e:#}"),
