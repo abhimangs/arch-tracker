@@ -1202,6 +1202,7 @@
       `, "Sites match their subdomains too; the most specific site wins. Programs beat sites, sites beat apps. A limit shows each day's time against it.")}
       ${sec("data", "Data", `
         ${field("Keep history", "Older recorded time, with its titles, is deleted within the hour. 0 keeps everything.", num("keep", c.general.keep_days, "days", 0, 36500))}
+        ${field("Recompute history", "Trends keeps a summary of each finished day. Recompute them after changes it can't notice, like a folder that became a git repository.", `<div class="inline"><button type="button" class="btn" id="recompute">Recompute</button><span class="msg" id="rmsg"></span></div>`)}
         ${field("Export", "Every recorded interval, for your own analysis.", `<div class="inline"><input type="date" id="exfrom" value="${addDays(t0, -6)}"><input type="date" id="exto" value="${t0}"><select id="exfmt"><option value="csv">CSV</option><option value="json">JSON</option></select><a class="btn" id="exlink" href="#">Download</a></div>`)}
       `)}
       <div class="savebar"><button type="submit" class="btn primary">Save changes</button><span class="msg" id="smsg"></span></div>
@@ -1226,6 +1227,20 @@
     };
     ["exfrom", "exto", "exfmt"].forEach((id) => $(id).addEventListener("change", exlink));
     exlink();
+    $("recompute").addEventListener("click", async () => {
+      const btn = $("recompute");
+      btn.disabled = true;
+      try {
+        const res = await send("POST", "/api/recompute");
+        $("rmsg").textContent = `Recomputed: Trends will rebuild ${res.cleared} ${res.cleared === 1 ? "day" : "days"}.`;
+        $("rmsg").dataset.kind = "";
+      } catch (err) {
+        $("rmsg").textContent = err.message;
+        $("rmsg").dataset.kind = "error";
+      } finally {
+        btn.disabled = false;
+      }
+    });
 
     lookControls($("lookset"));
     // Display options apply and save at once, like the theme.

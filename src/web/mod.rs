@@ -141,6 +141,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/settings", get(api_settings).put(api_settings_put))
         .route("/api/appearance", axum::routing::put(api_appearance))
         .route("/api/pause", post(api_pause))
+        .route("/api/recompute", post(api_recompute))
         .route("/api/resume", post(api_resume))
         .route("/api/export", get(api_export))
         .fallback(|| async { err(StatusCode::NOT_FOUND, "Not found.") })
@@ -780,6 +781,20 @@ async fn api_pause(State(ctx): State<Ctx>, JsonBody(b): JsonBody<PauseBody>) -> 
 
 async fn api_resume(State(ctx): State<Ctx>) -> Response {
     control(&ctx, Request::Resume).await
+}
+
+/// Clears the day cache, so Trends rebuilds every past day from the raw data on next view.
+async fn api_recompute(State(ctx): State<Ctx>) -> Response {
+    if ctx.web.viewer {
+        return err(StatusCode::FORBIDDEN, VIEWER_MSG);
+    }
+    let path = ctx.web.db.clone();
+    blocking(move || {
+        let conn = db(&path, false)?;
+        let cleared = conn.execute("DELETE FROM rollups", [])?;
+        Ok(json!({"ok": true, "cleared": cleared}))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
