@@ -8,6 +8,12 @@
   const view = document.getElementById("view");
   const railLive = document.getElementById("now");
   const noticesEl = document.getElementById("notices");
+  // One listener for the whole notices area: the buttons are re-rendered on every status.
+  noticesEl.addEventListener("click", (e) => {
+    if (!e.target.closest("#hideext")) return;
+    localStorage.setItem("hide-ext-notice", String(Date.now() + 7 * 86400000));
+    renderNotices();
+  });
   const shell = document.getElementById("shell");
   const NB = "\u00a0";
   let status = null;
@@ -1495,11 +1501,6 @@
     }
     const html = out.join("");
     if (noticesEl.innerHTML !== html) noticesEl.innerHTML = html;
-    const h = document.getElementById("hideext");
-    if (h) h.addEventListener("click", () => {
-      localStorage.setItem("hide-ext-notice", String(Date.now() + 7 * 86400000));
-      renderNotices();
-    });
   }
 
   // ---------- popovers: pause menu and theme ----------
