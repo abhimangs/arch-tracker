@@ -137,6 +137,7 @@ async fn run_async() -> Result<()> {
     if let Ok(mut s) = shared.lock() {
         s.alerts = Some(alerts);
     }
+    crate::sources::claude::spawn(shared.clone(), util::db_path());
     let _watcher = match watch_config(tx.clone()) {
         Ok(w) => Some(w),
         Err(e) => {

@@ -636,6 +636,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 .agent .who em { font-style: normal; color: var(--mist); font-size: var(--t-s); }
 .pair { display: grid; grid-template-columns: 6ch minmax(0, 1fr) minmax(8ch, auto); gap: 5px 12px; align-items: center; margin-top: 8px; font-size: var(--t-s); color: var(--mist); }
 .pair .v { color: var(--text); text-align: right; }
+/* The bars sit in this grid's own columns, not in the rows' named "b" area. */
+.pair .rb { grid-area: auto; }
 
 /* ---------- timeline ---------- */
 
@@ -757,6 +759,14 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 }
 .msg { color: var(--mist); font-size: var(--t-s); }
 .msg[data-kind="error"] { color: var(--bad, var(--shu)); }
+
+/* AI agents → Claude Code at API prices */
+.grid.cc { margin-top: var(--gap, 16px); }
+.cc-facts dd b { font-size: var(--t-l); font-weight: 620; }
+.costs li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; }
+.costs li .rb { grid-area: auto; grid-column: 1 / -1; }
+.spark.cost { margin-top: 14px; }
+.spark.cost i:not(.z) { background: var(--agent, #b49be8); }
 
 /* Settings → Notifications: what the master switch turns off is shown dimmed. */
 .nsub { display: contents; }

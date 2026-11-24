@@ -86,6 +86,10 @@ impl Store {
     pub fn prune(&mut self, before_ms: i64, keep: &HashSet<i64>) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let n = tx.execute("DELETE FROM spans WHERE end_ms < ?1", params![before_ms])?;
+        tx.execute(
+            "DELETE FROM claude_usage WHERE at_ms < ?1",
+            params![before_ms],
+        )?;
         if n > 0 {
             let orphans: Vec<i64> = {
                 let mut st = tx.prepare(
@@ -192,7 +196,18 @@ fn migrate(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS spans_start ON spans(start_ms);
          CREATE TABLE IF NOT EXISTS rollups(
             day TEXT NOT NULL, settings_hash TEXT NOT NULL, json TEXT NOT NULL,
-            PRIMARY KEY(day, settings_hash));",
+            PRIMARY KEY(day, settings_hash));
+         -- Claude Code's token use per reply (counts only; id is a hash of the reply's ids).
+         CREATE TABLE IF NOT EXISTS claude_usage(
+            id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, model TEXT NOT NULL,
+            project TEXT NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL,
+            cache_5m INTEGER NOT NULL, cache_1h INTEGER NOT NULL, cache_read INTEGER NOT NULL,
+            web_search INTEGER NOT NULL, fast INTEGER NOT NULL, us_only INTEGER NOT NULL);
+         CREATE INDEX IF NOT EXISTS claude_usage_at ON claude_usage(at_ms);
+         -- How far each transcript has been read (key is a hash of its path).
+         CREATE TABLE IF NOT EXISTS claude_files(
+            key INTEGER PRIMARY KEY, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
+            offset INTEGER NOT NULL);",
     )?;
     let v: Option<String> = conn
         .query_row(

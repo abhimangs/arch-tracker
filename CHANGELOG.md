@@ -29,6 +29,11 @@ All notable changes to this project are documented here. The format follows
   in: parent folders (each folder directly inside, like `~/projects/app`, is a project) and single
   project folders, git repository or not.
 - A Recompute history button in Settings, which rebuilds Trends' day summaries from the raw data.
+- Claude Code cost on the AI agents page: what its replies would cost at Anthropic's API prices
+  (built in, so it works offline, with cache writes and reads, long prompts, fast mode, US-only
+  inference and web search priced as Anthropic does), per model, project and day. The token counts
+  come from Claude Code's own transcripts, which are only read, never changed; prompts and replies
+  are never kept. Your own prices can be added under `[agents.prices]`.
 - Desktop notifications: a heads-up before and a notice when a category reaches its daily limit or
   the day reaches its screen-time goal, and a reminder to take a break after a long stretch on
   screen (held during calls and videos). Each comes once a day, clicking one opens Today, one switch

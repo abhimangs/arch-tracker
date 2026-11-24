@@ -974,12 +974,60 @@
     bindRange("projects");
   }
 
+  // Claude Code's cost at API prices (Agents page).
+  const money = (x) => (!x ? "$0" : x < 0.01 ? "<$0.01" : x < 1000 ? `$${x.toFixed(2)}` : `$${Math.round(x).toLocaleString("en-US")}`);
+  const tokens = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n));
+  function costRows(list, empty) {
+    list = (list || []).filter((r) => r.requests > 0);
+    if (!list.length) return `<p class="empty">${esc(empty)}</p>`;
+    const top = Math.max(...list.map((r) => r.cost), 1e-9);
+    return `<ul class="plain costs">${list
+      .slice(0, 15)
+      .map((r) => {
+        const t = r.tokens;
+        const all = t.input + t.output + t.cache_write + t.cache_read;
+        return `<li><span>${esc(r.name)} <span class="d">${r.requests.toLocaleString("en-US")} requests · ${tokens(all)} tokens</span></span><span>${r.priced ? money(r.cost) : `${money(r.cost)} <span class="d">+ unpriced</span>`}</span><span class="rb" aria-hidden="true"><i style="--w:${((r.cost / top) * 100).toFixed(2)}%;--c:var(--agent, #b49be8)"></i></span></li>`;
+      })
+      .join("")}</ul>`;
+  }
+  function costSpark(days, from, to) {
+    const by = Object.fromEntries((days || []).map((d) => [d.date, d.cost]));
+    const all = [];
+    for (let d = from; d <= to; d = addDays(d, 1)) all.push([d, by[d] || 0]);
+    const max = Math.max(...all.map(([, v]) => v), 1e-9);
+    return `<div class="spark cost" aria-hidden="true">${all
+      .map(([d, v]) => (v ? `<i style="--h:${Math.max(8, (v / max) * 100).toFixed(1)}%" title="${esc(dayLabel(d, { weekday: "short", day: "numeric", month: "short" }))}: ${money(v)}"></i>` : '<i class="z"></i>'))
+      .join("")}</div>`;
+  }
+  function claudeHtml(cc, n) {
+    if (!cc || !cc.requests) return "";
+    const t = cc.tokens;
+    const note = `What these tokens would cost at Anthropic's API prices of ${dayLabel(cc.prices_as_of, { day: "numeric", month: "short", year: "numeric" })}. On a Pro or Max plan you pay the plan instead. Counted from Claude Code's own logs, which are only read, never changed; prompts and replies are not kept.`;
+    const unpriced = cc.unpriced.length
+      ? `<p class="sub">No price for ${cc.unpriced.map(esc).join(", ")}: its tokens are counted but not priced. Add a price in config.toml under [agents.prices].</p>`
+      : "";
+    const empty = "No Claude Code replies in this period.";
+    return `<div class="grid cc">
+      ${panel(
+        "Claude Code at API prices",
+        `<dl class="facts cc-facts"><dt>Cost</dt><dd><b>${money(cc.cost)}</b></dd><dt>Requests</dt><dd>${cc.requests.toLocaleString("en-US")}</dd><dt>Input</dt><dd>${tokens(t.input)} tokens</dd><dt>Output</dt><dd>${tokens(t.output)} tokens</dd><dt>Cache writes</dt><dd>${tokens(t.cache_write)} tokens</dd><dt>Cache reads</dt><dd>${tokens(t.cache_read)} tokens</dd></dl>${n !== "1" ? costSpark(cc.days, cc.from, cc.to) : ""}${unpriced}`,
+        { w: "w4", sub: note },
+      )}
+      ${panel("By model", costRows(cc.models, empty), { w: "w4" })}
+      ${panel("By project", costRows(cc.projects, empty), { w: "w4" })}
+    </div>`;
+  }
+
   async function pageAgents(n, gen) {
     paint(loading("AI agents", n));
     bindRange("agents");
     let r;
+    let cc = null;
     try {
-      r = await loadRange(n);
+      const to = today();
+      const from = n === "1" ? to : addDays(to, -(Number(n) - 1));
+      const wantCost = (prefs().agents || {}).claude_cost !== false;
+      [r, cc] = await Promise.all([loadRange(n), wantCost ? get(`/api/claude?from=${from}&to=${to}`).catch(() => null) : null]);
     } catch (e) {
       if (!stale(gen)) paint(errorHtml(e));
       return;
@@ -992,8 +1040,10 @@
         <div><span>Agents worked</span><b>${dur(busy)}</b></div>
         <div><span>You watched them</span><b>${dur(focus)}</b></div>
         <div><span>Agents</span><b>${new Set((r.agents || []).map((a) => a.tool)).size}</b></div>
+        ${cc && cc.requests ? `<div><span>Claude Code at API prices</span><b>${money(cc.cost)}</b></div>` : ""}
       </div>
-      <section class="panel w12">${agentsHtml(r.agents, "No AI agents ran in this period. Agents are recognised by name; add more in Settings.")}</section>`);
+      <section class="panel w12">${agentsHtml(r.agents, "No AI agents ran in this period. Agents are recognised by name; add more in Settings.")}</section>
+      ${claudeHtml(cc, n)}`);
     bindRange("agents");
   }
 
@@ -1220,6 +1270,7 @@
         ${field("…or its builds use", "Processes the agent started, like tests and compilers.", num("akid", c.agents.busy_child_cpu_percent, "% of one core or more", 0.1, 1600, "any"))}
         ${field("…or it writes", "Output to its terminal per 10 seconds.", num("awrite", c.agents.busy_write_bytes, "bytes or more", 0, 10000000))}
         ${field("Known agents", "One per line: id | name | names to match", `<textarea id="tools" class="code">${esc(tools)}</textarea>`)}
+        ${field("Claude Code cost", "Reads token counts from Claude Code's own logs in ~/.claude, read-only, and prices them at Anthropic's API rates on the AI agents page. Prompts and replies are never kept.", check("ccost", c.agents.claude_cost !== false, "Show what Claude Code would cost"))}
       `)}
       ${sec("privacy", "Privacy", `
         ${field("Never record these apps", "One per line, by name or app id.", `<textarea id="xapps">${esc(lines(c.privacy.exclude_apps))}</textarea>`)}
@@ -1405,6 +1456,7 @@
       next.agents.busy_cpu_percent = n("acpu");
       next.agents.busy_child_cpu_percent = n("akid");
       next.agents.busy_write_bytes = n("awrite");
+      next.agents.claude_cost = $("ccost").checked;
       next.agents.tools = $("tools")
         .value.split("\n")
         .map((l) => l.split("|").map((x) => x.trim()))

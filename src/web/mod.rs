@@ -138,6 +138,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/live", get(api_live))
         .route("/api/day", get(api_day))
         .route("/api/range", get(api_range))
+        .route("/api/claude", get(api_claude))
         .route("/api/settings", get(api_settings).put(api_settings_put))
         .route("/api/appearance", axum::routing::put(api_appearance))
         .route("/api/pause", post(api_pause))
@@ -575,6 +576,14 @@ async fn api_range(State(ctx): State<Ctx>, Params(q): Params<RangeQ>) -> Respons
         report::Cache::ReadWrite
     };
     blocking(move || report::range(&db(&path, viewer)?, &cfg, &q.from, &q.to, cache)).await
+}
+
+/// What Claude Code's tokens in a range would cost at API prices (totals only).
+async fn api_claude(State(ctx): State<Ctx>, Params(q): Params<RangeQ>) -> Response {
+    let cfg = ctx.web.config();
+    let path = ctx.web.db.clone();
+    let viewer = ctx.web.viewer;
+    blocking(move || report::cost::claude(&db(&path, viewer)?, &cfg, &q.from, &q.to)).await
 }
 
 async fn api_settings(State(ctx): State<Ctx>) -> Response {

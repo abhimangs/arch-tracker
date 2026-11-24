@@ -114,6 +114,23 @@ pub struct Agents {
     /// CPU of the agent's child processes (builds, tests) that counts as "working".
     pub busy_child_cpu_percent: f64,
     pub tools: Vec<Tool>,
+    /// Read Claude Code's token counts from its own transcripts (read-only) and show what they
+    /// would cost at Anthropic's API prices.
+    pub claude_cost: bool,
+    /// Your own prices, in USD per million tokens, for models the built-in table lacks or prices
+    /// that changed: [agents.prices."claude-new-model"] input = 3.0, output = 15.0.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub prices: std::collections::BTreeMap<String, ModelPrice>,
+}
+
+/// A model's price in USD per million tokens. Cache writes cost 1.25x (5 minutes) and 2x (1 hour)
+/// the input price; cache reads cost cache_read, or 0.1x the input price if it is left out.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ModelPrice {
+    pub input: f64,
+    pub output: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -366,6 +383,8 @@ impl Default for Agents {
                 tool("qwen", "Qwen Code", &["qwen"]),
                 tool("copilot", "Copilot CLI", &["copilot"]),
             ],
+            claude_cost: true,
+            prices: Default::default(),
         }
     }
 }
@@ -854,6 +873,21 @@ impl Config {
             10_000_000,
             "Terminal output (bytes)",
         )?;
+        for (model, p) in &a.prices {
+            let ok = |v: f64| v.is_finite() && (0.0..=10_000.0).contains(&v);
+            if model.trim().is_empty()
+                || !ok(p.input)
+                || !ok(p.output)
+                || !p.cache_read.is_none_or(ok)
+            {
+                return Err(invalid(
+                    "agents.prices",
+                    format!(
+                        "The price of {model:?} must be between 0 and 10000 dollars per million tokens."
+                    ),
+                ));
+            }
+        }
         let mut ids = std::collections::HashSet::new();
         for t in &a.tools {
             if t.id.trim().is_empty() {

@@ -8,6 +8,8 @@
 //!   call      microphone open (and, inside a gap, the gap is < the call threshold)
 //!   active    everything else
 
+pub mod cost;
+
 use crate::config::{Category, Config};
 use crate::model::{Kind, Span, Subject};
 use crate::store;

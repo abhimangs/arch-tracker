@@ -29,6 +29,10 @@ Do not open a public issue for security problems. You will get an answer within 
   stored in the repository, and passed to Mozilla's tool through the environment.
 - **Terminals.** Only the program name and project folder are stored, never arguments or
   environment variables (which can hold secrets).
+- **Claude Code transcripts.** They are opened read-only (`O_RDONLY | O_NOFOLLOW | O_NOATIME`)
+  and never written, created, renamed or locked; symbolic links are not followed. Only each reply's
+  model, time, token counts and folder are stored, with its ids reduced to a 64-bit hash. Prompts,
+  replies and file contents are parsed past without being kept, and the dashboard serves totals only.
 - **Sockets.** Control and ingest sockets live in `$XDG_RUNTIME_DIR/arch-tracker` with mode 0700.
 
 ## Out of scope
