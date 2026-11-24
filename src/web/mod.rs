@@ -526,7 +526,13 @@ struct DayQ {
 async fn blocking<T: serde::Serialize + Send + 'static>(
     f: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Response {
-    match tokio::task::spawn_blocking(f).await {
+    // A report allocates a lot for a moment; give it back once it is sent.
+    let job = move || {
+        let r = f();
+        crate::util::trim_heap();
+        r
+    };
+    match tokio::task::spawn_blocking(job).await {
         Ok(Ok(v)) => Json(v).into_response(),
         Ok(Err(e)) => report_err(e),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -584,7 +590,29 @@ async fn api_claude(State(ctx): State<Ctx>, Params(q): Params<RangeQ>) -> Respon
     let cfg = ctx.web.config();
     let path = ctx.web.db.clone();
     let viewer = ctx.web.viewer;
-    blocking(move || report::cost::claude(&db(&path, viewer)?, &cfg, &q.from, &q.to)).await
+    // Still on the first read of Claude Code's history: the page says the totals will grow.
+    let reading = !viewer
+        && cfg.agents.claude_cost
+        && ctx
+            .web
+            .shared
+            .lock()
+            .map(|s| s.claude_scan.is_none_or(|p| !p.done))
+            .unwrap_or(false);
+    let stats = cfg.agents.claude_cost && !viewer;
+    blocking(move || {
+        let conn = db(&path, viewer)?;
+        let mut r = report::cost::claude(&conn, &cfg, &q.from, &q.to)?;
+        r.reading = reading;
+        // Older than the transcripts: Claude Code's own statistics, when the range reaches there.
+        if stats {
+            r.earlier = report::cost::earlier(&conn, &cfg, &report::cost::stats_paths())?
+                // A lump without days: only for a range that reaches back over all of it.
+                .filter(|e| q.from.as_str() <= e.from.as_str());
+        }
+        Ok(r)
+    })
+    .await
 }
 
 async fn api_settings(State(ctx): State<Ctx>) -> Response {

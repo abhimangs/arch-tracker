@@ -24,12 +24,14 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Bytes read per pass: a first import of a long history is spread over a few minutes.
-pub const BUDGET: u64 = 256 << 20;
+/// Bytes read per pass. Reading is quick (about 1 GB a second), so a first import of a long
+/// history takes one pass; only a very long one is spread over a few minutes.
+pub const BUDGET: u64 = 2 << 30;
 /// Lines up to this long are read whole; longer ones are parsed as a stream.
 const MAX_LINE: usize = 512 << 10;
-/// projects/<folder>/<session>/subagents/<agent>.jsonl is three folders down.
-const MAX_DEPTH: usize = 4;
+/// projects/<folder>/<session>/subagents/workflows/<run>/<agent>.jsonl is five folders down;
+/// a little room for deeper layouts. Links are never followed, so this is the only bound needed.
+const MAX_DEPTH: usize = 8;
 
 /// Where Claude Code keeps its transcripts.
 pub fn roots() -> Vec<PathBuf> {
@@ -44,15 +46,39 @@ pub fn roots() -> Vec<PathBuf> {
     ]
 }
 
-/// Reads new replies once a minute while `agents.claude_cost` is on, and never while paused.
+/// Reads new replies a few seconds after Claude Code writes them (inotify, which only watches)
+/// and at least once a minute, while `agents.claude_cost` is on; never while paused.
 pub fn spawn(shared: SharedRef, db: PathBuf) {
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(20)).await;
+        tokio::time::sleep(Duration::from_secs(8)).await;
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let (wtx, mut wrx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let mut watcher: Option<notify::RecommendedWatcher> = None;
         let mut paused_seen: Option<i64> = None;
+        let mut last = tokio::time::Instant::now();
         loop {
-            tick.tick().await;
+            tokio::select! {
+                _ = tick.tick() => {}
+                Some(()) = wrx.recv() => {
+                    // A reply is often written as a few lines in a row: wait for the burst to end.
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    while wrx.try_recv().is_ok() {}
+                    // While Claude Code works it writes every few seconds: at most one pass per 10 s.
+                    tokio::time::sleep_until(last + Duration::from_secs(10)).await;
+                    while wrx.try_recv().is_ok() {}
+                }
+            }
+            last = tokio::time::Instant::now();
+            let on = shared
+                .lock()
+                .map(|s| s.config.agents.claude_cost)
+                .unwrap_or(false);
+            if !on {
+                watcher = None;
+            } else if watcher.is_none() {
+                watcher = watch(wtx.clone());
+            }
             let Ok((cfg, paused)) = shared.lock().map(|s| {
                 (
                     s.config.clone(),
@@ -86,9 +112,20 @@ pub fn spawn(shared: SharedRef, db: PathBuf) {
                     OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
                 )?;
                 conn.busy_timeout(Duration::from_secs(5))?;
-                scan(&mut conn, &roots(), BUDGET, keep_from)
+                let pass = scan(&mut conn, &roots(), BUDGET, keep_from);
+                drop(conn);
+                crate::util::trim_heap();
+                pass
             })
             .await;
+            if let Ok(Ok(p)) = &pass
+                && let Ok(mut s) = shared.lock()
+            {
+                s.claude_scan = Some(Progress {
+                    done: p.done,
+                    left_bytes: p.left,
+                });
+            }
             match pass {
                 Ok(Ok(p)) if p.files > 0 => tracing::debug!(
                     "claude code: {} new replies from {} files ({} bytes)",
@@ -103,6 +140,29 @@ pub fn spawn(shared: SharedRef, db: PathBuf) {
     });
 }
 
+/// Watches the transcript folders for new lines. inotify only reports changes; it reads and
+/// writes nothing in the folders.
+fn watch(tx: tokio::sync::mpsc::UnboundedSender<()>) -> Option<notify::RecommendedWatcher> {
+    use notify::Watcher;
+    let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(ev) = res
+            && (ev.kind.is_modify() || ev.kind.is_create())
+            && ev
+                .paths
+                .iter()
+                .any(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        {
+            let _ = tx.send(());
+        }
+    })
+    .ok()?;
+    let mut any = false;
+    for r in roots().iter().filter(|r| r.is_dir()) {
+        any |= w.watch(r, notify::RecursiveMode::Recursive).is_ok();
+    }
+    any.then_some(w)
+}
+
 /// What one pass did.
 #[derive(Debug, Default, PartialEq)]
 pub struct Pass {
@@ -111,6 +171,15 @@ pub struct Pass {
     pub messages: usize,
     /// False when the byte budget ran out before every file was read.
     pub done: bool,
+    /// Bytes still to read after this pass.
+    pub left: u64,
+}
+
+/// How far the transcripts have been read, for the dashboard.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct Progress {
+    pub done: bool,
+    pub left_bytes: u64,
 }
 
 /// One reply's usage, as stored.
@@ -157,6 +226,7 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
     };
     let mut seen = HashSet::new();
     let mut projects = Projects::default();
+    let mut stopped = false;
     for f in &files {
         let key = hash(&[f.path.as_os_str().as_bytes()]);
         seen.insert(key);
@@ -164,17 +234,20 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
         if size0 == f.size as i64 && mtime0 == f.mtime_ns {
             continue;
         }
-        let left = budget.saturating_sub(pass.bytes);
-        if left == 0 {
-            pass.done = false;
-            break;
-        }
         // A file that shrank was rewritten: read it again (each reply still counts once).
         let start = if (off0 as u64) <= f.size {
             off0 as u64
         } else {
             0
         };
+        let left = budget.saturating_sub(pass.bytes);
+        if stopped || left == 0 {
+            // Out of budget: count what is left for the next pass.
+            stopped = true;
+            pass.done = false;
+            pass.left += f.size - start;
+            continue;
+        }
         let got = match read_file(&f.path, start, left, &paused, keep_from, &mut projects) {
             Ok(g) => g,
             Err(e) => {
@@ -184,6 +257,9 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
         };
         pass.bytes += got.end - start;
         pass.files += 1;
+        if got.cut {
+            pass.left += f.size.saturating_sub(got.end);
+        }
         pass.messages += got.rows.len();
         // Cut short by the budget: no size, so the next pass goes on from `end`.
         let size = if got.cut { -1 } else { f.size as i64 };
@@ -216,6 +292,13 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
                     u.us_only
                 ])?;
             }
+            for (model, tokens) in &got.lines {
+                tx.execute(
+                    "INSERT INTO claude_lines(model, tokens) VALUES (?1, ?2)
+                     ON CONFLICT(model) DO UPDATE SET tokens = tokens + excluded.tokens",
+                    params![model, *tokens as i64],
+                )?;
+            }
             tx.execute(
                 "INSERT OR REPLACE INTO claude_files(key, size, mtime_ns, offset) VALUES (?1, ?2, ?3, ?4)",
                 params![key, size, f.mtime_ns, got.end as i64],
@@ -224,7 +307,7 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
         tx.commit()?;
         if got.cut {
             pass.done = false;
-            break;
+            stopped = true;
         }
     }
     if pass.done {
@@ -290,6 +373,9 @@ pub fn open_read_only(path: &Path) -> io::Result<File> {
 
 struct Read_ {
     rows: Vec<Usage>,
+    /// Tokens per model summed over every line, before each reply is counted once. Claude
+    /// Code's own statistics count this way; the ratio undoes it for older history.
+    lines: HashMap<String, u64>,
     /// Where the next pass starts: after the last complete line read.
     end: u64,
     /// Stopped because the budget ran out.
@@ -308,6 +394,7 @@ fn read_file(
     r.seek(SeekFrom::Start(start))?;
     let mut out = Read_ {
         rows: vec![],
+        lines: HashMap::new(),
         end: start,
         cut: false,
     };
@@ -351,6 +438,8 @@ fn read_file(
             && u.at_ms >= keep_from
             && !paused.iter().any(|&(a, b)| u.at_ms >= a && u.at_ms < b)
         {
+            *out.lines.entry(u.model.clone()).or_default() +=
+                u.input + u.output + u.cache_5m + u.cache_1h + u.cache_read;
             out.rows.push(u);
         }
     }
@@ -627,7 +716,7 @@ mod tests {
         let dir = tmp("count");
         let root = dir.join("projects");
         let proj = root.join("-demo");
-        std::fs::create_dir_all(proj.join("sess/subagents")).unwrap();
+        std::fs::create_dir_all(proj.join("sess/subagents/workflows/run1")).unwrap();
         let t = "2026-11-20T10:00:00.000Z";
         let main = [
             user(50),
@@ -649,7 +738,8 @@ mod tests {
             + "\n";
         std::fs::write(proj.join("s1.jsonl"), &main).unwrap();
         std::fs::write(
-            proj.join("sess/subagents/agent-1.jsonl"),
+            // A workflow agent, five folders down.
+            proj.join("sess/subagents/workflows/run1/agent-1.jsonl"),
             reply("msg_c", "req_c", t, "claude-haiku-5-5", 2, "") + "\n",
         )
         .unwrap();
@@ -860,6 +950,11 @@ mod tests {
             )
             .unwrap();
             total += p.messages;
+            assert_eq!(
+                p.done,
+                p.left == 0,
+                "what is left is counted until it is read"
+            );
             if p.done {
                 break;
             }

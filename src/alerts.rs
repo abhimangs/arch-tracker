@@ -180,7 +180,10 @@ async fn today(db: &std::path::Path, cfg: &Config) -> Option<DayReport> {
     tokio::task::spawn_blocking(move || {
         let conn = crate::store::open_readonly(&db)?;
         let date = crate::util::local_date(crate::util::now_ms());
-        report::build_day(&conn, &cfg, &date)
+        let day = report::build_day(&conn, &cfg, &date);
+        drop(conn);
+        crate::util::trim_heap();
+        day
     })
     .await
     .ok()?

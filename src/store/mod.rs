@@ -204,6 +204,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             cache_5m INTEGER NOT NULL, cache_1h INTEGER NOT NULL, cache_read INTEGER NOT NULL,
             web_search INTEGER NOT NULL, fast INTEGER NOT NULL, us_only INTEGER NOT NULL);
          CREATE INDEX IF NOT EXISTS claude_usage_at ON claude_usage(at_ms);
+         -- Tokens per model over every transcript line (replies repeat on several lines).
+         CREATE TABLE IF NOT EXISTS claude_lines(model TEXT PRIMARY KEY, tokens INTEGER NOT NULL);
          -- How far each transcript has been read (key is a hash of its path).
          CREATE TABLE IF NOT EXISTS claude_files(
             key INTEGER PRIMARY KEY, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,

@@ -159,7 +159,7 @@ pub struct Dashboard {
     pub tray: bool,
     /// "24h" or "12h" clock.
     pub time_format: String,
-    /// Page the dashboard opens on: now, today, timeline, apps, projects, agents or trends.
+    /// Page the dashboard opens on: now, today, timeline, apps, projects, agents, claude or trends.
     pub start_page: String,
     /// "comfortable" or "compact" spacing.
     pub density: String,
@@ -849,7 +849,7 @@ impl Config {
         }
         if !matches!(
             d.start_page.as_str(),
-            "now" | "today" | "timeline" | "apps" | "projects" | "agents" | "trends"
+            "now" | "today" | "timeline" | "apps" | "projects" | "agents" | "claude" | "trends"
         ) {
             d.start_page = "today".into();
         }

@@ -54,6 +54,8 @@ pub struct Shared {
     pub live: tokio::sync::watch::Sender<u64>,
     /// Reaches the notifier (Settings' test notification); None without a daemon.
     pub alerts: Option<mpsc::UnboundedSender<crate::alerts::Cmd>>,
+    /// How far Claude Code's transcripts have been read; None until the first pass ends.
+    pub claude_scan: Option<crate::sources::claude::Progress>,
 }
 
 impl Default for Shared {
@@ -63,6 +65,7 @@ impl Default for Shared {
             config: Config::default(),
             live: tokio::sync::watch::channel(0).0,
             alerts: None,
+            claude_scan: None,
         }
     }
 }

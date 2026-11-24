@@ -15,6 +15,15 @@ pub async fn system_bus() -> zbus::Result<zbus::Connection> {
         .await
 }
 
+/// Hands memory freed by a big job (a report, a transcript pass) back to the system, so the
+/// daemon's footprint stays small between jobs.
+pub fn trim_heap() {
+    // SAFETY: malloc_trim only releases free pages; it has no preconditions.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

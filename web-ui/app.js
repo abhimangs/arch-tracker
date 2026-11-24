@@ -996,36 +996,98 @@
       .map((r) => {
         const t = r.tokens;
         const all = t.input + t.output + t.cache_write + t.cache_read;
-        return `<li><span>${esc(r.name)} <span class="d">${r.requests.toLocaleString("en-US")} requests · ${tokens(all)} tokens</span></span><span>${r.priced ? money(r.cost) : `${money(r.cost)} <span class="d">+ unpriced</span>`}</span><span class="rb" aria-hidden="true"><i style="--w:${((r.cost / top) * 100).toFixed(2)}%;--c:var(--agent, #b49be8)"></i></span></li>`;
+        const what = r.estimated ? `about ${tokens(all)} tokens` : `${r.requests.toLocaleString("en-US")} requests · ${tokens(all)} tokens`;
+        return `<li><span>${esc(r.name)} <span class="d">${what}</span></span><span>${r.priced ? money(r.cost) : `${money(r.cost)} <span class="d">+ unpriced</span>`}</span><span class="rb" aria-hidden="true"><i style="--w:${((r.cost / top) * 100).toFixed(2)}%;--c:var(--agent, #b49be8)"></i></span></li>`;
       })
       .join("")}</ul>`;
   }
-  function costSpark(days, from, to) {
-    const by = Object.fromEntries((days || []).map((d) => [d.date, d.cost]));
-    const all = [];
-    for (let d = from; d <= to; d = addDays(d, 1)) all.push([d, by[d] || 0]);
-    const max = Math.max(...all.map(([, v]) => v), 1e-9);
-    return `<div class="spark cost" aria-hidden="true">${all
-      .map(([d, v]) => (v ? `<i style="--h:${Math.max(8, (v / max) * 100).toFixed(1)}%" title="${esc(dayLabel(d, { weekday: "short", day: "numeric", month: "short" }))}: ${money(v)}"></i>` : '<i class="z"></i>'))
-      .join("")}</div>`;
+  // ---------- Claude Code ----------
+
+  const CC_RANGES = [...RANGES, ["all", "All time"]];
+  // Bars with a date (or hour) under each end and the top value beside them.
+  function costBars(values, labels) {
+    const max = Math.max(...values, 0);
+    if (!max) return '<p class="empty">No Claude Code requests in this period.</p>';
+    return `<div class="cbars" aria-hidden="true">${values
+      .map((v, i) => `<i style="--h:${v ? Math.max(2, (v / max) * 100).toFixed(1) : 0}%" title="${esc(labels[i])}: ${money(v)}"></i>`)
+      .join("")}</div><div class="cbars-x"><span>${esc(labels[0])}</span><span>top ${money(max)}</span><span>${esc(labels[labels.length - 1])}</span></div>`;
   }
-  function claudeHtml(cc, n) {
-    if (!cc || !cc.requests) return "";
+  const kindRows = (cc) => {
     const t = cc.tokens;
-    const note = `What these tokens would cost at Anthropic's API prices of ${dayLabel(cc.prices_as_of, { day: "numeric", month: "short", year: "numeric" })}. On a Pro or Max plan you pay the plan instead. Counted from Claude Code's own logs, which are only read, never changed; prompts and replies are not kept.`;
-    const unpriced = cc.unpriced.length
-      ? `<p class="sub">No price for ${cc.unpriced.map(esc).join(", ")}: its tokens are counted but not priced. Add a price in config.toml under [agents.prices].</p>`
+    const c = cc.cost_by;
+    const rows = [
+      ["Cache reads", "Context Claude Code sends again, read from the cache", t.cache_read, c.cache_read],
+      ["Cache writes", "Context stored in the cache for later requests", t.cache_write, c.cache_write],
+      ["Output", "What Claude writes, thinking included", t.output, c.output],
+      ["Input", "New context outside the cache", t.input, c.input],
+    ];
+    if (cc.web_searches) rows.push(["Web searches", `${cc.web_searches.toLocaleString("en-US")} searches`, 0, c.web_search]);
+    const top = Math.max(...rows.map((r) => r[3]), 1e-9);
+    return `<ul class="plain costs">${rows
+      .map(([name, hint, tok, cost]) => `<li><span>${esc(name)} <span class="d">${tok ? `${tokens(tok)} tokens` : esc(hint)}</span></span><span>${money(cost)} <span class="d">${cc.cost ? Math.round((cost / cc.cost) * 100) : 0}%</span></span><span class="rb" aria-hidden="true"><i style="--w:${((cost / top) * 100).toFixed(2)}%;--c:var(--agent, #b49be8)"></i></span></li>`)
+      .join("")}</ul>`;
+  };
+
+  async function pageClaude(n, gen) {
+    paint(loading("Claude Code", n, CC_RANGES));
+    bindRange("claude");
+    const to = today();
+    const from = n === "1" ? to : n === "all" ? addDays(to, -1199) : addDays(to, -(Number(n) - 1));
+    let cc;
+    let r = null;
+    try {
+      [cc, r] = await Promise.all([get(`/api/claude?from=${from}&to=${to}`), n === "all" ? null : loadRange(n).catch(() => null)]);
+    } catch (e) {
+      if (!stale(gen)) paint(errorHtml(e));
+      return;
+    }
+    if (stale(gen)) return;
+    const t = cc.tokens;
+    const all = t.input + t.output + t.cache_write + t.cache_read;
+    const context = t.input + t.cache_write + t.cache_read;
+    const worked = r ? (r.agents || []).filter((a) => a.tool === "claude").reduce((s, a) => s + a.busy, 0) : 0;
+    let chart;
+    if (n === "1") {
+      chart = costBars(cc.hourly, cc.hourly.map((_, i) => hourLabel(`${pad(i)}:00`)));
+    } else {
+      const start = n === "all" ? (cc.days[0] || {}).date || to : from;
+      const by = Object.fromEntries(cc.days.map((d) => [d.date, d.cost]));
+      const dates = [];
+      for (let d = start; d <= to; d = addDays(d, 1)) dates.push(d);
+      chart = costBars(dates.map((d) => by[d] || 0), dates.map((d) => dayLabel(d, { day: "numeric", month: "short" })));
+    }
+    const e = cc.earlier;
+    const short = (d) => dayLabel(d, { day: "numeric", month: "short", year: "numeric" });
+    const earlierHtml = e
+      ? panel(
+          `Before ${dayLabel(addDays(e.until, 1), { day: "numeric", month: "short" })}, estimated`,
+          `<dl class="facts cc-facts"><dt>At API prices</dt><dd><b>about ${money(e.cost)}</b></dd><dt>Tokens</dt><dd>about ${tokens(e.tokens)}</dd><dt>From</dt><dd>${esc(short(e.from))} to ${esc(short(e.until))}</dd></dl>${costRows(e.models.map((m) => ({ ...m, requests: 1, estimated: true })), "")}`,
+          {
+            w: "w12",
+            sub: "Claude Code deletes session transcripts after 30 days, so these are gone. Its own statistics still count that use, adding each request once per line it fills in the transcript (two to three times). This estimate divides that out, using the ratio measured on the transcripts still on disk, and prices the rest like your later use.",
+          },
+        )
       : "";
-    const empty = "No Claude Code replies in this period.";
-    return `<div class="grid cc">
-      ${panel(
-        "Claude Code at API prices",
-        `<dl class="facts cc-facts"><dt>Cost</dt><dd><b>${money(cc.cost)}</b></dd><dt>Requests</dt><dd>${cc.requests.toLocaleString("en-US")}</dd><dt>Input</dt><dd>${tokens(t.input)} tokens</dd><dt>Output</dt><dd>${tokens(t.output)} tokens</dd><dt>Cache writes</dt><dd>${tokens(t.cache_write)} tokens</dd><dt>Cache reads</dt><dd>${tokens(t.cache_read)} tokens</dd></dl>${n !== "1" ? costSpark(cc.days, cc.from, cc.to) : ""}${unpriced}`,
-        { w: "w4", sub: note },
-      )}
-      ${panel("By model", costRows(cc.models, empty), { w: "w4" })}
-      ${panel("By project", costRows(cc.projects, empty), { w: "w4" })}
-    </div>`;
+    paint(`${head("Claude Code", "What its requests would cost at Anthropic's API prices. On a Pro or Max plan you pay the plan instead.", rangeBar(n, CC_RANGES))}
+      ${cc.reading ? '<p class="note">Reading Claude Code\'s history for the first time: the totals grow for a moment.</p>' : ""}
+      <div class="figures">
+        <div><span>At API prices</span><b>${money(cc.cost)}</b></div>
+        ${e ? `<div><span>With the estimate before ${esc(dayLabel(addDays(e.until, 1), { day: "numeric", month: "short" }))}</span><b>about ${money(cc.cost + e.cost)}</b></div>` : ""}
+        <div><span>Requests</span><b>${cc.requests.toLocaleString("en-US")}</b></div>
+        <div><span>Tokens</span><b>${tokens(all)}</b></div>
+        <div><span>Context from the cache</span><b>${context ? Math.round((t.cache_read / context) * 100) : 0}%</b></div>
+        ${worked ? `<div><span>Claude worked</span><b>${dur(worked)}</b></div>` : ""}
+        ${worked >= 600 && cc.cost ? `<div><span>Per hour of work</span><b>${money(cc.cost / (worked / 3600))}</b></div>` : ""}
+      </div>
+      <div class="grid">
+        ${panel(n === "1" ? "Cost per hour" : "Cost per day", chart, { w: "w12" })}
+        ${panel("Where the cost goes", kindRows(cc), { w: "w4" })}
+        ${panel("By model", costRows(cc.models, "No Claude Code requests in this period."), { w: "w4" })}
+        ${panel("By project", costRows(cc.projects, "No Claude Code requests in this period."), { w: "w4" })}
+        ${earlierHtml}
+      </div>
+      <p class="sub cc-foot">Counted from Claude Code's own logs in ~/.claude, which are only read, never changed. Prompts and replies are not kept. Anthropic's prices of ${esc(short(cc.prices_as_of))} are built in, so nothing is looked up online.${cc.unpriced.length ? ` No price for ${cc.unpriced.map(esc).join(", ")}: add one in config.toml under [agents.prices].` : ""}</p>`);
+    bindRange("claude");
   }
 
   async function pageAgents(n, gen) {
@@ -1050,10 +1112,10 @@
         <div><span>Agents worked</span><b>${dur(busy)}</b></div>
         <div><span>You watched them</span><b>${dur(focus)}</b></div>
         <div><span>Agents</span><b>${new Set((r.agents || []).map((a) => a.tool)).size}</b></div>
-        ${cc && cc.requests ? `<div><span>Claude Code at API prices</span><b>${money(cc.cost)}</b></div>` : ""}
+        ${cc && cc.requests ? `<div><span>Claude Code at API prices</span><b><a class="figlink" href="#/claude/${n}">${money(cc.cost)}</a></b></div>` : ""}
       </div>
       <section class="panel w12">${agentsHtml(r.agents, "No AI agents ran in this period. Agents are recognised by name; add more in Settings.")}</section>
-      ${claudeHtml(cc, n)}`);
+`);
     bindRange("agents");
   }
 
@@ -1235,7 +1297,7 @@
         ${field("Motion", "Animations when pages open and menus appear.", select("motion", d.motion, [["system", "Follow the system setting"], ["reduced", "Reduced"], ["full", "Full"]]))}
       `, "Everything in this section applies and saves as you change it.")}
       ${sec("dashboard", "Dashboard", `
-        ${field("Open on", "The page the dashboard shows first.", select("startpage", d.start_page, [["today", "Today"], ["now", "Now"], ["timeline", "Timeline"], ["apps", "Apps and sites"], ["projects", "Projects"], ["agents", "AI agents"], ["trends", "Trends"]]))}
+        ${field("Open on", "The page the dashboard shows first.", select("startpage", d.start_page, [["today", "Today"], ["now", "Now"], ["timeline", "Timeline"], ["apps", "Apps and sites"], ["projects", "Projects"], ["agents", "AI agents"], ["claude", "Claude Code"], ["trends", "Trends"]]))}
         ${field("Weeks start on", "Used by the year view in Trends.", select("weekstart", c.general.week_start, [["monday", "Monday"], ["sunday", "Sunday"]]))}
         ${field("Port", "The page moves to the new port after saving.", num("port", d.port, "", 1024, 65535))}
         ${field("Tray icon", "Shows today's screen time; click it to open this dashboard.", check("tray", d.tray, "Show the arch-tracker icon in the system tray"))}
@@ -1280,7 +1342,7 @@
         ${field("…or its builds use", "Processes the agent started, like tests and compilers.", num("akid", c.agents.busy_child_cpu_percent, "% of one core or more", 0.1, 1600, "any"))}
         ${field("…or it writes", "Output to its terminal per 10 seconds.", num("awrite", c.agents.busy_write_bytes, "bytes or more", 0, 10000000))}
         ${field("Known agents", "One per line: id | name | names to match", `<textarea id="tools" class="code">${esc(tools)}</textarea>`)}
-        ${field("Claude Code cost", "Reads token counts from Claude Code's own logs in ~/.claude, read-only, and prices them at Anthropic's API rates on the AI agents page. Prompts and replies are never kept.", check("ccost", c.agents.claude_cost !== false, "Show what Claude Code would cost"))}
+        ${field("Claude Code cost", "Reads token counts from Claude Code's own logs in ~/.claude, read-only, and prices them at Anthropic's API rates on the Claude Code page. Prompts and replies are never kept.", check("ccost", c.agents.claude_cost !== false, "Show what Claude Code would cost"))}
       `)}
       ${sec("privacy", "Privacy", `
         ${field("Never record these apps", "One per line, by name or app id.", `<textarea id="xapps">${esc(lines(c.privacy.exclude_apps))}</textarea>`)}
@@ -2106,7 +2168,7 @@
 
   // ---------- router ----------
 
-  const PAGES = ["now", "today", "timeline", "apps", "projects", "agents", "trends", "settings"];
+  const PAGES = ["now", "today", "timeline", "apps", "projects", "agents", "claude", "trends", "settings"];
   function route(sameView) {
     ruleClose();
     clearInterval(refreshTimer);
@@ -2123,6 +2185,9 @@
       if (a.dataset.route === key) a.setAttribute("aria-current", "page");
       else a.removeAttribute("aria-current");
     });
+    // The Claude Code page goes with its switch in Settings.
+    const ccLink = document.querySelector('.nav a[data-route="claude"]');
+    if (ccLink) ccLink.hidden = (prefs().agents || {}).claude_cost === false;
     moveGlide();
     // One title for every page: the tracker records this tab too, and a title that changed with the
     // page would show up as a new window each time you moved around.
@@ -2142,6 +2207,8 @@
         return pageProjects(valid(arg, RANGES) || "7", gen);
       case "agents":
         return pageAgents(valid(arg, RANGES) || "7", gen);
+      case "claude":
+        return pageClaude(valid(arg, CC_RANGES) || "30", gen);
       case "trends":
         return pageTrends(valid(arg, RANGES.slice(1)) || "30", gen);
       case "settings":
@@ -2151,10 +2218,10 @@
     }
   }
 
-  // Keys: 1-8 open the pages in sidebar order; on day pages, arrows move a day and t goes to today.
+  // Keys: 1-9 open the pages in sidebar order; on day pages, arrows move a day and t goes to today.
   document.addEventListener("keydown", (e) => {
     if (e.target.closest("input, textarea, select, [contenteditable], #ribbon, .pop") || e.altKey || e.ctrlKey || e.metaKey) return;
-    const i = "12345678".indexOf(e.key);
+    const i = "123456789".indexOf(e.key);
     if (i >= 0) {
       location.hash = `#/${PAGES[i]}`;
       return;

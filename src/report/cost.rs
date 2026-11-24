@@ -5,8 +5,9 @@ use super::{BadRequest, ProjectRules, parse_date};
 use crate::config::{Config, ModelPrice};
 use anyhow::Result;
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 
 /// When PRICES was copied from https://platform.claude.com/docs/en/about-claude/pricing
 pub const PRICES_AS_OF: &str = "2026-11-24";
@@ -133,7 +134,13 @@ pub struct Tokens4 {
 }
 
 /// What one reply cost, in USD.
+#[cfg(test)]
 pub fn cost(p: &Price, t: &Tokens4) -> f64 {
+    cost_parts(p, t).total()
+}
+
+/// What one reply cost, in USD, per kind of token.
+pub fn cost_parts(p: &Price, t: &Tokens4) -> CostBy {
     let prompt = t.input + t.cache_5m + t.cache_1h + t.cache_read;
     let (mut i, mut o) = (p.input, p.output);
     if let Some((over, li, lo)) = p.long
@@ -146,13 +153,37 @@ pub fn cost(p: &Price, t: &Tokens4) -> f64 {
     {
         (i, o) = (fi, fo);
     }
-    let geo = if t.us_only { US_ONLY } else { 1.0 };
-    let tokens = t.input as f64 * i
-        + t.cache_5m as f64 * i * 1.25
-        + t.cache_1h as f64 * i * 2.0
-        + t.cache_read as f64 * i * p.read
-        + t.output as f64 * o;
-    tokens * geo / 1e6 + t.web_search as f64 * PER_SEARCH
+    let per = if t.us_only { US_ONLY } else { 1.0 } / 1e6;
+    CostBy {
+        input: t.input as f64 * i * per,
+        output: t.output as f64 * o * per,
+        cache_write: (t.cache_5m as f64 * 1.25 + t.cache_1h as f64 * 2.0) * i * per,
+        cache_read: t.cache_read as f64 * i * p.read * per,
+        web_search: t.web_search as f64 * PER_SEARCH,
+    }
+}
+
+/// Cost in USD per kind of token.
+#[derive(Serialize, Default, Clone, Copy, Debug, PartialEq)]
+pub struct CostBy {
+    pub input: f64,
+    pub output: f64,
+    pub cache_write: f64,
+    pub cache_read: f64,
+    pub web_search: f64,
+}
+
+impl CostBy {
+    pub fn total(&self) -> f64 {
+        self.input + self.output + self.cache_write + self.cache_read + self.web_search
+    }
+    fn add(&mut self, o: &CostBy) {
+        self.input += o.input;
+        self.output += o.output;
+        self.cache_write += o.cache_write;
+        self.cache_read += o.cache_read;
+        self.web_search += o.web_search;
+    }
 }
 
 #[derive(Serialize, Default, Clone, Debug, PartialEq)]
@@ -187,6 +218,7 @@ pub struct CostRow {
 pub struct DayCost {
     pub date: String,
     pub cost: f64,
+    pub requests: u64,
 }
 
 #[derive(Serialize, Default, Clone, Debug)]
@@ -195,19 +227,221 @@ pub struct ClaudeReport {
     pub to: String,
     pub prices_as_of: &'static str,
     pub cost: f64,
+    /// The same cost split by kind of token.
+    pub cost_by: CostBy,
     pub requests: u64,
     pub tokens: TokenSums,
+    pub web_searches: u64,
     pub models: Vec<CostRow>,
     pub projects: Vec<CostRow>,
     pub days: Vec<DayCost>,
     /// Models with no price, built in or your own.
     pub unpriced: Vec<String>,
+    /// For a single day: cost per local hour (hours[i] starts i hours after midnight).
+    pub hourly: Vec<f64>,
+    /// The transcripts are still being read for the first time: totals will grow.
+    pub reading: bool,
+    /// Use from before the oldest transcript, estimated from Claude Code's own statistics,
+    /// when the range reaches back that far.
+    pub earlier: Option<Earlier>,
+}
+
+/// Claude Code removes session transcripts after cleanupPeriodDays (30 by default), but keeps
+/// statistics in ~/.claude/stats-cache.json: totals per model since it was first started, and
+/// tokens per model per day. Those count a reply once per transcript line it fills (2 to 2.5
+/// lines each), so the estimate divides by the ratio measured on the transcripts still on disk.
+#[derive(Serialize, Default, Clone, Debug)]
+pub struct Earlier {
+    pub from: String,
+    pub until: String,
+    pub cost: f64,
+    pub tokens: u64,
+    pub models: Vec<CostRow>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct Stats {
+    #[serde(default)]
+    model_usage: HashMap<String, StatModel>,
+    #[serde(default)]
+    daily_model_tokens: Vec<StatDay>,
+    first_session_date: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct StatModel {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
+    web_search_requests: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StatDay {
+    date: String,
+    #[serde(default)]
+    tokens_by_model: HashMap<String, u64>,
+}
+
+/// Where Claude Code keeps its statistics, beside its transcripts.
+pub fn stats_paths() -> Vec<PathBuf> {
+    crate::sources::claude::roots()
+        .iter()
+        .filter_map(|r| r.parent().map(|p| p.join("stats-cache.json")))
+        .collect()
+}
+
+fn read_stats(paths: &[PathBuf]) -> Option<Stats> {
+    use std::io::Read;
+    for p in paths {
+        // Read-only, like the transcripts; a few hundred KB at most.
+        let Ok(f) = crate::sources::claude::open_read_only(p) else {
+            continue;
+        };
+        let mut s = String::new();
+        if f.take(64 << 20).read_to_string(&mut s).is_ok()
+            && let Ok(v) = serde_json::from_str::<Stats>(&s)
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Claude Code's use before the oldest transcript still on disk, priced like the rest.
+pub fn earlier(conn: &Connection, cfg: &Config, paths: &[PathBuf]) -> Result<Option<Earlier>> {
+    let Some(stats) = read_stats(paths) else {
+        return Ok(None);
+    };
+    // The first day with transcripts; everything before it only Claude Code's statistics know.
+    let first: Option<i64> = conn
+        .query_row("SELECT min(at_ms) FROM claude_usage", [], |r| r.get(0))
+        .unwrap_or(None);
+    let first_day = first
+        .map(crate::util::local_date)
+        .unwrap_or_else(|| "9999-12-31".into());
+    // Lines per reply, per model and overall, from the transcripts read so far.
+    let mut ratio: HashMap<String, f64> = HashMap::new();
+    let (mut all_lines, mut all_unique) = (0f64, 0f64);
+    let (mut w5, mut w1) = (0f64, 0f64);
+    {
+        let mut st = conn.prepare(
+            "SELECT u.model, sum(u.input + u.output + u.cache_5m + u.cache_1h + u.cache_read),
+                    coalesce(l.tokens, 0), sum(u.cache_5m), sum(u.cache_1h)
+             FROM claude_usage u LEFT JOIN claude_lines l ON l.model = u.model GROUP BY u.model",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)? as f64,
+                r.get::<_, i64>(2)? as f64,
+                r.get::<_, i64>(3)? as f64,
+                r.get::<_, i64>(4)? as f64,
+            ))
+        })?;
+        for row in rows {
+            let (model, unique, lines, c5, c1) = row?;
+            w5 += c5;
+            w1 += c1;
+            if unique > 0.0 && lines >= unique {
+                ratio.insert(base_name(&model), lines / unique);
+                all_lines += lines;
+                all_unique += unique;
+            }
+        }
+    }
+    // Without transcripts to measure, two lines per reply is what Claude Code writes most.
+    let overall = if all_unique > 0.0 {
+        all_lines / all_unique
+    } else {
+        2.0
+    };
+    let hour_share = if w5 + w1 > 0.0 { w1 / (w5 + w1) } else { 0.0 };
+    let mut out = Earlier {
+        from: stats
+            .first_session_date
+            .as_deref()
+            .and_then(|d| d.get(..10))
+            .unwrap_or("")
+            .to_string(),
+        until: parse_date(&first_day)
+            .ok()
+            .and_then(|(d, _, _)| d.yesterday().ok())
+            .map(|d| d.to_string())
+            .unwrap_or_default(),
+        ..Default::default()
+    };
+    for (model, m) in &stats.model_usage {
+        let life = m.input_tokens
+            + m.output_tokens
+            + m.cache_read_input_tokens
+            + m.cache_creation_input_tokens;
+        let since: u64 = stats
+            .daily_model_tokens
+            .iter()
+            .filter(|d| d.date.as_str() >= first_day.as_str())
+            .filter_map(|d| d.tokens_by_model.get(model))
+            .sum();
+        let before = life.saturating_sub(since);
+        if life == 0 || before == 0 {
+            continue;
+        }
+        let f = ratio
+            .get(&base_name(model))
+            .copied()
+            .unwrap_or(overall)
+            .clamp(1.0, 5.0);
+        let share = before as f64 / life as f64 / f;
+        let writes = m.cache_creation_input_tokens as f64;
+        let t = Tokens4 {
+            input: m.input_tokens,
+            output: m.output_tokens,
+            cache_5m: (writes * (1.0 - hour_share)) as u64,
+            cache_1h: (writes * hour_share) as u64,
+            cache_read: m.cache_read_input_tokens,
+            web_search: m.web_search_requests,
+            ..Default::default()
+        };
+        // Totals, not single requests: long-prompt prices can't be told apart here.
+        let price = price_for(model, &cfg.agents.prices).map(|p| Price { long: None, ..p });
+        let cost = price
+            .map(|p| cost_parts(&p, &t).total() * share)
+            .unwrap_or(0.0);
+        let key = base_name(model);
+        out.cost += cost;
+        let tokens = (before as f64 / f) as u64;
+        out.tokens += tokens;
+        out.models.push(CostRow {
+            name: model_label(&key),
+            key,
+            cost,
+            requests: 0,
+            tokens: TokenSums {
+                input: (m.input_tokens as f64 * share) as u64,
+                output: (m.output_tokens as f64 * share) as u64,
+                cache_write: (writes * share) as u64,
+                cache_read: (m.cache_read_input_tokens as f64 * share) as u64,
+            },
+            priced: price.is_some(),
+        });
+    }
+    if out.models.is_empty() {
+        return Ok(None);
+    }
+    out.models.sort_by(|a, b| b.cost.total_cmp(&a.cost));
+    Ok(Some(out))
 }
 
 /// "claude-opus-5-5" -> "Opus 5.5", "claude-sonnet-4-5-20250929" -> "Sonnet 4.5".
 pub fn model_label(model: &str) -> String {
     let m = base_name(model);
-    let rest = m.strip_prefix("claude-").unwrap_or(&m);
+    let Some(rest) = m.strip_prefix("claude-") else {
+        return model.to_string();
+    };
     let mut parts = rest.split('-');
     let family = parts.next().unwrap_or(rest);
     let version: Vec<&str> = parts
@@ -228,7 +462,7 @@ pub fn model_label(model: &str) -> String {
 /// Claude Code's usage between two local dates (both included), priced.
 pub fn claude(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<ClaudeReport> {
     let (start, ds, _) = parse_date(from)?;
-    let (end, _, de) = parse_date(to)?;
+    let (end, de_from, de) = parse_date(to)?;
     if end < start {
         return Err(BadRequest("'to' must not be before 'from'".into()).into());
     }
@@ -288,15 +522,24 @@ pub fn claude(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<C
     let mut days: Vec<DayCost> = vec![];
     // Local day boundaries, so each reply's date needs no time-zone lookup.
     let mut day_end = i64::MIN;
+    if start == end {
+        out.hourly = vec![0.0; ((de - de_from + 3_599_999) / 3_600_000).max(1) as usize];
+    }
     for row in rows {
         let (model, folder, at, t) = row?;
         let price = *prices
             .entry(model.clone())
             .or_insert_with(|| price_for(&model, &cfg.agents.prices));
-        let c = price.map(|p| cost(&p, &t)).unwrap_or(0.0);
+        let parts = price.map(|p| cost_parts(&p, &t)).unwrap_or_default();
+        let c = parts.total();
         out.cost += c;
+        out.cost_by.add(&parts);
         out.requests += 1;
+        out.web_searches += t.web_search;
         out.tokens.add(&t);
+        if let Some(h) = out.hourly.get_mut(((at - ds) / 3_600_000).max(0) as usize) {
+            *h += c;
+        }
         let mkey = base_name(&model);
         let m = models.entry(mkey.clone()).or_insert_with(|| CostRow {
             name: model_label(&mkey),
@@ -329,10 +572,15 @@ pub fn claude(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<C
         if at >= day_end {
             let date = crate::util::local_date(at);
             day_end = parse_date(&date).map(|(_, _, e)| e).unwrap_or(i64::MAX);
-            days.push(DayCost { date, cost: 0.0 });
+            days.push(DayCost {
+                date,
+                cost: 0.0,
+                requests: 0,
+            });
         }
         if let Some(d) = days.last_mut() {
             d.cost += c;
+            d.requests += 1;
         }
     }
     out.unpriced = models
@@ -467,6 +715,48 @@ mod tests {
     }
 
     #[test]
+    fn earlier_use_is_estimated_from_claude_codes_statistics() {
+        let dir = std::env::temp_dir().join(format!("at-earlier-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        drop(crate::store::Store::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        let (_, ds, _) = parse_date("2026-09-10").unwrap();
+        // On disk: one Opus 5.5 reply of 1M cache reads, written on 2 lines.
+        conn.execute(
+            "INSERT INTO claude_usage VALUES (1, ?1, 'claude-opus-5-5', '', 0, 0, 0, 0, 1000000, 0, 0, 0)",
+            [ds + 3_600_000],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO claude_lines VALUES ('claude-opus-5-5', 2000000)",
+            [],
+        )
+        .unwrap();
+        // Claude Code's statistics: 6M lines-tokens of Opus 5.5 reads in all, 2M of them on or
+        // after the first transcript day; and 4M of a model with no transcripts left.
+        let stats = r#"{"version":5,"firstSessionDate":"2026-05-28T06:35:21.547Z",
+            "modelUsage":{"claude-opus-5-5":{"inputTokens":0,"outputTokens":0,"cacheReadInputTokens":6000000,"cacheCreationInputTokens":0},
+                          "claude-sonnet-4-6":{"inputTokens":0,"outputTokens":0,"cacheReadInputTokens":4000000,"cacheCreationInputTokens":0}},
+            "dailyModelTokens":[{"date":"2026-08-01","tokensByModel":{"claude-opus-5-5":4000000}},
+                                {"date":"2026-09-10","tokensByModel":{"claude-opus-5-5":2000000}}]}"#;
+        let sp = dir.join("stats-cache.json");
+        std::fs::write(&sp, stats).unwrap();
+        let e = earlier(&conn, &Config::default(), &[sp]).unwrap().unwrap();
+        assert_eq!(
+            (e.from.as_str(), e.until.as_str()),
+            ("2026-05-28", "2026-09-09")
+        );
+        // Opus 5.5: 4M lines-tokens before, 2 lines per reply -> 2M reads at $0.20 = $0.40.
+        // Sonnet 4.6: 4M, the overall ratio (2) -> 2M reads at $0.30 = $0.60.
+        assert!(near(e.cost, 1.0), "{}", e.cost);
+        assert_eq!(e.tokens, 4_000_000);
+        assert_eq!(e.models[0].name, "Sonnet 4.6");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn model_labels() {
         assert_eq!(model_label("claude-opus-5-5"), "Opus 5.5");
         assert_eq!(model_label("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
@@ -518,6 +808,11 @@ mod tests {
         assert_eq!(r.days.len(), 2);
         assert!(near(r.days[0].cost, 8.0));
         assert_eq!(r.tokens.input, 2_000_500);
+        assert!(near(r.cost_by.input, 8.0) && near(r.cost_by.total(), r.cost));
+        assert!(r.hourly.is_empty(), "hours only for a single day");
+        let one = claude(&conn, &Config::default(), "2026-11-20", "2026-11-20").unwrap();
+        assert!(near(one.hourly[1], 4.0) && near(one.hourly[2], 4.0));
+        assert_eq!(one.days[0].requests, 2);
         assert!(r.projects.iter().any(|p| p.name == "No project"));
         let _ = std::fs::remove_dir_all(&dir);
     }

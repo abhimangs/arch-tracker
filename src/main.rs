@@ -47,7 +47,7 @@ enum Cmd {
     Doctor,
     /// Open the dashboard in your browser, signed in (e.g. "open settings").
     Open {
-        /// Page: today, apps, agents, trends or settings.
+        /// Page: today, apps, agents, claude, trends or settings.
         page: Option<String>,
     },
     /// Write a new database of made-up activity (for screenshots and trying the dashboard).

@@ -20,7 +20,7 @@ work, then shows it all in a local dashboard with a tray icon. It runs as a smal
 | Incognito | Time only, counted as "Private browsing" | Hosts and titles from private windows are never stored |
 | Terminals | The program in front of you and its project (git root) | kitty remote control (exact tab); `/proc` for ghostty and others; tmux panes |
 | AI agents | Per tool and project: time you watched it, and time it was working | Claude Code, Codex, opencode, Antigravity, Cursor Agent, Hermes, Gemini CLI, Aider and more, matched by name |
-| Claude Code cost | What its replies would cost at Anthropic's API prices, per model, project and day | Token counts from Claude Code's own transcripts, read-only: prompts and replies are never kept |
+| Claude Code cost | What its requests would cost at Anthropic's API prices, per day, model and project, on its own page | Token counts from Claude Code's own transcripts and statistics, read-only: prompts and replies are never kept |
 | Idle | Gaps with no keyboard or mouse input | Wayland `ext-idle-notify` v2 |
 | Watching and calls | Video playing in a visible window; microphone open | MPRIS players, the browser extension, and the ALSA capture state |
 | Background | Music in a hidden tab; apps open in the tray but unused | Shown separately, never added to screen time |
@@ -36,6 +36,8 @@ work, then shows it all in a local dashboard with a tray icon. It runs as a smal
   filterable and searchable.
 - **Projects**: coding time per project from terminals, code editors and agents.
 - **Apps and sites**, **Agents** and **Trends** over a day, a week, a month or a year.
+- **Claude Code**: what its requests would cost at API prices, per day, kind of token, model and
+  project, updated seconds after each request.
 
 ## How screen time is decided
 
@@ -187,10 +189,12 @@ are picked up live. You can change:
 - Terminals give program name and project only: never arguments, window titles (which shells set
   to the running command) or environment variables.
 - `arch-tracker pause` stops recording; the exclude list hides chosen apps and sites.
-- Claude Code's transcripts (`~/.claude/projects`) are only read: opened read-only, never
-  written, renamed or locked, without following links and without even updating their access
-  time. From each reply only the model, its time, its token counts and its folder are kept; prompts,
-  replies and file contents are never stored. Switch it off under Settings → AI agents.
+- Claude Code's transcripts (`~/.claude/projects`) and statistics (`~/.claude/stats-cache.json`)
+  are only read: opened read-only, never written, renamed or locked, without following links and
+  without even updating their access time. From each request only the model, its time, its token
+  counts and its folder are kept; prompts, replies and file contents are never stored. Claude Code
+  deletes transcripts after 30 days by default (`cleanupPeriodDays`); arch-tracker keeps the
+  counts. Switch it off under Settings → AI agents.
 
 See [SECURITY.md](SECURITY.md) for the threat model and how to report a problem.
 
