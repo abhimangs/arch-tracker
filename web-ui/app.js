@@ -192,6 +192,7 @@
     if (!r.ok) {
       const err = new Error(body.error || `The tracker answered ${r.status}.`);
       err.field = body.field;
+      err.status = r.status;
       throw err;
     }
     return body;
@@ -1612,10 +1613,18 @@
       try {
         const r = await send("PUT", "/api/appearance", look());
         applyLook(r.dashboard);
-      } catch {
-        // Read-only view or a failed save: the look still applies to this page.
+        lookMsg("");
+      } catch (err) {
+        // A read-only view (403) or a network error stays quiet: the look still applies to this page.
+        // A config.toml that does not parse refuses the change (409), so say why it did not stick.
+        if (err.status === 409) lookMsg(err.message);
       }
     }, 250);
+  }
+
+  // Shows a note in every theme popover (the one in the top bar and the one in Settings).
+  function lookMsg(text) {
+    document.querySelectorAll(".look-msg").forEach((m) => (m.textContent = text));
   }
 
   // Category colours are inline styles, so pages redraw when they switch (not Settings: unsaved edits).
@@ -1647,7 +1656,8 @@
           .map((a) => `<button type="button" role="radio" class="swatch" data-look="accent" data-v="${a}" aria-checked="${l.accent === a}" title="${cap(a)}" aria-label="${cap(a)}" style="--sw:var(--p-${a})"></button>`)
           .join("")}</div></div>
         <label class="check"><input type="checkbox" data-look="theme_categories" ${l.theme_categories ? "checked" : ""}>Category colours follow the theme</label>
-        <p class="look-note">Light mode uses ${esc(FLAVOR[p.light] || cap(p.light))}.${p.id === "aizome" ? " Aizome keeps the category colours from Settings." : ""}</p>`;
+        <p class="look-note">Light mode uses ${esc(FLAVOR[p.light] || cap(p.light))}.${p.id === "aizome" ? " Aizome keeps the category colours from Settings." : ""}</p>
+        <div class="look-msg" role="status"></div>`;
     };
     draw();
     el.addEventListener("click", (e) => {
