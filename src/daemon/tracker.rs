@@ -743,6 +743,11 @@ impl Tracker {
     /// a second), at most once per TERM_MIN_GAP_MS, and on the periodic tick for windows on
     /// screen. procs: this tick's /proc snapshot, if one was taken.
     async fn refresh_terminals(&mut self, now: i64, periodic: bool, procs: Option<&ProcTable>) {
+        // Nothing is recorded while paused or asleep: skip the /proc reads and PBI queries.
+        // The next tick after resume refreshes as usual.
+        if self.paused.is_some() || self.suspended {
+            return;
+        }
         if now - self.kwin_last > KWIN_STALE_MS {
             return;
         }
@@ -909,6 +914,11 @@ impl Tracker {
 
     /// Re-queries Plasma Browser Integration when a browser window on screen has no extension.
     async fn refresh_pbi(&mut self, now: i64, periodic: bool) {
+        // Nothing is recorded while paused or asleep: skip the /proc reads and PBI queries.
+        // The next tick after resume refreshes as usual.
+        if self.paused.is_some() || self.suspended {
+            return;
+        }
         if now - self.kwin_last > KWIN_STALE_MS {
             return;
         }
@@ -1538,6 +1548,26 @@ mod tests {
         assert_eq!(at(&t), now + 3_500, "at most once per 2 s");
         t.refresh_terminals(now + 5_600, false, None).await;
         assert_eq!(at(&t), now + 5_600, "the pending change is picked up later");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paused_or_asleep_terminals_are_not_inspected() {
+        let mut t = test_tracker();
+        let now = t.kwin_last;
+        t.kwin = Some(one_window("foot", "Working"));
+        t.paused = Some(None);
+        t.refresh_terminals(now, true, None).await;
+        assert!(t.term_cache.is_empty(), "no inspection while paused");
+        t.paused = None;
+        t.suspended = true;
+        t.refresh_terminals(now, true, None).await;
+        assert!(t.term_cache.is_empty(), "no inspection while asleep");
+        t.suspended = false;
+        t.refresh_terminals(now, true, None).await;
+        assert!(
+            t.term_cache.contains_key("w1"),
+            "refreshed right after resume"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
