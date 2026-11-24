@@ -348,37 +348,62 @@ impl<'a> ProjectRules<'a> {
 
 /// The project an editor window shows, from its title: "main.rs - arch-tracker - Visual Studio
 /// Code", "arch-tracker – main.rs" (JetBrains), "arch-tracker — src/main.rs" (Zed). A segment
-/// that names a project seen in a terminal wins; otherwise the last segment that is neither the
-/// editor's name nor a file.
+/// that names a project seen in a terminal wins; otherwise the segment next to a trailing brand,
+/// else the last segment that is neither the editor's name nor a file.
+const EDITOR_BRANDS: [&str; 16] = [
+    "visual studio code",
+    "visual studio code - insiders",
+    "code - oss",
+    "code - insiders",
+    "vscodium",
+    "cursor",
+    "windsurf",
+    "zed",
+    "kate",
+    "sublime text",
+    "intellij idea",
+    "pycharm",
+    "clion",
+    "rustrover",
+    "webstorm",
+    "goland",
+];
+
 pub fn editor_project(title: &str, app_name: &str, known: &HashSet<String>) -> String {
-    let t = title.trim_start_matches(['●', '•', '*', ' ']);
+    // A brand at the end of the title ("main.rs - my-app - Code - OSS") is removed first, so its
+    // words cannot be read as a project. Only whole suffixes count: "Code - OSS" is not "OSS".
+    let mut t = title.trim_start_matches(['●', '•', '*', ' ']).trim_end();
+    let mut brands: Vec<String> = EDITOR_BRANDS.iter().map(|b| b.to_string()).collect();
+    brands.push(app_name.to_lowercase());
+    brands.retain(|b| !b.is_empty());
+    brands.sort_by_key(|b| std::cmp::Reverse(b.len()));
+    // The title is only the editor's name: no folder or file is open.
+    if brands.iter().any(|b| t.to_lowercase() == *b) {
+        return String::new();
+    }
+    let mut stripped = false;
+    'brand: for b in &brands {
+        for sep in [" - ", " — ", " – ", " | "] {
+            let suffix = format!("{sep}{b}");
+            let Some(cut) = t.len().checked_sub(suffix.len()) else {
+                continue;
+            };
+            if t.get(cut..).is_some_and(|s| s.to_lowercase() == suffix) {
+                t = &t[..cut];
+                stripped = true;
+                break 'brand;
+            }
+        }
+    }
     let mut parts: Vec<&str> = vec![t];
     for sep in [" - ", " — ", " – ", " | "] {
         parts = parts.iter().flat_map(|p| p.split(sep)).collect();
     }
     let app = app_name.to_lowercase();
+    // Brands inside the title must match a whole segment: "cursor-tools" is a project.
     let brand = |s: &str| {
         let l = s.to_lowercase();
-        l == app
-            || (!app.is_empty() && l.contains(&app))
-            || [
-                "visual studio code",
-                "code - oss",
-                "vscodium",
-                "cursor",
-                "windsurf",
-                "zed",
-                "kate",
-                "sublime text",
-                "intellij idea",
-                "pycharm",
-                "clion",
-                "rustrover",
-                "webstorm",
-                "goland",
-            ]
-            .iter()
-            .any(|b| l == *b)
+        l == app || EDITOR_BRANDS.contains(&l.as_str())
     };
     let looks_like_file = |s: &str| {
         s.contains('/')
@@ -395,6 +420,13 @@ pub fn editor_project(title: &str, app_name: &str, known: &HashSet<String>) -> S
         .collect();
     if let Some(k) = segs.iter().find(|s| known.contains(&s.to_lowercase())) {
         return k.to_string();
+    }
+    // The segment next to a stripped brand is the project ("Makefile - example.com - VS Code").
+    if stripped
+        && segs.len() >= 2
+        && let Some(last) = segs.last().filter(|s| !s.contains('/'))
+    {
+        return last.to_string();
     }
     segs.iter()
         .rev()
@@ -1694,6 +1726,26 @@ mod tests {
         let known: HashSet<String> = ["api".to_string()].into();
         assert_eq!(editor_project("api — src/main.rs", "Zed", &known), "api");
         assert_eq!(editor_project("notes.md", "Kate", &none), "");
+    }
+
+    #[test]
+    fn editor_brands_end_the_title() {
+        let none = HashSet::new();
+        let f = |t: &str, app: &str| editor_project(t, app, &none);
+        assert_eq!(f("main.rs - my-app - Code - OSS", "Code - OSS"), "my-app");
+        assert_eq!(
+            f("main.rs - cursor-tools - Cursor", "Cursor"),
+            "cursor-tools"
+        );
+        assert_eq!(
+            f(
+                "Makefile - example.com - Visual Studio Code",
+                "Visual Studio Code"
+            ),
+            "example.com"
+        );
+        assert_eq!(f("main.rs - Visual Studio Code", "Visual Studio Code"), "");
+        assert_eq!(f("Code - OSS", "Code - OSS"), "");
     }
 
     const DS: i64 = 1_000_000_000_000;
