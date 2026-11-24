@@ -46,17 +46,15 @@ fn key_path() -> std::path::PathBuf {
 fn load_or_create_key(path: &std::path::Path) -> Result<String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    if let Ok(k) = std::fs::read_to_string(path) {
-        let k = k.trim();
-        if k.len() >= 32 && k.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Ok(k.to_string());
-        }
+    if let Some(k) = read_valid_key(path) {
+        return Ok(k);
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let key = random_hex(32)?;
-    let tmp = path.with_extension("key.tmp");
+    // A name per process, so two processes starting together never share a temp file.
+    let tmp = path.with_extension(format!("key.{}.tmp", std::process::id()));
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -64,8 +62,27 @@ fn load_or_create_key(path: &std::path::Path) -> Result<String> {
         .mode(0o600)
         .open(&tmp)?;
     f.write_all(key.as_bytes())?;
-    std::fs::rename(&tmp, path)?;
-    Ok(key)
+    // A hard link fails if the key exists, so a key another process just made is never replaced.
+    let linked = std::fs::hard_link(&tmp, path);
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Ok(key),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => match read_valid_key(path) {
+            Some(k) => Ok(k),
+            None => bail!(
+                "{} holds no valid key; remove it to make a new one",
+                path.display()
+            ),
+        },
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The key in the file, if the file holds one.
+fn read_valid_key(path: &std::path::Path) -> Option<String> {
+    let k = std::fs::read_to_string(path).ok()?;
+    let k = k.trim();
+    (k.len() >= 32 && k.chars().all(|c| c.is_ascii_hexdigit())).then(|| k.to_string())
 }
 
 /// The session key, created on first use.
