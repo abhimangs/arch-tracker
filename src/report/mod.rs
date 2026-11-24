@@ -956,7 +956,8 @@ fn compute_in(
 fn counted_in(state: &[State], ds: i64, s: &Span) -> (Times, Option<(i64, i64)>) {
     let n = state.len() as i64;
     let a = ((s.start - ds) / 1000).clamp(0, n) as usize;
-    let b = ((s.end - ds + 999) / 1000).clamp(0, n) as usize;
+    // Floor, like compute_in: a partial last second is not counted, so adjacent spans never share one.
+    let b = ((s.end - ds) / 1000).clamp(0, n) as usize;
     let mut t = Times::default();
     let (mut first, mut last) = (None, None);
     for (i, st) in state.iter().enumerate().take(b).skip(a) {
@@ -1826,6 +1827,33 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(categorize(&cats, &s).unwrap().name, "Development");
+    }
+
+    #[test]
+    fn sessions_and_apps_count_the_same_seconds() {
+        // Span edges fall between whole seconds; each span counts only the seconds it covers in full.
+        let mut subjects = HashMap::new();
+        for id in [1, 2] {
+            subjects.insert(
+                id,
+                Subject {
+                    app: format!("app{id}"),
+                    app_name: format!("App {id}"),
+                    ..Default::default()
+                },
+            );
+        }
+        let spans = vec![
+            sp(Kind::Focus, 1, 0, 1_500),
+            sp(Kind::Focus, 2, 1_500, 3_200),
+            sp(Kind::Focus, 1, 3_200, 4_900),
+        ];
+        let r = compute(&Config::default(), "x", DS, DS + H, &spans, &subjects);
+        let apps: i64 = r.apps.iter().map(|a| a.total).sum();
+        let sessions: i64 = r.sessions.iter().map(|s| s.counted).sum();
+        assert_eq!(apps, 4);
+        assert_eq!(r.totals.screen, apps);
+        assert_eq!(sessions, apps);
     }
 
     fn local_day(tz: &jiff::tz::TimeZone, y: i16, m: i8, d: i8) -> (i64, i64) {
