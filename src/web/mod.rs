@@ -691,12 +691,11 @@ async fn api_appearance(State(ctx): State<Ctx>, JsonBody(b): JsonBody<Appearance
         Ok(c) => c,
         // No file at all (removed by hand): the running settings are the newest truth.
         Err(_) if !config::config_path().exists() => ctx.web.config(),
-        Err(e) => {
+        // The parse error itself is in the dashboard's notices; the picker only needs the gist.
+        Err(_) => {
             return err(
                 StatusCode::CONFLICT,
-                format!(
-                    "config.toml has an error, so the look was not saved: {e:#}. Fix the file, or save Settings to replace it (a copy is kept as config.toml.broken)."
-                ),
+                "config.toml has an error, so this look wasn't saved. Fix the file, or save Settings to replace it.",
             );
         }
     };
