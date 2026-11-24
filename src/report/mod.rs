@@ -243,6 +243,17 @@ fn is_project_dir(path: &str) -> bool {
     !p.is_dir() || p.join(".git").exists()
 }
 
+/// A path in the form the tracker stores: "~" for home, no trailing slash.
+fn norm_path(p: &str) -> String {
+    let p = p.trim().trim_end_matches('/');
+    match p.strip_prefix('~') {
+        Some(rest) => {
+            crate::util::abbreviate_home(&crate::util::home().join(rest.trim_start_matches('/')))
+        }
+        None => p.to_string(),
+    }
+}
+
 impl<'a> ProjectRules<'a> {
     fn new(cfg: &'a crate::config::Projects) -> Self {
         ProjectRules {
@@ -277,12 +288,38 @@ impl<'a> ProjectRules<'a> {
         {
             return None;
         }
+        // Inside a project folder the top-level subfolder is the project, git or not.
+        if let Some(child) = self.folder_child(path) {
+            let cname = child.rsplit('/').next().unwrap_or(&child).to_string();
+            if let Some(hit) = self.aliased(&cname, &child) {
+                return Some(hit);
+            }
+            if self.cfg.ignore.iter().any(|i| norm_path(i) == child) {
+                return None;
+            }
+            return Some((cname.to_lowercase(), cname));
+        }
         let project = *self
             .seen
             .borrow_mut()
             .entry(path.to_string())
             .or_insert_with(|| is_project_dir(path));
         project.then(|| (name.to_lowercase(), name.to_string()))
+    }
+
+    /// The project folder a path is strictly inside: its top-level subfolder, e.g.
+    /// "~/projects/foo" for "~/projects/foo/src". None for the folder itself and other paths.
+    fn folder_child(&self, path: &str) -> Option<String> {
+        let p = norm_path(path);
+        self.cfg.folders.iter().find_map(|f| {
+            let f = norm_path(f);
+            if f.is_empty() {
+                return None;
+            }
+            let rest = p.strip_prefix(&f)?.strip_prefix('/')?;
+            let first = rest.split('/').next().filter(|s| !s.is_empty())?;
+            Some(format!("{f}/{first}"))
+        })
     }
 
     /// (key, display name) for a bare project name (from an editor title).
@@ -1568,6 +1605,65 @@ mod tests {
         assert_eq!(
             rules.of_path(&p(&dir)).map(|x| x.1).as_deref(),
             Some("Scratch")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_folders_make_their_subfolders_projects() {
+        let dir = std::env::temp_dir().join(format!("at-folders-{}", std::process::id()));
+        let folder = dir.join("projects");
+        std::fs::create_dir_all(folder.join("app/.git")).unwrap();
+        std::fs::create_dir_all(folder.join("notes/src/bin")).unwrap();
+        std::fs::create_dir_all(dir.join("loose")).unwrap();
+        let p = |x: &std::path::Path| x.to_string_lossy().into_owned();
+        let name = |r: &ProjectRules, x: &str| r.of_path(x).map(|x| x.1);
+        let cfg = crate::config::Projects {
+            folders: vec![p(&folder)],
+            ..Default::default()
+        };
+        let rules = ProjectRules::new(&cfg);
+        assert_eq!(
+            name(&rules, &p(&folder.join("notes"))).as_deref(),
+            Some("notes")
+        );
+        assert_eq!(
+            name(&rules, &p(&folder.join("notes/src/bin"))).as_deref(),
+            Some("notes"),
+            "a deeper path maps to its top-level subfolder"
+        );
+        assert_eq!(
+            name(&rules, &p(&folder.join("app/src"))).as_deref(),
+            Some("app"),
+            "a git repository inside is still the top-level subfolder"
+        );
+        assert_eq!(
+            name(&rules, &p(&folder)),
+            None,
+            "the folder itself is not a project"
+        );
+        assert_eq!(
+            name(&rules, &p(&dir.join("loose"))),
+            None,
+            "outside stays as before"
+        );
+        let ignored = crate::config::Projects {
+            folders: vec![p(&folder)],
+            ignore: vec![p(&folder.join("notes"))],
+            ..Default::default()
+        };
+        assert_eq!(
+            name(&ProjectRules::new(&ignored), &p(&folder.join("notes/src"))),
+            None
+        );
+        let named = crate::config::Projects {
+            folders: vec![p(&folder)],
+            aliases: vec![format!("{}=Notes Book", p(&folder.join("notes")))],
+            ..Default::default()
+        };
+        assert_eq!(
+            name(&ProjectRules::new(&named), &p(&folder.join("notes/src"))).as_deref(),
+            Some("Notes Book")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

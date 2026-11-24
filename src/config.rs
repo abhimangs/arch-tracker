@@ -45,6 +45,8 @@ pub struct Projects {
     pub aliases: Vec<String>,
     /// Folders that are not projects; terminal time there still counts, just not per project.
     pub ignore: Vec<String>,
+    /// Folders whose top-level subfolders are each a project, git repository or not (e.g. ~/projects).
+    pub folders: Vec<String>,
 }
 
 /// Sessions, deep work and goals on the dashboard.
@@ -265,6 +267,7 @@ impl Default for Projects {
             ]),
             aliases: vec![],
             ignore: vec![],
+            folders: vec![],
         }
     }
 }

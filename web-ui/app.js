@@ -1176,7 +1176,8 @@
       ${sec("projects", "Projects", `
         ${field("Code editors", "Apps whose window titles name the open project. One per line, by app id or name.", `<textarea id="editors">${esc(lines(c.projects.editors))}</textarea>`)}
         ${field("Rename or merge", "One per line as old=new. Old can be a folder (~/code/site) or a name.", `<textarea id="aliases" spellcheck="false">${esc(lines(c.projects.aliases))}</textarea>`)}
-        ${field("Not projects", "Git repositories to leave out. Folders that aren't git repositories never count as projects.", `<textarea id="pignore">${esc(lines(c.projects.ignore))}</textarea>`)}
+        ${field("Project folders", "Folders that hold your projects, like ~/projects. Each folder directly inside counts as a project, git repository or not.", `<textarea id="pfolders" spellcheck="false">${esc(lines(c.projects.folders))}</textarea>`)}
+        ${field("Not projects", "Folders to leave out. Outside your project folders, only git repositories count as projects.", `<textarea id="pignore">${esc(lines(c.projects.ignore))}</textarea>`)}
       `, "Terminal time counts for the git repository the shell is in; editor time for the project in the window title.")}
       ${sec("tracking", "Tracking", `
         ${field("Check every", "Running apps, terminals, agents and the microphone.", num("sample", c.general.sample_interval_secs, "seconds", 2, 300))}
@@ -1318,6 +1319,7 @@
         editors: unlines($("editors").value),
         aliases: $("aliases").value.split("\n").map((x) => x.trim()).filter(Boolean),
         ignore: unlines($("pignore").value),
+        folders: unlines($("pfolders").value),
       };
       next.categories = cats.filter((x) => x.name);
       Object.assign(next.dashboard, look(), {
@@ -1369,6 +1371,7 @@
     "insights.deep_work_mins": "deep",
     "insights.daily_goal_mins": "goal",
     "projects.aliases": "aliases",
+    "projects.folders": "pfolders",
     custom_css: "css",
   };
 
