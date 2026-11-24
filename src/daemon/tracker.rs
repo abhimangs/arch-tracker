@@ -175,6 +175,7 @@ fn pick_ext(
     wins: &[(u64, &ExtWindow)],
     focused: bool,
     settled: bool,
+    kwin_same: usize,
     caption: &str,
     norm: &dyn Fn(&str) -> String,
 ) -> Option<TabPick> {
@@ -228,12 +229,17 @@ fn pick_ext(
             return Some(devtools().unwrap_or_else(private));
         }
     }
-    if let Some((cid, x, t)) = wins
+    // Every KWin window showing this caption must be accounted for by a normal tab; otherwise
+    // one of them is a window the extension cannot see (private), and the title proves nothing.
+    let candidates: Vec<(u64, &ExtWindow, &ExtTab)> = wins
         .iter()
         .filter(|(_, x)| !x.incognito)
-        .find_map(|(cid, x)| x.active_tab().filter(|t| fits(t)).map(|t| (*cid, *x, t)))
+        .filter_map(|(cid, x)| x.active_tab().filter(|t| fits(t)).map(|t| (*cid, *x, t)))
+        .collect();
+    if candidates.len() >= kwin_same
+        && let Some((cid, x, t)) = candidates.first()
     {
-        return Some(make(cid, x, t));
+        return Some(make(*cid, x, t));
     }
     if let Some(d) = devtools() {
         return Some(d);
@@ -813,7 +819,22 @@ impl Tracker {
                 || conns
                     .iter()
                     .any(|(_, c)| c.snap_at >= self.focus_changed_at);
-            return pick_ext(&wins, focused, settled, caption, &|t| self.norm(t));
+            // KWin windows of this browser (same kind) that show this caption, this one included.
+            let kwin_same = self.kwin.as_ref().map_or(0, |k| {
+                k.windows
+                    .iter()
+                    .filter(|o| {
+                        o.pid == w.pid && o.cls.to_lowercase().starts_with("crx_") == want_app
+                    })
+                    .filter(|o| {
+                        let n = self.norm(&strip_browser_suffix(&o.cap));
+                        n == caption || util::titles_match(&n, caption)
+                    })
+                    .count()
+            });
+            return pick_ext(&wins, focused, settled, kwin_same.max(1), caption, &|t| {
+                self.norm(t)
+            });
         }
         let p = self.pbi.as_ref()?;
         if (p.pid != 0 && p.pid as i64 != w.pid) || now - p.at > 30_000 {
@@ -1559,22 +1580,22 @@ mod tests {
         let wins = vec![(1u64, &normal)];
         // An incognito window (invisible to the extension) shows the same title as a normal
         // window's active tab, and the extension reports no focused window.
-        let p = pick_ext(&wins, true, true, "Getting started", &norm).unwrap();
+        let p = pick_ext(&wins, true, true, 1, "Getting started", &norm).unwrap();
         assert!(p.private && p.host.is_empty() && p.title.is_empty());
         // While the extension may still lag, the caption match is used.
-        let p = pick_ext(&wins, true, false, "Getting started", &norm).unwrap();
+        let p = pick_ext(&wins, true, false, 1, "Getting started", &norm).unwrap();
         assert_eq!(p.host, "docs.example.org");
         // An unfocused visible window is matched by caption.
-        let p = pick_ext(&wins, false, true, "Getting started", &norm).unwrap();
+        let p = pick_ext(&wins, false, true, 1, "Getting started", &norm).unwrap();
         assert_eq!(p.host, "docs.example.org");
         // Nothing matches: private if focused, unknown otherwise.
         assert!(
-            pick_ext(&wins, true, false, "Other", &norm)
+            pick_ext(&wins, true, false, 1, "Other", &norm)
                 .unwrap()
                 .private
         );
-        assert!(pick_ext(&wins, false, true, "Other", &norm).is_none());
-        let dt = pick_ext(&wins, true, true, "DevTools - example", &norm).unwrap();
+        assert!(pick_ext(&wins, false, true, 1, "Other", &norm).is_none());
+        let dt = pick_ext(&wins, true, true, 1, "DevTools - example", &norm).unwrap();
         assert_eq!(dt.host, "devtools");
     }
 
@@ -1584,11 +1605,11 @@ mod tests {
         let a = ext_win(1, true, false, "a.example.org", "Alpha page");
         let b = ext_win(2, false, false, "b.example.org", "Beta page");
         let wins = vec![(1u64, &a), (1u64, &b)];
-        let p = pick_ext(&wins, true, true, "Alpha page", &norm).unwrap();
+        let p = pick_ext(&wins, true, true, 1, "Alpha page", &norm).unwrap();
         assert_eq!((p.host.as_str(), p.private), ("a.example.org", false));
         // The extension says a different window is focused than the one KWin shows.
         assert!(
-            pick_ext(&wins, true, true, "Beta page", &norm)
+            pick_ext(&wins, true, true, 1, "Beta page", &norm)
                 .unwrap()
                 .private
         );
@@ -1596,10 +1617,22 @@ mod tests {
         let inc = ext_win(3, true, true, "", "");
         let wins = vec![(1u64, &a), (1u64, &inc)];
         assert!(
-            pick_ext(&wins, true, false, "Alpha page", &norm)
+            pick_ext(&wins, true, false, 1, "Alpha page", &norm)
                 .unwrap()
                 .private
         );
+    }
+
+    #[test]
+    fn unfocused_window_with_a_private_twin_is_not_attributed() {
+        let norm = |t: &str| t.to_string();
+        let a = ext_win(1, false, false, "a.example.org", "Alpha page");
+        let wins = vec![(1u64, &a)];
+        // Two KWin windows show "Alpha page", but the extension sees only one of them: the
+        // other is private, so the visible one cannot be matched by its title.
+        assert!(pick_ext(&wins, false, true, 2, "Alpha page", &norm).is_none());
+        let p = pick_ext(&wins, false, true, 1, "Alpha page", &norm).unwrap();
+        assert_eq!((p.host.as_str(), p.private), ("a.example.org", false));
     }
 
     #[test]
