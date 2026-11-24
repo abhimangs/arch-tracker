@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   system-wide bridge in the package. Chromium-family browsers are found by their profile files, so
   Helium and others work without a list.
 - A man page.
+- Project folders: each folder directly inside a folder you list (like `~/projects`) counts as a
+  project, git repository or not.
+- A Recompute history button in Settings, which rebuilds Trends' day summaries from the raw data.
 
 ### Changed
 
@@ -51,6 +54,19 @@ All notable changes to this project are documented here. The format follows
 - Settings saves no longer undo hand edits, and invalid fields are named.
 - `brave://` category rules, CSV formula escaping, daylight-saving hours, and keyboard access to
   the day chart.
+- A broken `config.toml` is kept as `config.toml.broken` instead of being overwritten, and the theme
+  picker no longer replaces it.
+- Trends recomputes days after a time-zone change instead of showing numbers from the old zone.
+- Sessions and projects no longer count an extra second for each focus switch.
+- Saving settings from an old browser tab no longer empties your custom CSS.
+- Starting the daemon and `arch-tracker serve` together on first run no longer leaves them with
+  different dashboard keys.
+- The live status no longer shows media titles of private windows.
+- Clearing old history no longer loses the details of something in use at that moment.
+- A very large `keep_days` value can no longer delete all history.
+- Kitty windows are never matched to another kitty instance.
+- Compositors with idle protocol v1 no longer record every idle gap as "inhibited".
+- An unfocused private window is no longer recorded as a normal tab with the same title.
 
 ## [0.1.1] - 2026-11-22
 
