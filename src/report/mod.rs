@@ -289,6 +289,18 @@ impl<'a> ProjectRules<'a> {
         {
             return None;
         }
+        // A folder chosen as a project counts, git or not, with everything inside it. It is more
+        // specific than a parent folder, so it wins inside one.
+        if let Some(dir) = self.included(path) {
+            let dname = dir.rsplit('/').next().unwrap_or(&dir).to_string();
+            if let Some(hit) = self.aliased(&dname, &dir) {
+                return Some(hit);
+            }
+            if self.cfg.ignore.iter().any(|i| norm_path(i) == dir) {
+                return None;
+            }
+            return Some((dname.to_lowercase(), dname));
+        }
         // Inside a project folder the top-level subfolder is the project, git or not.
         if let Some(child) = self.folder_child(path) {
             let cname = child.rsplit('/').next().unwrap_or(&child).to_string();
@@ -306,6 +318,22 @@ impl<'a> ProjectRules<'a> {
             .entry(path.to_string())
             .or_insert_with(|| is_project_dir(path));
         project.then(|| (name.to_lowercase(), name.to_string()))
+    }
+
+    /// The deepest chosen project folder that is the path or holds it.
+    fn included(&self, path: &str) -> Option<String> {
+        let p = norm_path(path);
+        self.cfg
+            .include
+            .iter()
+            .map(|f| norm_path(f))
+            .filter(|f| {
+                !f.is_empty()
+                    && (p == *f
+                        || p.strip_prefix(f.as_str())
+                            .is_some_and(|r| r.starts_with('/')))
+            })
+            .max_by_key(|f| f.len())
     }
 
     /// The project folder a path is strictly inside: its top-level subfolder, e.g.
@@ -345,6 +373,11 @@ impl<'a> ProjectRules<'a> {
                 .then(|| (to.trim().to_lowercase(), to.trim().to_string()))
         })
     }
+}
+
+/// Whether a recorded terminal folder counts as a project under these settings.
+pub fn counts_as_project(cfg: &crate::config::Projects, path: &str) -> bool {
+    ProjectRules::new(cfg).of_path(path).is_some()
 }
 
 /// The project an editor window shows, from its title: "main.rs - arch-tracker - Visual Studio
@@ -1716,6 +1749,54 @@ mod tests {
         assert_eq!(
             name(&ProjectRules::new(&named), &p(&folder.join("notes/src"))).as_deref(),
             Some("Notes Book")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chosen_project_folders_count_with_everything_inside() {
+        let dir = std::env::temp_dir().join(format!("at-include-{}", std::process::id()));
+        let parent = dir.join("p");
+        std::fs::create_dir_all(parent.join("a/b/src")).unwrap();
+        std::fs::create_dir_all(parent.join("a/c")).unwrap();
+        std::fs::create_dir_all(dir.join("notes/sub")).unwrap();
+        let p = |x: &std::path::Path| x.to_string_lossy().into_owned();
+        let cfg = crate::config::Projects {
+            folders: vec![p(&parent)],
+            include: vec![p(&dir.join("notes")), p(&parent.join("a/b"))],
+            ..Default::default()
+        };
+        let rules = ProjectRules::new(&cfg);
+        let name = |x: std::path::PathBuf| rules.of_path(&p(&x)).map(|x| x.1);
+        assert_eq!(name(dir.join("notes")).as_deref(), Some("notes"));
+        assert_eq!(name(dir.join("notes/sub")).as_deref(), Some("notes"));
+        assert_eq!(
+            name(parent.join("a/b/src")).as_deref(),
+            Some("b"),
+            "the chosen folder wins inside a parent"
+        );
+        assert_eq!(
+            name(parent.join("a/c")).as_deref(),
+            Some("a"),
+            "the parent rule elsewhere"
+        );
+        let ignored = crate::config::Projects {
+            include: vec![p(&dir.join("notes"))],
+            ignore: vec![p(&dir.join("notes"))],
+            ..Default::default()
+        };
+        assert!(!counts_as_project(&ignored, &p(&dir.join("notes/sub"))));
+        let renamed = crate::config::Projects {
+            include: vec![p(&dir.join("notes"))],
+            aliases: vec![format!("{}=Notebook", p(&dir.join("notes")))],
+            ..Default::default()
+        };
+        assert_eq!(
+            ProjectRules::new(&renamed)
+                .of_path(&p(&dir.join("notes/sub")))
+                .map(|x| x.1)
+                .as_deref(),
+            Some("Notebook")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

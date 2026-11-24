@@ -21,7 +21,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
@@ -142,6 +142,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/appearance", axum::routing::put(api_appearance))
         .route("/api/pause", post(api_pause))
         .route("/api/recompute", post(api_recompute))
+        .route("/api/folders", get(api_folders))
         .route("/api/resume", post(api_resume))
         .route("/api/export", get(api_export))
         .fallback(|| async { err(StatusCode::NOT_FOUND, "Not found.") })
@@ -797,6 +798,140 @@ async fn api_recompute(State(ctx): State<Ctx>) -> Response {
 }
 
 #[derive(Deserialize)]
+struct FoldersQ {
+    path: Option<String>,
+    #[serde(default)]
+    suggest: bool,
+}
+
+/// Folders inside the home folder, for choosing project folders in Settings. A page never learns
+/// real paths from the browser's own folder picker, so the tracker lists them itself.
+async fn api_folders(State(ctx): State<Ctx>, Params(q): Params<FoldersQ>) -> Response {
+    if ctx.web.viewer {
+        return err(StatusCode::FORBIDDEN, VIEWER_MSG);
+    }
+    let cfg = ctx.web.config();
+    let db_path = ctx.web.db.clone();
+    blocking(move || {
+        let home = util::home();
+        let want = q.path.unwrap_or_else(|| "~".into());
+        let mut v = serde_json::to_value(list_folders(&want, &home)?)?;
+        if q.suggest {
+            let conn = crate::store::open_readonly(&db_path)?;
+            v["suggested"] = json!(suggested_folders(&conn, &home, &cfg.projects)?);
+        }
+        Ok(v)
+    })
+    .await
+}
+
+/// At most this many folders are listed from one folder.
+const MAX_FOLDERS: usize = 1000;
+
+#[derive(Serialize, Debug)]
+struct FolderEntry {
+    name: String,
+    path: String,
+    git: bool,
+}
+
+#[derive(Serialize, Debug)]
+struct Listing {
+    path: String,
+    parent: Option<String>,
+    dirs: Vec<FolderEntry>,
+    truncated: bool,
+}
+
+/// "~/x" form of a path inside home (canonical forms on both sides).
+fn tilde(p: &std::path::Path, home: &std::path::Path) -> String {
+    match p.strip_prefix(home) {
+        Ok(r) if r.as_os_str().is_empty() => "~".into(),
+        Ok(r) => format!("~/{}", r.display()),
+        Err(_) => p.display().to_string(),
+    }
+}
+
+/// The folder a "~/x" or absolute path names, if it is the home folder or inside it.
+fn home_folder(want: &str, home: &std::path::Path) -> Result<std::path::PathBuf> {
+    let want = want.trim();
+    let raw = match want.strip_prefix('~') {
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None => std::path::PathBuf::from(want),
+    };
+    let outside =
+        || report::BadRequest("Only folders inside your home folder can be chosen.".into());
+    let home = home.canonicalize()?;
+    let dir = raw
+        .canonicalize()
+        .map_err(|_| report::BadRequest(format!("{want} is not a folder.")))?;
+    if !dir.starts_with(&home) || !dir.is_dir() {
+        return Err(outside().into());
+    }
+    Ok(dir)
+}
+
+/// The visible subfolders of a folder inside home. Symlinks are not followed, so nothing outside
+/// home is listed.
+fn list_folders(want: &str, home: &std::path::Path) -> Result<Listing> {
+    let dir = home_folder(want, home)?;
+    let home = home.canonicalize()?;
+    let mut dirs = vec![];
+    for e in std::fs::read_dir(&dir)?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || !e.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        dirs.push(FolderEntry {
+            git: e.path().join(".git").exists(),
+            path: tilde(&e.path(), &home),
+            name,
+        });
+    }
+    dirs.sort_by_cached_key(|d| d.name.to_lowercase());
+    let truncated = dirs.len() > MAX_FOLDERS;
+    dirs.truncate(MAX_FOLDERS);
+    Ok(Listing {
+        path: tilde(&dir, &home),
+        parent: (dir != home).then(|| tilde(dir.parent().unwrap_or(&home), &home)),
+        dirs,
+        truncated,
+    })
+}
+
+/// Terminal folders with the most focused time in the last 90 days that don't count as projects
+/// yet and still exist inside home: the likely candidates.
+fn suggested_folders(
+    conn: &rusqlite::Connection,
+    home: &std::path::Path,
+    projects: &config::Projects,
+) -> Result<Vec<serde_json::Value>> {
+    let since = util::now_ms() - 90 * 86_400_000;
+    let mut st = conn.prepare(
+        "SELECT s.project, SUM(sp.end_ms - sp.start_ms) FROM spans sp
+         JOIN subjects s ON s.id = sp.subject_id
+         WHERE sp.kind = ?1 AND sp.start_ms >= ?2 AND s.project != ''
+         GROUP BY s.project ORDER BY 2 DESC LIMIT 200",
+    )?;
+    let rows = st.query_map(
+        rusqlite::params![crate::model::Kind::Focus as i64, since],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+    )?;
+    let mut out = vec![];
+    for row in rows {
+        let (path, ms) = row?;
+        if out.len() >= 20 {
+            break;
+        }
+        if report::counts_as_project(projects, &path) || home_folder(&path, home).is_err() {
+            continue;
+        }
+        out.push(json!({"path": path, "secs": ms / 1000}));
+    }
+    Ok(out)
+}
+
+#[derive(Deserialize)]
 struct ExportQ {
     from: String,
     to: String,
@@ -897,6 +1032,38 @@ impl std::io::Write for ChunkWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folders_list_only_visible_subfolders_inside_home() {
+        let home = std::env::temp_dir().join(format!("at-folders-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("projects/app/.git")).unwrap();
+        std::fs::create_dir_all(home.join("projects/Notes")).unwrap();
+        std::fs::create_dir_all(home.join("projects/.cache")).unwrap();
+        std::fs::write(home.join("projects/readme.txt"), "x").unwrap();
+        std::os::unix::fs::symlink("/", home.join("projects/root")).unwrap();
+        let l = list_folders("~/projects", &home).unwrap();
+        let names: Vec<&str> = l.dirs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["app", "Notes"],
+            "no hidden folders, files or symlinks"
+        );
+        assert!(l.dirs[0].git && !l.dirs[1].git);
+        assert_eq!(l.dirs[0].path, "~/projects/app");
+        assert_eq!(l.path, "~/projects");
+        assert_eq!(l.parent.as_deref(), Some("~"));
+        let top = list_folders("~", &home).unwrap();
+        assert_eq!(top.parent, None);
+        assert!(list_folders("/", &home).is_err(), "outside home");
+        assert!(
+            list_folders("~/projects/root", &home).is_err(),
+            "a symlink out of home"
+        );
+        assert!(list_folders("~/../", &home).is_err());
+        assert!(list_folders("~/missing", &home).is_err());
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn rejections_name_the_field() {

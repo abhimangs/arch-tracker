@@ -159,8 +159,10 @@ are picked up live. You can change:
 - the dashboard port (applied at once, whichever way you change it), your own CSS and the tray icon
 - the page it opens on, a 12- or 24-hour clock, milliseconds on live timers, density and motion
 - a daily screen-time goal, per-category daily limits, what counts as a session and as deep work
-- which apps are code editors, project renames, project folders (each folder inside counts as a
-  project, git repository or not), and folders that aren't projects
+- which apps are code editors, project renames, and which folders are projects: parent folders
+  (every folder inside one is a project) and single project folders, git repository or not, picked
+  from a folder browser that also suggests the folders you worked in; and folders that aren't
+  projects
 - how many days of history to keep, and recomputing past days after changes the cache can't notice
 - the look: Catppuccin (Mocha, Macchiato, Frappé, Latte), Rosé Pine (Main, Moon, Dawn) or the
   original Aizome, any of their accents, following the system or fixed dark or light. Category

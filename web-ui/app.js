@@ -1110,6 +1110,13 @@
   }
   const num = (id, v, unit, min, max, step = 1) =>
     `<div class="inline"><input type="number" id="${id}" value="${esc(v)}" min="${min}" max="${max}" step="${step}" required><span class="unit">${esc(unit)}</span></div>`;
+  // A chosen-folders list with its Choose button (Settings → Projects).
+  const folderSet = (kind, id, what) =>
+    `<div class="folderset"><ul class="folders" id="${id}" aria-label="${esc(cap(what))}"></ul><button type="button" class="btn" data-choose="${kind}" aria-label="Choose ${esc(what)}">Choose…</button></div>`;
+  const folderChips = (kind, paths) =>
+    paths.length
+      ? paths.map((p, i) => `<li class="fchip"><span>${esc(p)}</span><button type="button" data-rm="${kind}:${i}" aria-label="Remove ${esc(p)}">×</button></li>`).join("")
+      : '<li class="none">None yet</li>';
   const check = (id, v, text) => `<label class="check"><input type="checkbox" id="${id}" ${v ? "checked" : ""}>${esc(text)}</label>`;
   const select = (id, value, options) =>
     `<select id="${id}">${options.map(([v, l]) => `<option value="${v}" ${v === value ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
@@ -1186,8 +1193,9 @@
       ${sec("projects", "Projects", `
         ${field("Code editors", "Apps whose window titles name the open project. One per line, by app id or name.", `<textarea id="editors">${esc(lines(c.projects.editors))}</textarea>`)}
         ${field("Rename or merge", "One per line as old=new. Old can be a folder (~/code/site) or a name.", `<textarea id="aliases" spellcheck="false">${esc(lines(c.projects.aliases))}</textarea>`)}
-        ${field("Project folders", "Folders that hold your projects, like ~/projects. Each folder directly inside counts as a project, git repository or not.", `<textarea id="pfolders" spellcheck="false">${esc(lines(c.projects.folders))}</textarea>`)}
-        ${field("Not projects", "Folders to leave out. Outside your project folders, only git repositories count as projects.", `<textarea id="pignore">${esc(lines(c.projects.ignore))}</textarea>`)}
+        ${field("Parent folders", "Folders that hold your projects, like ~/projects or ~/sandbox. Each folder directly inside counts as a project, git repository or not.", folderSet("folders", "pfolders", "parent folders"))}
+        ${field("Project folders", "Folders that are projects themselves, git repository or not.", folderSet("include", "pinclude", "project folders"))}
+        ${field("Not projects", "Folders to leave out. Anywhere else, only git repositories count as projects.", `<textarea id="pignore">${esc(lines(c.projects.ignore))}</textarea>`)}
       `, "Terminal time counts for the git repository the shell is in; editor time for the project in the window title.")}
       ${sec("tracking", "Tracking", `
         ${field("Check every", "Running apps, terminals, agents and the microphone.", num("sample", c.general.sample_interval_secs, "seconds", 2, 300))}
@@ -1250,6 +1258,37 @@
       } finally {
         btn.disabled = false;
       }
+    });
+
+    // Parent folders and project folders are kept here until Save, like every other field.
+    const pf = { folders: [...(c.projects.folders || [])], include: [...(c.projects.include || [])] };
+    const drawFolders = () => {
+      $("pfolders").innerHTML = folderChips("folders", pf.folders);
+      $("pinclude").innerHTML = folderChips("include", pf.include);
+    };
+    drawFolders();
+    $("s-projects").addEventListener("click", async (e) => {
+      const rm = e.target.closest("[data-rm]");
+      if (rm) {
+        const [kind, i] = rm.dataset.rm.split(":");
+        pf[kind].splice(Number(i), 1);
+        drawFolders();
+        return;
+      }
+      const ch = e.target.closest("[data-choose]");
+      if (!ch) return;
+      const kind = ch.dataset.choose;
+      const got = await folderPicker({
+        title: kind === "folders" ? "Choose parent folders" : "Choose project folders",
+        note: kind === "folders" ? "Every folder directly inside a chosen folder counts as a project." : "Each chosen folder counts as one project.",
+        chosen: pf[kind],
+        suggest: kind === "include",
+      });
+      if (got) {
+        pf[kind] = got;
+        drawFolders();
+      }
+      ch.focus();
     });
 
     lookControls($("lookset"));
@@ -1344,7 +1383,8 @@
         editors: unlines($("editors").value),
         aliases: $("aliases").value.split("\n").map((x) => x.trim()).filter(Boolean),
         ignore: unlines($("pignore").value),
-        folders: unlines($("pfolders").value),
+        folders: pf.folders,
+        include: pf.include,
       };
       next.categories = cats.filter((x) => x.name);
       Object.assign(next.dashboard, look(), {
@@ -1397,6 +1437,7 @@
     "insights.daily_goal_mins": "goal",
     "projects.aliases": "aliases",
     "projects.folders": "pfolders",
+    "projects.include": "pinclude",
     custom_css: "css",
   };
 
@@ -1505,6 +1546,99 @@
     }
     const html = out.join("");
     if (noticesEl.innerHTML !== html) noticesEl.innerHTML = html;
+  }
+
+  // ---------- folder picker ----------
+
+  // Browsers never tell a page where a folder really is, so the tracker lists the folders inside
+  // your home folder itself (/api/folders) and the picker chooses from that. Choices survive moving
+  // between folders; Done hands back the whole set, Cancel or Escape changes nothing.
+  let picker = null;
+  function folderPicker({ title, note, chosen, suggest }) {
+    if (!picker) {
+      picker = document.createElement("dialog");
+      picker.className = "pop picker";
+      picker.setAttribute("aria-labelledby", "picker-title");
+      document.body.append(picker);
+    }
+    const sel = new Set(chosen);
+    let data = null;
+    let error = "";
+    let result = null;
+    const chevron = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 7l5 5-5 5"/></svg>';
+    const box = (path) => `<input type="checkbox" data-pick="${esc(path)}" ${sel.has(path) ? "checked" : ""} aria-label="Choose ${esc(path)}">`;
+    const tags = (d) => (d.git ? '<span class="tag">git</span>' : "");
+    const crumbs = (path) => {
+      const parts = path.split("/");
+      return parts
+        .map((name, i) => {
+          const to = parts.slice(0, i + 1).join("/");
+          const here = i === parts.length - 1;
+          return `<button type="button" class="crumb" data-go="${esc(to)}" ${here ? 'aria-current="location"' : ""}>${esc(name === "~" ? "Home" : name)}</button>`;
+        })
+        .join('<span class="sep" aria-hidden="true">/</span>');
+    };
+    const draw = () => {
+      const at = data ? data.path : "~";
+      const rows = [];
+      if (data && at !== "~") rows.push(`<li class="prow here">${box(at)}<span class="plabel">This folder <span class="sub">${esc(at)}</span></span></li>`);
+      if (data && suggest && at === "~" && data.suggested && data.suggested.length) {
+        rows.push('<li class="psec">Worked in lately, not counted as projects yet</li>');
+        for (const s of data.suggested) rows.push(`<li class="prow">${box(s.path)}<span class="plabel">${esc(s.path)} <span class="sub">${esc(dur(s.secs))}</span></span></li>`);
+        rows.push('<li class="psec">Folders in your home folder</li>');
+      }
+      if (data) {
+        for (const d of data.dirs) rows.push(`<li class="prow">${box(d.path)}<button type="button" class="enter" data-go="${esc(d.path)}" aria-label="Open ${esc(d.name)}"><span>${esc(d.name)}</span>${tags(d)}${chevron}</button></li>`);
+        if (!data.dirs.length) rows.push('<li class="pempty">No folders inside.</li>');
+        if (data.truncated) rows.push('<li class="pempty">Only the first 1000 folders are shown.</li>');
+      } else rows.push(`<li class="pempty">${error ? esc(error) : "Loading…"}</li>`);
+      picker.innerHTML = `<header>
+          <h2 id="picker-title">${esc(title)}</h2>
+          <p class="sub">${esc(note)}</p>
+          <nav class="crumbs" aria-label="Folder">${crumbs(at)}</nav>
+        </header>
+        <ul class="plist">${rows.join("")}</ul>
+        <footer><span class="sub" role="status">${sel.size} chosen</span>
+          <div class="actions"><button type="button" class="btn" data-cancel>Cancel</button><button type="button" class="btn primary" data-done>Done</button></div>
+        </footer>`;
+    };
+    const load = async (path) => {
+      try {
+        data = await get(`/api/folders?path=${encodeURIComponent(path)}${suggest ? "&suggest=true" : ""}`);
+        error = "";
+      } catch (e) {
+        error = e.message;
+      }
+      draw();
+      picker.querySelector(".plist").scrollTop = 0;
+    };
+    return new Promise((resolve) => {
+      picker.onclick = (e) => {
+        const go = e.target.closest("[data-go]");
+        if (go) {
+          // Keyboard users land on the folder they are in now.
+          load(go.dataset.go).then(() => picker.querySelector(".crumb[aria-current]")?.focus());
+          return;
+        }
+        if (e.target.closest("[data-done]")) {
+          result = [...sel];
+          picker.close();
+        } else if (e.target.closest("[data-cancel]")) picker.close();
+      };
+      picker.onchange = (e) => {
+        const p = e.target.dataset && e.target.dataset.pick;
+        if (!p) return;
+        if (e.target.checked) sel.add(p);
+        else sel.delete(p);
+        const n = picker.querySelector("footer [role=status]");
+        if (n) n.textContent = `${sel.size} chosen`;
+      };
+      picker.onclose = () => resolve(result);
+      draw();
+      picker.showModal();
+      popIn(picker);
+      load("~");
+    });
   }
 
   // ---------- popovers: pause menu and theme ----------

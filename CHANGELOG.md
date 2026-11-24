@@ -25,8 +25,9 @@ All notable changes to this project are documented here. The format follows
   system-wide bridge in the package. Chromium-family browsers are found by their profile files, so
   Helium and others work without a list.
 - A man page.
-- Project folders: each folder directly inside a folder you list (like `~/projects`) counts as a
-  project, git repository or not.
+- Project folders, picked from a folder browser in Settings that suggests the folders you worked
+  in: parent folders (each folder directly inside, like `~/projects/app`, is a project) and single
+  project folders, git repository or not.
 - A Recompute history button in Settings, which rebuilds Trends' day summaries from the raw data.
 
 ### Changed

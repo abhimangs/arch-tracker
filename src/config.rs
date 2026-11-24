@@ -47,6 +47,8 @@ pub struct Projects {
     pub ignore: Vec<String>,
     /// Folders whose top-level subfolders are each a project, git repository or not (e.g. ~/projects).
     pub folders: Vec<String>,
+    /// Folders that are projects themselves, git repository or not (with everything inside).
+    pub include: Vec<String>,
 }
 
 /// Sessions, deep work and goals on the dashboard.
@@ -268,6 +270,7 @@ impl Default for Projects {
             aliases: vec![],
             ignore: vec![],
             folders: vec![],
+            include: vec![],
         }
     }
 }
