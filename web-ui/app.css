@@ -48,6 +48,14 @@
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* Glass, for the controls you press (never for data): a light rim along the top edge, a faint
+     sheen fading down, and real blur only where content passes underneath. light-dark() follows
+     the color-scheme each theme sets. */
+  --glass-rim: light-dark(rgb(255 255 255 / 0.9), rgb(255 255 255 / 0.1));
+  --glass-sheen: linear-gradient(180deg, light-dark(rgb(255 255 255 / 0.32), rgb(255 255 255 / 0.05)), transparent 72%);
+  --glass-drop: light-dark(0 1px 2px rgb(60 40 90 / 0.1), 0 1px 2px rgb(0 0 0 / 0.28));
+  --glass-blur: blur(20px) saturate(170%);
   color-scheme: dark;
 }
 
@@ -168,8 +176,8 @@ code { font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace; font
   height: var(--glide-h, 38px);
   transform: translateY(var(--glide-y, 0px));
   border-radius: var(--radius-s);
-  background: color-mix(in oklab, var(--raise) 80%, var(--shu) 8%);
-  box-shadow: inset 0 0 0 1px var(--hair);
+  background: var(--glass-sheen), color-mix(in oklab, var(--raise) 74%, var(--shu) 10%);
+  box-shadow: inset 0 1px 0 var(--glass-rim), inset 0 0 0 1px var(--hair), var(--glass-drop);
   opacity: var(--glide-o, 0);
 }
 .glide.ready { transition: transform 240ms var(--ease-out), height 240ms var(--ease-out); }
@@ -212,16 +220,21 @@ code { font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace; font
   padding: 0;
   border: 1px solid var(--hair);
   border-radius: var(--radius-s);
-  background: transparent;
+  background: var(--glass-sheen), color-mix(in oklab, var(--raise) 36%, transparent);
+  box-shadow: inset 0 1px 0 var(--glass-rim);
   color: var(--mist);
   cursor: pointer;
   transition: transform 140ms var(--ease-out), color 160ms ease, border-color 160ms ease, background-color 160ms ease;
 }
 .icon-btn:active { transform: scale(0.95); }
-.icon-btn[aria-expanded="true"], .icon-btn[aria-pressed="true"] { color: var(--shu); border-color: color-mix(in oklab, var(--shu) 45%, var(--line)); }
+.icon-btn[aria-expanded="true"], .icon-btn[aria-pressed="true"] {
+  color: var(--shu);
+  border-color: color-mix(in oklab, var(--shu) 45%, var(--line));
+  background: var(--glass-sheen), color-mix(in oklab, var(--raise) 70%, var(--shu) 12%);
+}
 .icon-btn[data-on="true"] { color: var(--warn, #e8b84a); }
 @media (hover: hover) and (pointer: fine) {
-  .icon-btn:hover { color: var(--text); background: var(--raise); }
+  .icon-btn:hover { color: var(--text); background: var(--glass-sheen), color-mix(in oklab, var(--raise) 88%, transparent); }
 }
 
 /* Collapsed rail: icons only. */
@@ -255,10 +268,12 @@ main > * + * { margin-top: var(--gap); }
 .pop {
   position: fixed;
   z-index: 40;
-  background: color-mix(in oklab, var(--bg) 86%, var(--raise));
-  border: 1px solid var(--line);
+  background: color-mix(in oklab, color-mix(in oklab, var(--bg) 86%, var(--raise)) 84%, transparent);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid color-mix(in oklab, var(--line) 85%, transparent);
   border-radius: 13px;
-  box-shadow: 0 18px 50px -12px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.12);
+  box-shadow: inset 0 1px 0 var(--glass-rim), 0 18px 50px -12px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.12);
   transform-origin: var(--origin, bottom left);
 }
 .pop[hidden] { display: none; }
@@ -279,7 +294,11 @@ main > * + * { margin-top: var(--gap); }
   cursor: pointer;
 }
 .menu button span { color: var(--mist); font-size: var(--t-s); }
-.menu button:focus-visible, .menu button:hover { background: var(--raise); outline: none; }
+.menu button:focus-visible, .menu button:hover {
+  background: var(--glass-sheen), color-mix(in oklab, var(--raise) 78%, transparent);
+  box-shadow: inset 0 1px 0 var(--glass-rim);
+  outline: none;
+}
 .menu hr { border: 0; border-top: 1px solid var(--hair); margin: 4px 6px; }
 
 .look-pop { width: min(392px, calc(100vw - 24px)); padding: 16px; display: grid; gap: 14px; }
@@ -344,7 +363,12 @@ main > * + * { margin-top: var(--gap); }
 }
 .seg { display: inline-flex; gap: 3px; flex-wrap: wrap; padding: 3px; border-radius: 11px; background: color-mix(in oklab, var(--raise) 60%, transparent); }
 .seg button { background: transparent; border-color: transparent; padding: 6px 12px; }
-.seg button[aria-pressed="true"], .seg button[aria-checked="true"] { background: var(--bg); border-color: var(--hair); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
+.seg button[aria-pressed="true"], .seg button[aria-checked="true"] {
+  background: var(--glass-sheen), var(--bg);
+  border-color: var(--hair);
+  color: var(--text);
+  box-shadow: inset 0 1px 0 var(--glass-rim), var(--glass-drop);
+}
 .chips { display: flex; gap: 6px; flex-wrap: wrap; }
 .chip { padding: 5px 11px; border-radius: 999px; background: transparent; }
 .chip[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
@@ -753,15 +777,31 @@ body:has(.locked) { display: flex; flex-direction: column; }
 
 @media (max-width: 760px) {
   .shell, .shell[data-collapsed="true"] { grid-template-columns: 1fr; --rail-w: 100%; }
-  .rail { position: sticky; z-index: 10; height: auto; flex-direction: row; align-items: center; gap: 10px; padding: 8px 10px; border-right: 0; border-bottom: 1px solid var(--hair); }
+  .rail {
+    position: sticky; z-index: 10; height: auto; flex-direction: row; align-items: center; gap: 10px; padding: 8px 10px;
+    border-right: 0; border-bottom: 1px solid var(--hair);
+    background: color-mix(in oklab, var(--rail) 80%, transparent);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+  }
   .brand span, .live, #collapse { display: none; }
   .nav { flex-direction: row; overflow-x: auto; flex: 1; scrollbar-width: none; }
   .nav a { height: 36px; padding: 0 10px; }
   .nav a span { display: none; }
   .nav a[data-route="settings"] { margin-top: 0; }
   .glide { display: none; }
-  .nav a[aria-current="page"] { background: var(--raise); }
+  .nav a[aria-current="page"] {
+    background: var(--glass-sheen), color-mix(in oklab, var(--raise) 74%, var(--shu) 10%);
+    box-shadow: inset 0 1px 0 var(--glass-rim), inset 0 0 0 1px var(--hair);
+  }
   .rail-foot { display: flex; }
+}
+
+/* ---------- transparency preferences ---------- */
+
+@media (prefers-reduced-transparency: reduce) {
+  .pop { background: color-mix(in oklab, var(--bg) 86%, var(--raise)); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .rail { background: var(--rail); -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
 
 /* ---------- motion preferences ---------- */
