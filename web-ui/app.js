@@ -1169,13 +1169,13 @@
         ${field("Custom CSS", "Loaded after the built-in styles. Variables like --bg, --text and --shu are yours to change.", `<textarea id="css" class="code" spellcheck="false">${esc(s.custom_css)}</textarea>`)}
       `)}
       ${sec("rules", "When time counts", `
-        ${field("Idle after", "No keyboard or mouse for this long stops the count, back to your last input.", num("idle", c.idle.threshold_secs / 60, "minutes", 0.5, 240, 0.5))}
-        ${field("Calls allow", "With the microphone open, you can be silent this long before time stops.", num("call", c.idle.call_threshold_secs / 60, "minutes", 0.5, 480, 0.5))}
+        ${field("Idle after", "No keyboard or mouse for this long stops the count, back to your last input.", num("idle", c.idle.threshold_secs / 60, "minutes", 0.5, 240, "any"))}
+        ${field("Calls allow", "With the microphone open, you can be silent this long before time stops.", num("call", c.idle.call_threshold_secs / 60, "minutes", 0.5, 480, "any"))}
         ${field("Watching", "Video or audio playing in a window you can see.", check("media", c.idle.media_keeps_active, "Keeps counting as watching, with no limit"))}
         ${field("Awake requests", "Apps that keep the screen on without detected media.", check("inhib", c.idle.count_inhibited_as_passive, "Count as watching too"))}
       `, "These rules are applied when you look at the data, so changing them updates every past day too.")}
       ${sec("goals", "Goals and sessions", `
-        ${field("Daily goal", "Screen time you aim to stay under; Today shows how close you are. 0 turns it off.", num("goal", (c.insights.daily_goal_mins || 0) / 60, "hours", 0, 24, 0.25))}
+        ${field("Daily goal", "Screen time you aim to stay under; Today shows how close you are. 0 turns it off.", num("goal", (c.insights.daily_goal_mins || 0) / 60, "hours", 0, 24, "any"))}
         ${field("Session break", "A pause shorter than this doesn't end a session in the Timeline.", num("sgap", c.insights.session_gap_secs, "seconds", 5, 3600))}
         ${field("Deep work", "A session at least this long counts as deep work.", num("deep", c.insights.deep_work_mins, "minutes", 5, 480))}
       `, "Per-category limits are in Categories below.")}
@@ -1189,11 +1189,11 @@
         ${field("Check every", "Running apps, terminals, agents and the microphone.", num("sample", c.general.sample_interval_secs, "seconds", 2, 300))}
         ${field("Save every", "At most this much is lost if the computer crashes.", num("flush", c.general.flush_interval_secs, "seconds", 5, 600))}
         ${field("Running apps", "", check("running", c.general.track_running, "Record apps that are open, even unused"))}
-        ${field("Visible windows", "A window beside the focused one counts as visible if this share of it shows.", num("visfrac", Math.round(c.visibility.min_fraction * 100), "% of the window", 1, 100))}
+        ${field("Visible windows", "A window beside the focused one counts as visible if this share of it shows.", num("visfrac", +(c.visibility.min_fraction * 100).toFixed(2), "% of the window", 1, 100, "any"))}
       `)}
       ${sec("agents", "AI agents", `
-        ${field("Working when CPU is", "", num("acpu", c.agents.busy_cpu_percent, "% of one core or more", 0.1, 400, 0.1))}
-        ${field("…or its builds use", "Processes the agent started, like tests and compilers.", num("akid", c.agents.busy_child_cpu_percent, "% of one core or more", 0.1, 1600, 0.1))}
+        ${field("Working when CPU is", "", num("acpu", c.agents.busy_cpu_percent, "% of one core or more", 0.1, 400, "any"))}
+        ${field("…or its builds use", "Processes the agent started, like tests and compilers.", num("akid", c.agents.busy_child_cpu_percent, "% of one core or more", 0.1, 1600, "any"))}
         ${field("…or it writes", "Output to its terminal per 10 seconds.", num("awrite", c.agents.busy_write_bytes, "bytes or more", 0, 10000000))}
         ${field("Known agents", "One per line: id | name | names to match", `<textarea id="tools" class="code">${esc(tools)}</textarea>`)}
       `)}
