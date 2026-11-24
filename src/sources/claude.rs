@@ -208,6 +208,25 @@ struct Found {
 /// Reads what is new in every transcript, up to `budget` bytes, and stores the replies' usage.
 /// `keep_from`: replies older than this (ms) are skipped (general.keep_days).
 pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i64) -> Result<Pass> {
+    // Line totals came later than the replies: read every transcript once more so they cover
+    // all of them. Replies are stored by id with max(), so a second read changes no count.
+    let complete: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'claude_lines'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    if complete.is_none() {
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM claude_files", [])?;
+        tx.execute("DELETE FROM claude_lines", [])?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('claude_lines', '1')",
+            [],
+        )?;
+        tx.commit()?;
+    }
     let paused = paused_spans(conn)?;
     let mut files = vec![];
     for r in roots {
@@ -787,7 +806,24 @@ mod tests {
             ]
         );
         // A second pass finds nothing new.
-        assert_eq!(scan(&mut conn, &[root], BUDGET, 0).unwrap().messages, 0);
+        assert_eq!(
+            scan(&mut conn, std::slice::from_ref(&root), BUDGET, 0)
+                .unwrap()
+                .messages,
+            0
+        );
+        // An install from before line totals reads everything once more, counting nothing twice.
+        conn.execute("DELETE FROM meta WHERE key = 'claude_lines'", [])
+            .unwrap();
+        assert_eq!(scan(&mut conn, &[root], BUDGET, 0).unwrap().files, 2);
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM claude_usage", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3);
+        let lines: i64 = conn
+            .query_row("SELECT sum(tokens) FROM claude_lines", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(lines, 4 * 1110 + 5 + 7 + 3 + 2, "each line once, not twice");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
