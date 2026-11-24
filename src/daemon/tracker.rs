@@ -1015,6 +1015,15 @@ impl Tracker {
         self.apply_privacy(s).map(|s| (s, pick))
     }
 
+    /// Whether a live window survives the privacy rules (an excluded window is not listed).
+    fn window_shown(&self, id: &str, now: i64) -> bool {
+        self.kwin
+            .as_ref()
+            .and_then(|k| k.windows.iter().find(|w| w.id == id))
+            .and_then(|w| self.window_subject_ex(w, false, now))
+            .is_some_and(|(s, _)| s.app != "hidden")
+    }
+
     /// The browser app identity for a browser process (for tabs that are not on screen).
     fn browser_app(&self, pid: u32) -> (String, String) {
         self.kwin
@@ -1348,13 +1357,26 @@ impl Tracker {
             "locked": self.locked(),
             "suspended": self.suspended,
             "mic": self.mic,
-            "agents": self.agents,
+            "agents": self.agents.iter()
+                .filter(|a| self.apply_privacy(a.subject.clone()).is_some_and(|s| s.app != "hidden"))
+                .collect::<Vec<_>>(),
             "running": self.running.iter().map(|s| &s.app_name).collect::<Vec<_>>(),
-            "terminals": self.term_cache.values().map(|(_, _, i)| i).collect::<Vec<_>>(),
-            // Private-window titles and excluded players are dropped by player_subject.
+            "terminals": self.term_cache.iter()
+                .filter(|(id, _)| self.window_shown(id, now))
+                .map(|(_, (_, _, i))| i)
+                .collect::<Vec<_>>(),
+            // Private-window titles are dropped by player_subject. An excluded player is listed
+            // as "Hidden", without its identity.
             "players": self.players.iter().filter_map(|p| {
                 let s = self.player_subject(p, now)?;
-                Some(json!({"name": if p.identity.is_empty() { &p.bus } else { &p.identity },
+                let name = if s.app == "hidden" {
+                    "Hidden"
+                } else if p.identity.is_empty() {
+                    p.bus.as_str()
+                } else {
+                    p.identity.as_str()
+                };
+                Some(json!({"name": name,
                     "playing": p.playing, "pid": p.pid, "host": s.host, "title": s.title}))
             }).collect::<Vec<_>>(),
             "open_spans": self.ledger.open_count(),
@@ -1546,6 +1568,23 @@ mod tests {
         let v = t.control(Request::Status, 3_000);
         assert_eq!(v["now_ms"], 3_000);
         assert_eq!(published(&t), Some(3_000));
+    }
+
+    #[test]
+    fn excluded_players_are_listed_as_hidden() {
+        let mut t = test_tracker();
+        t.cfg.privacy.exclude_apps = vec!["spotify".into()];
+        t.players = vec![Player {
+            bus: "org.mpris.MediaPlayer2.spotify".into(),
+            identity: "Spotify".into(),
+            pid: 0,
+            playing: true,
+            url: String::new(),
+            title: "Song".into(),
+        }];
+        let status = t.status_json(now_ms()).to_string();
+        assert!(!status.contains("Spotify"), "{status}");
+        assert_eq!(t.status_json(now_ms())["players"][0]["name"], "Hidden");
     }
 
     #[tokio::test(flavor = "current_thread")]
