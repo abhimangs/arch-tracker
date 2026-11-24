@@ -678,7 +678,20 @@ async fn api_appearance(State(ctx): State<Ctx>, JsonBody(b): JsonBody<Appearance
         return err(StatusCode::FORBIDDEN, VIEWER_MSG);
     }
     // The file is the newest truth: two quick changes must not undo each other.
-    let mut cfg = Config::load().unwrap_or_else(|_| ctx.web.config());
+    // Refuse rather than write the running config over a file the user is fixing.
+    let mut cfg = match Config::load() {
+        Ok(c) => c,
+        // No file at all (removed by hand): the running settings are the newest truth.
+        Err(_) if !config::config_path().exists() => ctx.web.config(),
+        Err(e) => {
+            return err(
+                StatusCode::CONFLICT,
+                format!(
+                    "config.toml has an error, so the look was not saved: {e:#}. Fix the file, or save Settings to replace it (a copy is kept as config.toml.broken)."
+                ),
+            );
+        }
+    };
     let d = &mut cfg.dashboard;
     if let Some(v) = b.palette {
         if v != d.palette {

@@ -911,7 +911,18 @@ impl Config {
                 merge_tables(existing.as_table_mut(), fresh.as_table());
                 existing.to_string()
             }
-            None => format!("{HEADER}{fresh}"),
+            None => {
+                // An unparsable file is replaced, so keep a copy of it first.
+                if path.exists() {
+                    let broken = path.with_extension("toml.broken");
+                    std::fs::copy(&path, &broken)?;
+                    tracing::warn!(
+                        "config.toml did not parse; kept a copy at {}",
+                        broken.display()
+                    );
+                }
+                format!("{HEADER}{fresh}")
+            }
         };
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, doc)?;
