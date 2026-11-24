@@ -85,6 +85,12 @@ function tabInfo(t, priv) {
   };
 }
 
+// The last snapshot the daemon heard, as JSON. Favicon and loading updates repeat it exactly,
+// so those are skipped until the heartbeat interval has passed.
+let lastJson = null;
+let lastSentAt = 0;
+const REPEAT_GAP_MS = 15000;
+
 async function sendSnapshot() {
   timer = null;
   if (!port) return;
@@ -101,8 +107,12 @@ async function sendSnapshot() {
     type: w.type || "normal",
     tabs: (w.tabs || []).map((t) => tabInfo(t, !!w.incognito)),
   }));
+  const json = JSON.stringify(windows);
+  if (json === lastJson && Date.now() - lastSentAt < REPEAT_GAP_MS) return;
   try {
     port.postMessage({ type: "snapshot", windows });
+    lastJson = json;
+    lastSentAt = Date.now();
   } catch {
     // Port died between checks; onDisconnect reconnects.
   }
@@ -122,6 +132,7 @@ function connect() {
     return reconnectLater();
   }
   port = p;
+  lastJson = null; // a new port always gets a full snapshot first
   const stable = setTimeout(() => {
     if (port === p) retryMs = 1000;
   }, STABLE_MS);

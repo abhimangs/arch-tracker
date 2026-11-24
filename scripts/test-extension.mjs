@@ -95,7 +95,7 @@ function load({ windows = [], firefox = false } = {}) {
     api.windows[name] = event();
   }
   b.api = api;
-  const ctx = { setTimeout, clearTimeout, setInterval, URL, console, chrome: api };
+  const ctx = { setTimeout, clearTimeout, setInterval, URL, console, chrome: api, Date: { now: () => now } };
   if (firefox) {
     const callbackOnly = { ...api, windows: { ...api.windows, getAll: (_q, cb) => void cb?.([]) } };
     Object.assign(ctx, { browser: api, chrome: callbackOnly });
@@ -151,6 +151,26 @@ test("a host that keeps crashing early does not reset the backoff", async () => 
   await b.advance(5 * 60_000);
   // Resetting on connect would retry every 4 s (75 times); backing off gives about ten.
   assert.ok(b.ports.length <= 15, `${b.ports.length} attempts in five minutes`);
+});
+
+test("identical snapshots are sent once, then on the heartbeat", async () => {
+  const win = { id: 1, focused: true, type: "normal", tabs: [tab("https://example.com/", "Example")] };
+  const b = load({ windows: [win] });
+  await b.advance(500);
+  assert.equal(b.snapshots().length, 1);
+  // Favicon or loading updates fire tab events without changing the snapshot.
+  for (let i = 0; i < 5; i++) b.api.tabs.onUpdated.fire(7, {}, {});
+  await b.advance(500);
+  assert.equal(b.snapshots().length, 1, "repeats are skipped");
+  // A real title change is sent right away.
+  b.windows[0].tabs[0].title = "Example, renamed";
+  b.api.tabs.onUpdated.fire(7, {}, {});
+  await b.advance(500);
+  assert.equal(b.snapshots().length, 2, "changed title is sent");
+  assert.equal(b.snapshots().at(-1).windows[0].tabs[0].title, "Example, renamed");
+  // The 20 s heartbeat still reaches the daemon with an unchanged snapshot.
+  await b.advance(20_000);
+  assert.equal(b.snapshots().length, 3, "heartbeat resends after the gap");
 });
 
 function tab(url, title, extra = {}) {
