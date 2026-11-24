@@ -9,6 +9,9 @@ pub struct Entry {
     pub id: String,
     pub name: String,
     pub wm_class: String,
+    /// Categories= lists TerminalEmulator / WebBrowser.
+    pub terminal: bool,
+    pub browser: bool,
 }
 
 #[derive(Default)]
@@ -90,6 +93,12 @@ impl DesktopIndex {
         self.by_wmclass.get(&cls.to_lowercase()).map(|e| e.as_ref())
     }
 
+    /// (terminal, browser) from the categories of the desktop entry with this id or class.
+    pub fn kind_hint(&self, app_id: &str) -> Option<(bool, bool)> {
+        let e = self.by_id(app_id).or_else(|| self.by_wmclass(app_id))?;
+        Some((e.terminal, e.browser))
+    }
+
     /// (app key, display name) for a window.
     pub fn identify(&self, df: &str, cls: &str, pid: i64) -> (String, String) {
         let df = df.trim_end_matches(".desktop");
@@ -143,6 +152,7 @@ fn parse_entry(path: &Path, id: &str) -> Option<Entry> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut in_main = false;
     let (mut name, mut wm) = (String::new(), String::new());
+    let (mut terminal, mut browser) = (false, false);
     let mut is_app = true;
     for line in text.lines() {
         let line = line.trim();
@@ -160,6 +170,15 @@ fn parse_entry(path: &Path, id: &str) -> Option<Entry> {
             "Name" => name = v.trim().to_string(),
             "StartupWMClass" => wm = v.trim().to_string(),
             "Type" => is_app = v.trim() == "Application",
+            "Categories" => {
+                for c in v.split(';') {
+                    match c.trim() {
+                        "TerminalEmulator" => terminal = true,
+                        "WebBrowser" => browser = true,
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -170,6 +189,8 @@ fn parse_entry(path: &Path, id: &str) -> Option<Entry> {
         id: id.to_string(),
         name,
         wm_class: wm,
+        terminal,
+        browser,
     })
 }
 
@@ -182,6 +203,26 @@ mod tests {
         assert_eq!(pretty("com.notion.app.desktop.notion"), "Notion");
         assert_eq!(pretty("brave-origin-beta"), "Brave Origin Beta");
         assert_eq!(pretty("kitty"), "Kitty");
+    }
+
+    #[test]
+    fn reads_categories() {
+        let path = std::env::temp_dir().join(format!(
+            "at-desktop-{}-{}.desktop",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            "[Desktop Entry]\nName=Term\nCategories=System;TerminalEmulator;\n",
+        )
+        .unwrap();
+        let e = parse_entry(&path, "term").unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(e.terminal && !e.browser);
     }
 
     #[test]

@@ -34,7 +34,7 @@ pub fn app_kind(app: &str, cls: &str) -> AppKind {
     {
         return AppKind::WebApp;
     }
-    const BROWSERS: [&str; 12] = [
+    const BROWSERS: [&str; 22] = [
         "brave",
         "chrom",
         "vivaldi",
@@ -47,6 +47,16 @@ pub fn app_kind(app: &str, cls: &str) -> AppKind {
         "floorp",
         "waterfox",
         "zen-browser",
+        "qutebrowser",
+        "falkon",
+        "epiphany",
+        "torbrowser",
+        "tor-browser",
+        "mullvad-browser",
+        "midori",
+        "palemoon",
+        "seamonkey",
+        "ladybird",
     ];
     // Short names that would match too much as substrings ("zen" in "zenity") must be whole words.
     const WORDS: [&str; 2] = ["zen", "app.zen_browser.zen"];
@@ -58,7 +68,7 @@ pub fn app_kind(app: &str, cls: &str) -> AppKind {
     if BROWSERS.iter().any(|b| a.contains(b) || c.contains(b)) || word(&a) || word(&c) {
         return AppKind::Browser;
     }
-    const TERMS: [&str; 10] = [
+    const TERMS: [&str; 20] = [
         "kitty",
         "ghostty",
         "alacritty",
@@ -69,6 +79,16 @@ pub fn app_kind(app: &str, cls: &str) -> AppKind {
         "terminator",
         "tilix",
         "gnome-terminal",
+        "yakuake",
+        "qterminal",
+        "xfce4-terminal",
+        "ptyxis",
+        "org.gnome.console",
+        "lxterminal",
+        "mate-terminal",
+        "terminology",
+        "cool-retro-term",
+        "contour",
     ];
     if TERMS.iter().any(|t| a.contains(t) || c.contains(t)) {
         return AppKind::Terminal;
@@ -732,7 +752,7 @@ impl Tracker {
         let interval = self.cfg.general.sample_interval_secs as i64 * 1000;
         for w in snap.focused().into_iter().chain(self.visible_wins()) {
             let (app, _) = self.desktop.identify(&w.df, &w.cls, w.pid);
-            if app_kind(&app, &w.cls) != AppKind::Terminal {
+            if self.kind_of(&app, &w.cls) != AppKind::Terminal {
                 continue;
             }
             let key = self.norm(&w.cap);
@@ -771,6 +791,22 @@ impl Tracker {
             .await
             .unwrap_or_default();
             self.term_cache.insert(id, (key, now, info));
+        }
+    }
+
+    /// app_kind, plus the desktop entry's categories for apps the built-in lists do not name.
+    fn kind_of(&self, app: &str, cls: &str) -> AppKind {
+        match app_kind(app, cls) {
+            AppKind::Other => match self
+                .desktop
+                .kind_hint(app)
+                .or_else(|| self.desktop.kind_hint(cls))
+            {
+                Some((true, _)) => AppKind::Terminal,
+                Some((_, true)) => AppKind::Browser,
+                _ => AppKind::Other,
+            },
+            k => k,
         }
     }
 
@@ -880,7 +916,9 @@ impl Tracker {
         let mut need = None;
         for w in snap.focused().into_iter().chain(self.visible_wins()) {
             let (app, _) = self.desktop.identify(&w.df, &w.cls, w.pid);
-            if app_kind(&app, &w.cls) == AppKind::Browser && self.ext_conns(w.pid, now).is_empty() {
+            if self.kind_of(&app, &w.cls) == AppKind::Browser
+                && self.ext_conns(w.pid, now).is_empty()
+            {
                 need = Some((w.pid, w.cap.clone()));
                 break;
             }
@@ -931,7 +969,7 @@ impl Tracker {
         now: i64,
     ) -> Option<(Subject, Option<TabPick>)> {
         let (app, app_name) = self.desktop.identify(&w.df, &w.cls, w.pid);
-        let kind = app_kind(&app, &w.cls);
+        let kind = self.kind_of(&app, &w.cls);
         let raw = match kind {
             AppKind::Browser => strip_browser_suffix(&w.cap),
             _ => w.cap.clone(),
@@ -1042,7 +1080,7 @@ impl Tracker {
             ),
             None => (p.bus.clone(), p.bus.clone()),
         };
-        let browser = self.browser_player(p) || app_kind(&app, "") == AppKind::Browser;
+        let browser = self.browser_player(p) || self.kind_of(&app, "") == AppKind::Browser;
         // A browser's own MPRIS player also plays media of private windows, and nothing tells
         // which: keep its details only when Plasma Browser Integration (which never sees
         // private windows) knows the title. The PBI bridge itself only reports normal windows.
@@ -1080,7 +1118,7 @@ impl Tracker {
                 k.windows.iter().any(|w| {
                     w.pid as u32 == p.pid
                         && matches!(
-                            app_kind(&self.desktop.identify(&w.df, &w.cls, w.pid).0, &w.cls),
+                            self.kind_of(&self.desktop.identify(&w.df, &w.cls, w.pid).0, &w.cls),
                             AppKind::Browser | AppKind::WebApp
                         )
                 })
@@ -1665,6 +1703,13 @@ mod tests {
         assert_eq!(app_kind("zen", "zen"), AppKind::Browser);
         assert_eq!(app_kind("app.zen_browser.zen", ""), AppKind::Browser);
         assert_eq!(app_kind("zenity", "zenity"), AppKind::Other);
+        assert_eq!(app_kind("yakuake", "yakuake"), AppKind::Terminal);
+        assert_eq!(app_kind("org.gnome.Epiphany", ""), AppKind::Browser);
+        assert_eq!(
+            app_kind("org.qutebrowser.qutebrowser", ""),
+            AppKind::Browser
+        );
+        assert_eq!(app_kind("net.mullvad.vpn", ""), AppKind::Other);
         assert_eq!(
             app_kind("com.mitchellh.ghostty", "com.mitchellh.ghostty"),
             AppKind::Terminal
