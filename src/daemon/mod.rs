@@ -52,6 +52,8 @@ pub struct Shared {
     pub config: Config,
     /// Bumped whenever the status is republished: the dashboard's live stream waits on it.
     pub live: tokio::sync::watch::Sender<u64>,
+    /// Reaches the notifier (Settings' test notification); None without a daemon.
+    pub alerts: Option<mpsc::UnboundedSender<crate::alerts::Cmd>>,
 }
 
 impl Default for Shared {
@@ -60,6 +62,7 @@ impl Default for Shared {
             status: serde_json::Value::Null,
             config: Config::default(),
             live: tokio::sync::watch::channel(0).0,
+            alerts: None,
         }
     }
 }
@@ -130,6 +133,10 @@ async fn run_async() -> Result<()> {
         util::db_path(),
     );
     tray.set_enabled(cfg.dashboard.tray).await;
+    let alerts = crate::alerts::spawn(conn.clone(), shared.clone(), web.clone(), util::db_path());
+    if let Ok(mut s) = shared.lock() {
+        s.alerts = Some(alerts);
+    }
     let _watcher = match watch_config(tx.clone()) {
         Ok(w) => Some(w),
         Err(e) => {

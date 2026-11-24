@@ -110,48 +110,52 @@ impl State {
         self.control(Request::Pause { until_ms }).await;
     }
 
-    /// Opens the dashboard through the desktop portal, so the browser starts in its own
-    /// session scope instead of inside this service (and its memory limit).
     async fn open(&self, route: &str) {
-        let url = match self.web.login_url(route) {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::warn!("tray: cannot open the dashboard: {e:#}");
-                return;
-            }
-        };
         let token = self.token.lock().ok().and_then(|mut t| t.take());
-        let mut opts: HashMap<&str, Variant<'_>> = HashMap::new();
-        if let Some(t) = token.as_deref() {
-            opts.insert("activation_token", Variant::from(t));
+        open_dashboard(&self.conn, &self.web, route, token).await;
+    }
+}
+
+/// Opens the dashboard, signed in, through the desktop portal, so the browser starts in its own
+/// session scope instead of inside this service (and its memory limit). `token` is an XDG
+/// activation token (from the tray host or a clicked notification) that lets it take focus.
+pub async fn open_dashboard(conn: &Connection, web: &Web, route: &str, token: Option<String>) {
+    let url = match web.login_url(route) {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!("cannot open the dashboard: {e:#}");
+            return;
         }
-        let portal = self
-            .conn
-            .call_method(
-                Some("org.freedesktop.portal.Desktop"),
-                "/org/freedesktop/portal/desktop",
-                Some("org.freedesktop.portal.OpenURI"),
-                "OpenURI",
-                &("", url.as_str(), opts),
-            )
-            .await;
-        if let Err(e) = portal {
-            tracing::info!("tray: portal OpenURI failed ({e}); using systemd-run xdg-open");
-            let mut cmd = tokio::process::Command::new("systemd-run");
-            cmd.args(["--user", "--collect", "--quiet", "--", "xdg-open", &url]);
-            if let Some(t) = token {
-                cmd.env("XDG_ACTIVATION_TOKEN", t);
-            }
-            match cmd.status().await {
-                Ok(s) if s.success() => {}
-                other => tracing::warn!("tray: could not open the dashboard: {other:?}"),
-            }
+    };
+    let mut opts: HashMap<&str, Variant<'_>> = HashMap::new();
+    if let Some(t) = token.as_deref() {
+        opts.insert("activation_token", Variant::from(t));
+    }
+    let portal = conn
+        .call_method(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            Some("org.freedesktop.portal.OpenURI"),
+            "OpenURI",
+            &("", url.as_str(), opts),
+        )
+        .await;
+    if let Err(e) = portal {
+        tracing::info!("portal OpenURI failed ({e}); using systemd-run xdg-open");
+        let mut cmd = tokio::process::Command::new("systemd-run");
+        cmd.args(["--user", "--collect", "--quiet", "--", "xdg-open", &url]);
+        if let Some(t) = token {
+            cmd.env("XDG_ACTIVATION_TOKEN", t);
+        }
+        match cmd.status().await {
+            Ok(s) if s.success() => {}
+            other => tracing::warn!("could not open the dashboard: {other:?}"),
         }
     }
 }
 
 /// "2h 05m", "12m", "40s".
-fn fmt_dur(secs: i64) -> String {
+pub(crate) fn fmt_dur(secs: i64) -> String {
     let s = secs.max(0);
     if s >= 3600 {
         format!("{}h {:02}m", s / 3600, (s % 3600) / 60)

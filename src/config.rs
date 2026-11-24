@@ -17,6 +17,7 @@ pub struct Config {
     pub titles: Titles,
     pub projects: Projects,
     pub insights: Insights,
+    pub notifications: Notifications,
     pub categories: Vec<Category>,
 }
 
@@ -61,6 +62,24 @@ pub struct Insights {
     pub deep_work_mins: u64,
     /// Daily screen-time goal in minutes (0 = none).
     pub daily_goal_mins: u64,
+}
+
+/// Desktop notifications. `enabled = false` turns every one of them off.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Notifications {
+    /// The master switch: off sends nothing at all.
+    pub enabled: bool,
+    /// When a category reaches its daily limit (categories' goal_mins).
+    pub limits: bool,
+    /// When today's screen time reaches the daily goal (insights.daily_goal_mins).
+    pub goal: bool,
+    /// A heads-up this many minutes before a limit or the goal (0 = none).
+    pub warn_mins: u64,
+    /// Remind you to take a break...
+    pub breaks: bool,
+    /// ...after this many minutes on screen without one.
+    pub break_after_mins: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -281,6 +300,19 @@ impl Default for Insights {
             session_gap_secs: 60,
             deep_work_mins: 25,
             daily_goal_mins: 0,
+        }
+    }
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Notifications {
+            enabled: true,
+            limits: true,
+            goal: true,
+            warn_mins: 5,
+            breaks: true,
+            break_after_mins: 50,
         }
     }
 }
@@ -632,6 +664,7 @@ impl Default for Config {
             titles: Titles::default(),
             projects: Projects::default(),
             insights: Insights::default(),
+            notifications: Notifications::default(),
             categories: default_categories(),
         }
     }
@@ -714,6 +747,8 @@ impl Config {
         self.idle.threshold_secs = self.idle.threshold_secs.clamp(30, 3600 * 4);
         self.idle.call_threshold_secs = self.idle.call_threshold_secs.clamp(30, 3600 * 8);
         self.titles.max_len = self.titles.max_len.clamp(20, 1000);
+        self.notifications.warn_mins = self.notifications.warn_mins.min(240);
+        self.notifications.break_after_mins = self.notifications.break_after_mins.clamp(5, 480);
         if self.dashboard.port < 1024 {
             self.dashboard.port = 7600;
         }
@@ -862,6 +897,21 @@ impl Config {
             0,
             24 * 60,
             "Daily goal (minutes)",
+        )?;
+        let nt = &self.notifications;
+        whole(
+            "notifications.warn_mins",
+            nt.warn_mins,
+            0,
+            240,
+            "Heads-up (minutes)",
+        )?;
+        whole(
+            "notifications.break_after_mins",
+            nt.break_after_mins,
+            5,
+            480,
+            "Break after (minutes)",
         )?;
         for line in &self.projects.aliases {
             let ok = line
@@ -1013,6 +1063,24 @@ mod tests {
         c.visibility.min_pixels = -5;
         c.titles.max_len = 0;
         assert_eq!(c.validate(), Ok(()));
+    }
+
+    #[test]
+    fn notification_settings_are_checked() {
+        let mut c = Config::default();
+        assert!(c.notifications.enabled, "on unless switched off");
+        c.notifications.warn_mins = 999;
+        assert_eq!(c.validate().unwrap_err().field, "notifications.warn_mins");
+        c.notifications.warn_mins = 5;
+        c.notifications.break_after_mins = 1;
+        assert_eq!(
+            c.validate().unwrap_err().field,
+            "notifications.break_after_mins"
+        );
+        assert_eq!(c.sanitized().notifications.break_after_mins, 5);
+        // A config from before notifications existed gets the defaults.
+        let old: Config = toml::from_str("[insights]\ndaily_goal_mins = 60\n").unwrap();
+        assert_eq!(old.notifications, Notifications::default());
     }
 
     #[test]

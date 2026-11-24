@@ -159,6 +159,9 @@ are picked up live. You can change:
 - the dashboard port (applied at once, whichever way you change it), your own CSS and the tray icon
 - the page it opens on, a 12- or 24-hour clock, milliseconds on live timers, density and motion
 - a daily screen-time goal, per-category daily limits, what counts as a session and as deep work
+- desktop notifications: a heads-up before and a notice at each category limit and the daily goal,
+  and a reminder to take a break after a long stretch on screen (it waits until a call or a video
+  ends). One switch turns all of them off, and Settings can send a test notice
 - which apps are code editors, project renames, and which folders are projects: parent folders
   (every folder inside one is a project) and single project folders, git repository or not, picked
   from a folder browser that also suggests the folders you worked in; and folders that aren't

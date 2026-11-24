@@ -1,0 +1,557 @@
+//! Desktop notifications: a heads-up before, and a notice at, each category's daily limit and the
+//! daily screen-time goal; and a reminder to take a break after a long unbroken stretch.
+//!
+//! `[notifications] enabled = false` turns all of it off: no report is built, nothing is sent.
+//! The numbers come from the same day report as Today, so a notice never disagrees with the page.
+//! Each notice is sent once a day; what had already happened when the tracker started (or when
+//! notifications were switched on) is not announced late.
+
+use crate::config::Config;
+use crate::daemon::SharedRef;
+use crate::report::{self, DayReport};
+use crate::web::Web;
+use futures_util::StreamExt;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+use zbus::wire::Variant;
+use zbus::{Connection, MatchRule, MessageStream};
+
+const BUS: &str = "org.freedesktop.Notifications";
+const PATH: &str = "/org/freedesktop/Notifications";
+const CHECK_EVERY: Duration = Duration::from_secs(60);
+
+/// Asks the notifier for something outside its schedule.
+pub enum Cmd {
+    /// Show a sample notice now; answers with why it could not be shown.
+    Test(oneshot::Sender<Result<(), String>>),
+}
+
+/// A notice to show. `family` notices replace each other on screen (a heads-up by the notice that
+/// the limit is reached, one break reminder by the next).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Note {
+    pub key: String,
+    pub family: String,
+    pub summary: String,
+    pub body: String,
+}
+
+/// What was sent today.
+#[derive(Default)]
+pub struct Book {
+    day: String,
+    sent: HashSet<String>,
+    /// The first look after starting (or switching on) only records what already happened.
+    primed: bool,
+}
+
+impl Book {
+    fn reset(&mut self) {
+        *self = Book::default();
+    }
+}
+
+/// What the live status says right now.
+#[derive(Default, Clone, Copy)]
+pub struct Live {
+    pub paused: bool,
+    /// No keyboard or mouse input for a while (you may be on a break already).
+    pub away: bool,
+    /// A call (microphone open) or a video playing in a visible window: a break reminder waits.
+    pub busy: bool,
+}
+
+pub fn spawn(
+    conn: Connection,
+    shared: SharedRef,
+    web: Arc<Web>,
+    db: PathBuf,
+) -> mpsc::UnboundedSender<Cmd> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(run(conn, shared, web, db, rx));
+    tx
+}
+
+async fn run(
+    conn: Connection,
+    shared: SharedRef,
+    web: Arc<Web>,
+    db: PathBuf,
+    mut rx: mpsc::UnboundedReceiver<Cmd>,
+) {
+    let mut book = Book::default();
+    // Notification ids on screen: family -> id, and id -> the activation token its click brought.
+    let mut shown: HashMap<String, u32> = HashMap::new();
+    let mut tokens: HashMap<u32, String> = HashMap::new();
+    let mut signals = signal_stream(&conn).await;
+    let mut tick = tokio::time::interval(CHECK_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                let (cfg, live) = snapshot(&shared);
+                if !cfg.notifications.enabled {
+                    book.reset();
+                    continue;
+                }
+                if live.paused || !wants_report(&cfg) {
+                    continue;
+                }
+                let Some(day) = today(&db, &cfg).await else { continue };
+                for note in due(&cfg, &day, crate::util::now_ms(), live, &mut book) {
+                    let replaces = shown.get(&note.family).copied().unwrap_or(0);
+                    match notify(&conn, &note, replaces).await {
+                        Ok(id) => {
+                            shown.insert(note.family.clone(), id);
+                        }
+                        Err(e) => tracing::warn!("notification not shown: {e}"),
+                    }
+                }
+            }
+            Some(cmd) = rx.recv() => match cmd {
+                Cmd::Test(reply) => {
+                    let note = Note {
+                        key: "test".into(),
+                        family: "test".into(),
+                        summary: "Notifications work".into(),
+                        body: "Limits, your daily goal and break reminders will show up like this.".into(),
+                    };
+                    let replaces = shown.get("test").copied().unwrap_or(0);
+                    let r = notify(&conn, &note, replaces).await.map(|id| {
+                        shown.insert("test".into(), id);
+                    });
+                    let _ = reply.send(r.map_err(|e| e.to_string()));
+                }
+            },
+            Some(sig) = next_signal(&mut signals) => match sig {
+                Signal::Token(id, t) => {
+                    if shown.values().any(|v| *v == id) {
+                        tokens.insert(id, t);
+                    }
+                }
+                Signal::Clicked(id) => {
+                    if shown.values().any(|v| *v == id) {
+                        crate::tray::open_dashboard(&conn, &web, "today", tokens.remove(&id)).await;
+                    }
+                }
+                Signal::Closed(id) => {
+                    shown.retain(|_, v| *v != id);
+                    tokens.remove(&id);
+                }
+            },
+        }
+    }
+}
+
+fn snapshot(shared: &SharedRef) -> (Config, Live) {
+    let Ok(s) = shared.lock() else {
+        return (Config::default(), Live::default());
+    };
+    let st = &s.status;
+    let truthy = |v: &serde_json::Value| match v {
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Array(a) => !a.is_empty(),
+        serde_json::Value::Object(o) => !o.is_empty(),
+        serde_json::Value::Null => false,
+        _ => true,
+    };
+    let live = Live {
+        paused: st["paused"].as_bool().unwrap_or(false),
+        away: st["idle"]["input_idle"].as_bool().unwrap_or(false)
+            || st["locked"].as_bool().unwrap_or(false),
+        busy: truthy(&st["mic"]) || truthy(&st["media_visible"]),
+    };
+    (s.config.clone(), live)
+}
+
+/// Whether anything is switched on that needs today's numbers.
+fn wants_report(cfg: &Config) -> bool {
+    let n = &cfg.notifications;
+    (n.goal && cfg.insights.daily_goal_mins > 0)
+        || (n.limits && cfg.categories.iter().any(|c| c.goal_mins > 0))
+        || (n.breaks && n.break_after_mins > 0)
+}
+
+async fn today(db: &std::path::Path, cfg: &Config) -> Option<DayReport> {
+    let (db, cfg) = (db.to_path_buf(), cfg.clone());
+    tokio::task::spawn_blocking(move || {
+        let conn = crate::store::open_readonly(&db)?;
+        let date = crate::util::local_date(crate::util::now_ms());
+        report::build_day(&conn, &cfg, &date)
+    })
+    .await
+    .ok()?
+    .map_err(|e| tracing::debug!("notifications: no day report: {e:#}"))
+    .ok()
+}
+
+/// The notices due now, each at most once a day. Pure, for tests: the caller sends them.
+pub fn due(cfg: &Config, d: &DayReport, now: i64, live: Live, book: &mut Book) -> Vec<Note> {
+    if book.day != d.date {
+        book.day = d.date.clone();
+        book.sent.clear();
+    }
+    let n = &cfg.notifications;
+    let warn = n.warn_mins as i64 * 60;
+    let mut out = vec![];
+    let goal = cfg.insights.daily_goal_mins as i64 * 60;
+    if n.goal && goal > 0 {
+        let used = d.totals.screen;
+        let dur = crate::tray::fmt_dur;
+        if used >= goal {
+            out.push(Note {
+                key: format!("goal:{goal}"),
+                family: "goal".into(),
+                summary: "Daily screen-time goal reached".into(),
+                body: format!(
+                    "{} on screen today; your goal is to stay under {}.",
+                    dur(used),
+                    dur(goal)
+                ),
+            });
+        } else if warn > 0 && goal > warn && used >= goal - warn {
+            out.push(Note {
+                key: format!("goal-warn:{goal}:{warn}"),
+                family: "goal".into(),
+                summary: format!("{} left of today's screen-time goal", dur(goal - used)),
+                body: format!(
+                    "{} on screen today; your goal is to stay under {}.",
+                    dur(used),
+                    dur(goal)
+                ),
+            });
+        }
+    }
+    if n.limits {
+        for c in cfg.categories.iter().filter(|c| c.goal_mins > 0) {
+            let lim = c.goal_mins as i64 * 60;
+            let used = d
+                .categories
+                .iter()
+                .find(|r| r.name == c.name)
+                .map(|r| r.total)
+                .unwrap_or(0);
+            let dur = crate::tray::fmt_dur;
+            if used >= lim {
+                out.push(Note {
+                    key: format!("limit:{}:{lim}", c.name),
+                    family: format!("limit:{}", c.name),
+                    summary: format!("{} limit reached", c.name),
+                    body: format!(
+                        "{} on {} today; your daily limit is {}.",
+                        dur(used),
+                        c.name,
+                        dur(lim)
+                    ),
+                });
+            } else if warn > 0 && lim > warn && used >= lim - warn {
+                out.push(Note {
+                    key: format!("limit-warn:{}:{lim}:{warn}", c.name),
+                    family: format!("limit:{}", c.name),
+                    summary: format!("{} left for {}", dur(lim - used), c.name),
+                    body: format!("{} of your {} daily limit used.", dur(used), dur(lim)),
+                });
+            }
+        }
+    }
+    let every = n.break_after_mins as i64 * 60_000;
+    if n.breaks && every > 0 && !live.away {
+        let gap = cfg.insights.session_gap_secs as i64 * 1000;
+        // The day report lags the screen by up to one database write.
+        let recent = cfg.general.flush_interval_secs as i64 * 1000 + 90_000;
+        if let Some((start, end)) = stretch(d, gap)
+            && now - end <= recent
+        {
+            let k = (end - start) / every;
+            let key = format!("break:{start}:{k}");
+            if k >= 1 && !(live.busy && book.primed) && !book.sent.contains(&key) {
+                let step = cfg.idle.threshold_secs.max(cfg.insights.session_gap_secs) as i64;
+                out.push(Note {
+                    key,
+                    family: "break".into(),
+                    summary: "Time for a break".into(),
+                    body: format!(
+                        "{} on screen without a break. Lock the screen or step away for {} to start fresh.",
+                        crate::tray::fmt_dur((end - start) / 1000),
+                        crate::tray::fmt_dur(step)
+                    ),
+                });
+            }
+        }
+    }
+    out.retain(|x| !book.sent.contains(&x.key));
+    for x in &out {
+        book.sent.insert(x.key.clone());
+    }
+    if !book.primed {
+        // What had already happened before we were watching is recorded, not announced.
+        book.primed = true;
+        out.clear();
+    }
+    out
+}
+
+/// The unbroken stretch of screen time that ends last today: (start, end) in ms. Sessions closer
+/// together than the session break belong to one stretch, as in Today's stats.
+fn stretch(d: &DayReport, gap: i64) -> Option<(i64, i64)> {
+    let mut cur: Option<(i64, i64)> = None;
+    for s in d.sessions.iter().filter(|s| s.counted > 0) {
+        cur = match cur {
+            Some((a, b)) if s.start_ms - b <= gap => Some((a, b.max(s.end_ms))),
+            _ => Some((s.start_ms, s.end_ms)),
+        };
+    }
+    cur
+}
+
+async fn notify(conn: &Connection, n: &Note, replaces: u32) -> zbus::Result<u32> {
+    let mut hints: HashMap<&str, Variant<'_>> = HashMap::new();
+    hints.insert("urgency", Variant::from(1u8));
+    let reply = conn
+        .call_method(
+            Some(BUS),
+            PATH,
+            Some(BUS),
+            "Notify",
+            &(
+                "arch-tracker",
+                replaces,
+                "appointment-soon",
+                n.summary.as_str(),
+                n.body.as_str(),
+                vec!["default", "Open Today"],
+                hints,
+                -1i32,
+            ),
+        )
+        .await?;
+    reply.body().deserialize::<u32>()
+}
+
+enum Signal {
+    Token(u32, String),
+    Clicked(u32),
+    Closed(u32),
+}
+
+async fn signal_stream(conn: &Connection) -> Option<MessageStream> {
+    let rule = MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .interface(BUS)
+        .path(PATH)
+        .build()
+        .ok()?;
+    MessageStream::for_match_rule(rule, conn, None).await.ok()
+}
+
+async fn next_signal(s: &mut Option<MessageStream>) -> Option<Signal> {
+    let Some(stream) = s.as_mut() else {
+        return std::future::pending().await;
+    };
+    loop {
+        let msg = match stream.next().await {
+            Some(Ok(m)) => m,
+            Some(Err(_)) => continue,
+            None => return std::future::pending().await,
+        };
+        let member = msg
+            .header()
+            .member()
+            .map(|m| m.to_string())
+            .unwrap_or_default();
+        let body = msg.body();
+        let sig = match member.as_str() {
+            "ActionInvoked" => body
+                .deserialize::<(u32, String)>()
+                .ok()
+                .filter(|(_, k)| k == "default")
+                .map(|(id, _)| Signal::Clicked(id)),
+            "ActivationToken" => body
+                .deserialize::<(u32, String)>()
+                .ok()
+                .map(|(id, t)| Signal::Token(id, t)),
+            "NotificationClosed" => body
+                .deserialize::<(u32, u32)>()
+                .ok()
+                .map(|(id, _)| Signal::Closed(id)),
+            _ => None,
+        };
+        if sig.is_some() {
+            return sig;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::report::{Row, Session};
+
+    const M: i64 = 60_000;
+
+    fn cfg() -> Config {
+        let mut c = Config::default();
+        c.notifications.enabled = true;
+        c.notifications.warn_mins = 5;
+        c.notifications.break_after_mins = 50;
+        c.insights.daily_goal_mins = 120;
+        c.insights.session_gap_secs = 60;
+        for cat in c.categories.iter_mut().filter(|x| x.name == "Social") {
+            cat.goal_mins = 30;
+        }
+        c
+    }
+
+    fn day(screen: i64, social: i64, sessions: &[(i64, i64)]) -> DayReport {
+        DayReport {
+            date: "2026-11-24".into(),
+            totals: report::Totals {
+                screen,
+                ..Default::default()
+            },
+            categories: vec![Row {
+                name: "Social".into(),
+                total: social,
+                ..Default::default()
+            }],
+            sessions: sessions
+                .iter()
+                .map(|&(a, b)| Session {
+                    start_ms: a,
+                    end_ms: b,
+                    counted: (b - a) / 1000,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn keys(v: &[Note]) -> Vec<String> {
+        v.iter()
+            .map(|n| n.key.split(':').next().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn what_happened_before_starting_is_not_announced() {
+        let c = cfg();
+        let mut b = Book::default();
+        // Already over the goal and the limit when the tracker starts.
+        assert!(due(&c, &day(3 * 3600, 40 * 60, &[]), 0, Live::default(), &mut b).is_empty());
+        assert!(
+            due(
+                &c,
+                &day(3 * 3600 + 60, 41 * 60, &[]),
+                0,
+                Live::default(),
+                &mut b
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn heads_up_then_reached_once_each() {
+        let c = cfg();
+        let mut b = Book::default();
+        assert!(due(&c, &day(60, 60, &[]), 0, Live::default(), &mut b).is_empty());
+        let warn = due(&c, &day(116 * 60, 26 * 60, &[]), 0, Live::default(), &mut b);
+        assert_eq!(keys(&warn), ["goal-warn", "limit-warn"]);
+        assert_eq!(warn[1].summary, "4m left for Social");
+        assert!(
+            due(&c, &day(117 * 60, 27 * 60, &[]), 0, Live::default(), &mut b).is_empty(),
+            "once"
+        );
+        let hit = due(&c, &day(121 * 60, 31 * 60, &[]), 0, Live::default(), &mut b);
+        assert_eq!(keys(&hit), ["goal", "limit"]);
+        assert_eq!(
+            hit[1].family, warn[1].family,
+            "replaces the heads-up on screen"
+        );
+        assert!(due(&c, &day(200 * 60, 50 * 60, &[]), 0, Live::default(), &mut b).is_empty());
+        // A new day starts over.
+        let mut next = day(60, 60, &[]);
+        next.date = "2026-11-25".into();
+        assert!(due(&c, &next, 0, Live::default(), &mut b).is_empty());
+    }
+
+    #[test]
+    fn switched_off_parts_stay_quiet() {
+        let mut c = cfg();
+        c.notifications.limits = false;
+        c.notifications.goal = false;
+        c.notifications.warn_mins = 0;
+        let mut b = Book::default();
+        due(&c, &day(0, 0, &[]), 0, Live::default(), &mut b);
+        assert!(
+            due(
+                &c,
+                &day(300 * 60, 300 * 60, &[]),
+                0,
+                Live::default(),
+                &mut b
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_break_reminder_after_each_long_unbroken_stretch() {
+        let c = cfg();
+        let mut b = Book::default();
+        due(&c, &day(0, 0, &[]), 0, Live::default(), &mut b);
+        // Editor and terminal back and forth for 40 minutes: not yet.
+        let s: Vec<(i64, i64)> = (0..8).map(|i| (i * 5 * M, (i + 1) * 5 * M)).collect();
+        assert!(due(&c, &day(0, 0, &s), 40 * M, Live::default(), &mut b).is_empty());
+        let mut s2 = s.clone();
+        s2.push((40 * M + 30_000, 52 * M));
+        let n = due(&c, &day(0, 0, &s2), 52 * M, Live::default(), &mut b);
+        assert_eq!(keys(&n), ["break"]);
+        assert!(
+            n[0].body.starts_with("52m on screen without a break"),
+            "{}",
+            n[0].body
+        );
+        assert!(
+            due(&c, &day(0, 0, &s2), 53 * M, Live::default(), &mut b).is_empty(),
+            "once"
+        );
+        // After a real break the clock starts over.
+        let mut s3 = s2.clone();
+        s3.push((60 * M, 100 * M));
+        assert!(due(&c, &day(0, 0, &s3), 100 * M, Live::default(), &mut b).is_empty());
+        s3.push((100 * M, 111 * M));
+        assert_eq!(
+            keys(&due(&c, &day(0, 0, &s3), 111 * M, Live::default(), &mut b)),
+            ["break"]
+        );
+    }
+
+    #[test]
+    fn a_break_reminder_waits_for_calls_videos_and_your_return() {
+        let c = cfg();
+        let mut b = Book::default();
+        due(&c, &day(0, 0, &[]), 0, Live::default(), &mut b);
+        let s = [(0, 55 * M)];
+        let busy = Live {
+            busy: true,
+            ..Default::default()
+        };
+        assert!(due(&c, &day(0, 0, &s), 55 * M, busy, &mut b).is_empty());
+        let away = Live {
+            away: true,
+            ..Default::default()
+        };
+        assert!(due(&c, &day(0, 0, &s), 55 * M, away, &mut b).is_empty());
+        // Long gone: the stretch is over, nothing to remind.
+        assert!(due(&c, &day(0, 0, &s), 70 * M, Live::default(), &mut b).is_empty());
+        assert_eq!(
+            keys(&due(&c, &day(0, 0, &s), 56 * M, Live::default(), &mut b)),
+            ["break"]
+        );
+    }
+}

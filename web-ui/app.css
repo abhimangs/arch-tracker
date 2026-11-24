@@ -758,6 +758,11 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 .msg { color: var(--mist); font-size: var(--t-s); }
 .msg[data-kind="error"] { color: var(--bad, var(--shu)); }
 
+/* Settings → Notifications: what the master switch turns off is shown dimmed. */
+.nsub { display: contents; }
+.nsub[data-off="true"] .field > label, .nsub[data-off="true"] .field > div { opacity: 0.5; }
+.nsub .inline + .inline, .nsub .check + .inline { margin-top: 8px; }
+
 /* ---------- folder picker (Settings → Projects) ---------- */
 
 .folderset { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }

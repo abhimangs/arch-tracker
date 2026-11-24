@@ -142,6 +142,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/appearance", axum::routing::put(api_appearance))
         .route("/api/pause", post(api_pause))
         .route("/api/recompute", post(api_recompute))
+        .route("/api/notify-test", post(api_notify_test))
         .route("/api/folders", get(api_folders))
         .route("/api/resume", post(api_resume))
         .route("/api/export", get(api_export))
@@ -795,6 +796,37 @@ async fn api_recompute(State(ctx): State<Ctx>) -> Response {
         Ok(json!({"ok": true, "cleared": cleared}))
     })
     .await
+}
+
+/// Shows a sample notification, so Settings can prove notifications reach the desktop.
+async fn api_notify_test(State(ctx): State<Ctx>) -> Response {
+    if ctx.web.viewer {
+        return err(StatusCode::FORBIDDEN, VIEWER_MSG);
+    }
+    let Some(tx) = ctx.web.shared.lock().ok().and_then(|s| s.alerts.clone()) else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Notifications are not running.",
+        );
+    };
+    let (otx, orx) = oneshot::channel();
+    if tx.send(crate::alerts::Cmd::Test(otx)).is_err() {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Notifications are not running.",
+        );
+    }
+    match orx.await {
+        Ok(Ok(())) => Json(json!({"ok": true})).into_response(),
+        Ok(Err(e)) => err(
+            StatusCode::BAD_GATEWAY,
+            format!("The desktop did not show it: {e}"),
+        ),
+        Err(_) => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Notifications are not running.",
+        ),
+    }
 }
 
 #[derive(Deserialize)]

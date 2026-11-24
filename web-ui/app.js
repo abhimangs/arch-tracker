@@ -1138,6 +1138,7 @@
     ["dashboard", "Dashboard"],
     ["rules", "When time counts"],
     ["goals", "Goals and sessions"],
+    ["notify", "Notifications"],
     ["projects", "Projects"],
     ["tracking", "Tracking"],
     ["agents", "AI agents"],
@@ -1157,6 +1158,7 @@
     if (stale(gen)) return;
     const c = s.config;
     const d = c.dashboard;
+    const nt = c.notifications || s.defaults.notifications;
     let cats = c.categories.map((x) => ({ ...x }));
     const tools = c.agents.tools.map((t) => `${t.id} | ${t.name} | ${t.matches.join(", ")}`).join("\n");
     const t0 = today();
@@ -1190,6 +1192,16 @@
         ${field("Session break", "A pause shorter than this doesn't end a session. Switching apps never does.", num("sgap", c.insights.session_gap_secs, "seconds", 5, 3600))}
         ${field("Deep work", "An unbroken session at least this long counts as deep work.", num("deep", c.insights.deep_work_mins, "minutes", 5, 480))}
       `, "Per-category limits are in Categories below.")}
+      ${sec("notify", "Notifications", `
+        ${field("Notifications", "Off turns every notice below off: nothing is checked or sent.", check("nall", nt.enabled, "Send desktop notifications"))}
+        <div class="nsub" id="nsub">
+        ${field("Category limits", "When a category reaches its daily limit (set in Categories).", check("nlim", nt.limits, "Tell me when a limit is reached"))}
+        ${field("Daily goal", "When today's screen time reaches your daily goal.", check("ngoal", nt.goal, "Tell me when I reach my goal"))}
+        ${field("Heads-up", "A notice this long before a limit or the goal. 0 for none.", num("nwarn", nt.warn_mins, "minutes before", 0, 240))}
+        ${field("Breaks", `A reminder after a long stretch on screen. Locking the screen, or stepping away for ${plural(Math.ceil(Math.max(c.idle.threshold_secs, c.insights.session_gap_secs) / 60), "minute")}, starts a new one. It waits until a call or a video ends.`, `${check("nbreak", nt.breaks, "Remind me to take a break")}${num("nbreakmins", nt.break_after_mins, "minutes without a break", 5, 480)}`)}
+        </div>
+        ${field("Try it", "Shows a sample notice now, so you can see that they reach your desktop.", `<div class="inline"><button type="button" class="btn" id="ntest">Send a test notification</button><span class="msg" id="nmsg"></span></div>`)}
+      `, "Plasma's Do Not Disturb holds these too. Each notice comes once a day.")}
       ${sec("projects", "Projects", `
         ${field("Code editors", "Apps whose window titles name the open project. One per line, by app id or name.", `<textarea id="editors">${esc(lines(c.projects.editors))}</textarea>`)}
         ${field("Rename or merge", "One per line as old=new. Old can be a folder (~/code/site) or a name.", `<textarea id="aliases" spellcheck="false">${esc(lines(c.projects.aliases))}</textarea>`)}
@@ -1257,6 +1269,33 @@
         $("rmsg").dataset.kind = "error";
       } finally {
         btn.disabled = false;
+      }
+    });
+
+    // The master switch greys out everything it turns off.
+    const nSync = () => {
+      const on = $("nall").checked;
+      $("nsub").dataset.off = String(!on);
+      $("nsub").querySelectorAll("input").forEach((x) => (x.disabled = !on));
+      $("ntest").disabled = !on;
+      if (on) $("nbreakmins").disabled = !$("nbreak").checked;
+    };
+    ["nall", "nbreak"].forEach((id) => $(id).addEventListener("change", nSync));
+    nSync();
+    $("ntest").addEventListener("click", async () => {
+      const btn = $("ntest");
+      btn.disabled = true;
+      $("nmsg").textContent = "Sending…";
+      $("nmsg").dataset.kind = "";
+      try {
+        await send("POST", "/api/notify-test");
+        $("nmsg").textContent = "Sent. It should be on your screen now.";
+        $("nmsg").dataset.kind = "";
+      } catch (err) {
+        $("nmsg").textContent = err.message;
+        $("nmsg").dataset.kind = "error";
+      } finally {
+        btn.disabled = !$("nall").checked;
       }
     });
 
@@ -1386,6 +1425,14 @@
         folders: pf.folders,
         include: pf.include,
       };
+      next.notifications = {
+        enabled: $("nall").checked,
+        limits: $("nlim").checked,
+        goal: $("ngoal").checked,
+        warn_mins: n("nwarn"),
+        breaks: $("nbreak").checked,
+        break_after_mins: n("nbreakmins"),
+      };
       next.categories = cats.filter((x) => x.name);
       Object.assign(next.dashboard, look(), {
         port: n("port"),
@@ -1435,6 +1482,8 @@
     "insights.session_gap_secs": "sgap",
     "insights.deep_work_mins": "deep",
     "insights.daily_goal_mins": "goal",
+    "notifications.warn_mins": "nwarn",
+    "notifications.break_after_mins": "nbreakmins",
     "projects.aliases": "aliases",
     "projects.folders": "pfolders",
     "projects.include": "pinclude",
