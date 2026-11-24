@@ -63,7 +63,20 @@ fn load_or_create_key(path: &std::path::Path) -> Result<String> {
         .open(&tmp)?;
     f.write_all(key.as_bytes())?;
     // A hard link fails if the key exists, so a key another process just made is never replaced.
-    let linked = std::fs::hard_link(&tmp, path);
+    let mut linked = std::fs::hard_link(&tmp, path);
+    if matches!(&linked, Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists) {
+        match read_valid_key(path) {
+            Some(k) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Ok(k);
+            }
+            // An empty or cut-short file is no key, so replace it once. A valid key is never removed.
+            None => {
+                let _ = std::fs::remove_file(path);
+                linked = std::fs::hard_link(&tmp, path);
+            }
+        }
+    }
     let _ = std::fs::remove_file(&tmp);
     match linked {
         Ok(()) => Ok(key),
@@ -216,6 +229,19 @@ mod tests {
         assert_eq!(a.len(), 64);
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unreadable_key_file_is_replaced() {
+        let dir = std::env::temp_dir().join(format!("at-key-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("dashboard.key");
+        std::fs::write(&p, "").unwrap();
+        let a = load_or_create_key(&p).unwrap();
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(load_or_create_key(&p).unwrap(), a);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
