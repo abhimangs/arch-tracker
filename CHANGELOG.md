@@ -44,6 +44,9 @@ All notable changes to this project are documented here. The format follows
   any other agent counts once it has gone quiet after working (20 seconds unless you change it).
   Clicking the notice brings its terminal forward: the kitty tab and pane, or the tmux pane, and
   the window, on whichever virtual desktop. Settings → Notifications switches it off.
+- `arch-tracker today`: the day in the terminal (screen time against your goal, categories against
+  their limits, top apps and sites, projects, and each agent's work and cost); `--date` for another
+  day or "yesterday", `--json` for scripts.
 - A Week page: screen time day by day, categories, top apps and sites, and agent work and cost,
   each against the week before (while a week runs, against the same days of the week before).
   On the first morning of each week a notification sums up the week before and opens it.

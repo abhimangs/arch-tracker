@@ -23,6 +23,11 @@ Run the tracker in the foreground (normally started by systemd).
 .BR status " [" \-\-json ]
 Show what is being tracked right now and which sources work.
 .TP
+.BR today " [" \-\-date " \fIYYYY-MM-DD\fR|" yesterday "] [" \-\-json ]
+Print a day's screen time against your goal, its categories against their limits, the top apps
+and sites, projects, and what your agents did and would cost. Reads the database directly, so it
+works without the daemon.
+.TP
 .BR pause " [" \fIduration\fR ]
 Pause tracking, for example
 .B pause 30m

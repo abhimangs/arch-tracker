@@ -173,6 +173,7 @@ listen_on unix:/tmp/kitty.sock
 | --- | --- |
 | `arch-tracker open [page]` | Open the dashboard in your browser, signed in (`today`, `apps`, `agents`, `trends`, `settings`) |
 | `arch-tracker status` | What is tracked right now and which sources work |
+| `arch-tracker today [--date yesterday] [--json]` | The day in the terminal: screen time and goal, categories and limits, top apps and sites, projects, and agents with their cost |
 | `arch-tracker pause 1h` / `arch-tracker resume` | Pause recording; no duration pauses until you resume |
 | `arch-tracker doctor` | Check every source, with fixes |
 | `arch-tracker export --from 2026-11-01 --to 2026-11-22 --format csv` | Every recorded interval, as CSV or JSON |

@@ -14,6 +14,7 @@ mod report;
 mod setup;
 mod sources;
 mod store;
+mod today;
 mod tray;
 mod util;
 mod web;
@@ -36,6 +37,15 @@ enum Cmd {
     /// Show what is being tracked right now and which sources work.
     Status {
         /// Print raw JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Today's screen time, categories, apps and sites, projects and agents, in the terminal.
+    Today {
+        /// Another day: YYYY-MM-DD or "yesterday".
+        #[arg(long)]
+        date: Option<String>,
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
@@ -163,6 +173,7 @@ fn real_main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Today { date, json } => today::run(date, json),
         Cmd::Setup => setup::run(),
         Cmd::Demo { db, days } => demo::run(&db, days.clamp(1, 60)),
         Cmd::Open { page } => {
