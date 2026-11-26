@@ -627,7 +627,7 @@ pub struct BrowserDayReport {
     pub hours: Vec<i64>,
 }
 
-fn neighbor(s: &Session, gap_ms: i64) -> Neighbor {
+pub(super) fn neighbor(s: &Session, gap_ms: i64) -> Neighbor {
     Neighbor {
         kind: s.kind.clone(),
         app_name: s.app_name.clone(),

@@ -145,6 +145,9 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/browsers", get(api_browsers))
         .route("/api/browser", get(api_browser))
         .route("/api/browser/day", get(api_browser_day))
+        .route("/api/agents", get(api_agents))
+        .route("/api/agent", get(api_agent))
+        .route("/api/agent/day", get(api_agent_day))
         .route("/api/icon/{app}", get(api_icon))
         .route("/api/claude", get(api_claude))
         .route("/api/codex", get(api_codex))
@@ -706,6 +709,42 @@ async fn api_browser(State(ctx): State<Ctx>, Params(q): Params<BrowserQ>) -> Res
 struct BrowserDayQ {
     id: String,
     date: Option<String>,
+}
+
+/// Agents for the menu: Claude Code, Codex and Hermes when installed or seen.
+async fn api_agents(State(ctx): State<Ctx>) -> Response {
+    let cfg = ctx.web.config();
+    let path = ctx.web.db.clone();
+    let viewer = ctx.web.viewer;
+    let today = util::local_date(util::now_ms());
+    blocking(move || {
+        report::agents::agent_list(&db(&path, viewer)?, &cfg, &today, cache_mode(viewer))
+    })
+    .await
+}
+
+/// One agent (or "all") over a range of days.
+async fn api_agent(State(ctx): State<Ctx>, Params(q): Params<BrowserQ>) -> Response {
+    let cfg = ctx.web.config();
+    let path = ctx.web.db.clone();
+    let viewer = ctx.web.viewer;
+    blocking(move || {
+        let conn = db(&path, viewer)?;
+        report::agents::agent_report(&conn, &cfg, &q.id, &q.from, &q.to, cache_mode(viewer))
+    })
+    .await
+}
+
+/// One agent's (or every agent's) sessions and stretches of work on a day.
+async fn api_agent_day(State(ctx): State<Ctx>, Params(q): Params<BrowserDayQ>) -> Response {
+    let cfg = ctx.web.config();
+    let date = q.date.unwrap_or_else(|| util::local_date(util::now_ms()));
+    if let Err(e) = report::parse_date(&date) {
+        return err_field(StatusCode::BAD_REQUEST, format!("{e:#}"), "date");
+    }
+    let path = ctx.web.db.clone();
+    let viewer = ctx.web.viewer;
+    blocking(move || report::agents::agent_day(&db(&path, viewer)?, &cfg, &q.id, &date)).await
 }
 
 /// One browser's (or every browser's) visits on a day.

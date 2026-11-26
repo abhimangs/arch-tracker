@@ -8,6 +8,7 @@
 //!   call      microphone open (and, inside a gap, the gap is < the call threshold)
 //!   active    everything else
 
+pub mod agents;
 pub mod browsers;
 pub mod cost;
 
@@ -176,6 +177,9 @@ pub struct DayReport {
     /// Each browser's day (the browser pages ask for these, not the day page).
     #[serde(skip)]
     pub browsers: Vec<browsers::BrowserDay>,
+    /// Each agent's day, hour by hour (for the agent pages).
+    #[serde(skip)]
+    pub agent_days: Vec<agents::AgentDay>,
 }
 
 /// A session's detail in a private window.
@@ -867,6 +871,7 @@ fn compute_in(
         .collect();
     let mut hourly = vec![Times::default(); hours.len().max(1)];
     let mut browsers: HashMap<String, browsers::BrowserAcc> = HashMap::new();
+    let mut agent_days: HashMap<String, agents::AgentDay> = HashMap::new();
     // timeline: per bucket, counted seconds per subject and state counts
     let nb = n.div_ceil(BUCKET_SECS);
     let mut bucket_subj: Vec<HashMap<i64, i64>> = vec![HashMap::new(); nb];
@@ -961,6 +966,10 @@ fn compute_in(
                                 ..Default::default()
                             });
                         ag.focus += t.total();
+                        agent_days
+                            .entry(subj.program.clone())
+                            .or_insert_with(|| agents::AgentDay::new(&subj.program))
+                            .add_focus(t.total(), &span_hours);
                     }
                 }
             }
@@ -1016,6 +1025,13 @@ fn compute_in(
             Kind::AgentBusy => {
                 let secs = (b - a) as i64;
                 totals.agent_busy += secs;
+                let day = agent_days
+                    .entry(subj.program.clone())
+                    .or_insert_with(|| agents::AgentDay::new(&subj.program));
+                day.busy += secs;
+                for i in a..b {
+                    day.busy_hours[hod.get(hour_of(i)).copied().unwrap_or(0)] += 1;
+                }
                 let ag = agents
                     .entry((subj.program.clone(), subj.project.clone()))
                     .or_insert_with(|| AgentRow {
@@ -1140,6 +1156,11 @@ fn compute_in(
         stats,
         projects,
         browsers,
+        agent_days: {
+            let mut v: Vec<agents::AgentDay> = agent_days.into_values().collect();
+            v.sort_by(|a, b| a.tool.cmp(&b.tool));
+            v
+        },
     }
 }
 
@@ -1546,6 +1567,8 @@ struct DayRollup {
     projects: Vec<ProjectRow>,
     #[serde(default)]
     browsers: Vec<browsers::BrowserDay>,
+    #[serde(default)]
+    agent_days: Vec<agents::AgentDay>,
 }
 
 impl DayRollup {
@@ -1574,6 +1597,7 @@ impl DayRollup {
                     b
                 })
                 .collect(),
+            agent_days: r.agent_days,
         }
     }
 }
@@ -1756,7 +1780,7 @@ fn store_rollups(conn: &Connection, hash: &str, rows: &[(String, String)]) -> Re
 }
 
 /// Bump when DayRollup or the classification changes shape.
-const ROLLUP_SCHEMA: u32 = 5;
+const ROLLUP_SCHEMA: u32 = 6;
 
 /// Hash of everything that changes how a day is classified (for the rollup cache). The app
 /// version is part of it: a new release may count differently, so it starts a fresh cache.
