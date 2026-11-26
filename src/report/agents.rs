@@ -180,6 +180,66 @@ pub struct AgentReport {
     pub projects: Vec<AgentRow>,
     /// Each agent's totals (for all agents).
     pub agents: Vec<AgentRow>,
+    /// Codex: how long its turns ran, from its own records.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turns: Option<Turns>,
+}
+
+/// When an agent's turns ran by its own records (Codex keeps them), in seconds: in all, per day of
+/// the report, and per hour of the day (summed over the days).
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct Turns {
+    pub total: i64,
+    pub days: Vec<i64>,
+    pub hours: Vec<i64>,
+}
+
+/// Codex's turns (sources::codex keeps them in codex_turns) over the report's days.
+fn codex_turns(conn: &Connection, days: &[DayAgent]) -> Result<Option<Turns>> {
+    let known: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'codex_turns'",
+        [],
+        |r| r.get(0),
+    )?;
+    let (Some(first), Some(last)) = (days.first(), days.last()) else {
+        return Ok(None);
+    };
+    if known == 0 {
+        return Ok(None);
+    }
+    let (_, from, _) = parse_date(&first.date)?;
+    let (_, _, to) = parse_date(&last.date)?;
+    let mut st = conn
+        .prepare("SELECT start_ms, end_ms FROM codex_turns WHERE end_ms > ?1 AND start_ms < ?2")?;
+    let turns: Vec<(i64, i64)> = st
+        .query_map([from, to], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = Turns {
+        hours: vec![0; 24],
+        ..Default::default()
+    };
+    for d in days {
+        let (_, ds, de) = parse_date(&d.date)?;
+        let mut day_ms = 0;
+        for &(a, b) in &turns {
+            let (a, b) = (a.max(ds), b.min(de));
+            if b <= a {
+                continue;
+            }
+            day_ms += b - a;
+            // Hour by hour from the day's start (a day with a clock change is off by an hour).
+            let mut t = a;
+            while t < b {
+                let h = ((t - ds) / 3_600_000).clamp(0, 23) as usize;
+                let next = (ds + (h as i64 + 1) * 3_600_000).min(b).max(t + 1);
+                out.hours[h] += (next - t) / 1000;
+                t = next;
+            }
+        }
+        out.days.push(day_ms / 1000);
+        out.total += day_ms / 1000;
+    }
+    Ok(Some(out))
 }
 
 pub fn agent_report(
@@ -245,6 +305,11 @@ pub fn agent_report(
     projects.sort_by(by_time);
     let mut agents: Vec<AgentRow> = per_tool.into_values().collect();
     agents.sort_by(by_time);
+    let turns = if id == "codex" {
+        codex_turns(conn, &days)?
+    } else {
+        None
+    };
     Ok(AgentReport {
         id: id.to_string(),
         name: tool_name(cfg, id),
@@ -258,6 +323,7 @@ pub fn agent_report(
         days,
         projects,
         agents,
+        turns,
     })
 }
 
@@ -391,6 +457,38 @@ pub fn agent_day(conn: &Connection, cfg: &Config, id: &str, date: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_turns_are_split_by_day_and_hour() {
+        let dir = std::env::temp_dir().join(format!("at-turns-{}", std::process::id()));
+        let st = crate::store::Store::open(&dir.join("t.db")).unwrap();
+        let (_, d1, d1_end) = parse_date("2026-11-20").unwrap();
+        // 23:30 to 00:45 the next day, and 10:15 to 10:45 on the second day.
+        st.conn
+            .execute_batch(&format!(
+                "INSERT INTO codex_turns VALUES (1, {}, {});
+                 INSERT INTO codex_turns VALUES (1, {}, {});",
+                d1_end - 1_800_000,
+                d1_end + 2_700_000,
+                d1_end + 36_900_000,
+                d1_end + 38_700_000
+            ))
+            .unwrap();
+        let days: Vec<DayAgent> = ["2026-11-20", "2026-11-21"]
+            .iter()
+            .map(|d| DayAgent {
+                date: d.to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let t = codex_turns(&st.conn, &days).unwrap().unwrap();
+        assert_eq!(t.days, vec![1800, 2700 + 1800]);
+        assert_eq!(t.total, 6300);
+        assert_eq!((t.hours[23], t.hours[0], t.hours[10]), (1800, 2700, 1800));
+        assert!(d1 < d1_end);
+        drop(st);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use rusqlite::params;
 
     fn day(d: &str) -> i64 {

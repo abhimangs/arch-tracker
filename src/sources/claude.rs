@@ -353,6 +353,11 @@ pub(crate) fn paused_spans(conn: &Connection) -> Result<Vec<(i64, i64)>> {
 
 /// Transcript files under dir, without following symbolic links.
 pub(crate) fn list(dir: &Path, depth: usize, out: &mut Vec<Found>) {
+    list_with(dir, depth, out, false)
+}
+
+/// Like list, and with zst also logs compressed with zstd (name.jsonl.zst).
+pub(crate) fn list_with(dir: &Path, depth: usize, out: &mut Vec<Found>, zst: bool) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -360,10 +365,12 @@ pub(crate) fn list(dir: &Path, depth: usize, out: &mut Vec<Found>) {
         // DirEntry's type and metadata describe the link itself, never its target.
         let Ok(t) = e.file_type() else { continue };
         let path = e.path();
+        let wanted = path.extension().is_some_and(|x| x == "jsonl")
+            || (zst && path.as_os_str().as_bytes().ends_with(b".jsonl.zst"));
         if t.is_dir() && depth < MAX_DEPTH {
-            list(&path, depth + 1, out);
+            list_with(&path, depth + 1, out, zst);
         } else if t.is_file()
-            && path.extension().is_some_and(|x| x == "jsonl")
+            && wanted
             && let Ok(m) = e.metadata()
         {
             out.push(Found {

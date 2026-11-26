@@ -1542,15 +1542,24 @@
   }
 
   // Worked (the agent's colour) and watched (yours), side by side per hour or day.
-  function dualBars(worked, watched, labels) {
-    const max = Math.max(...worked, ...watched, 0);
+  // Bars per hour or day: the time it worked and the time you watched it, and with turns (Codex's
+  // own records) a third bar first.
+  function dualBars(worked, watched, labels, turns) {
+    const max = Math.max(...worked, ...watched, ...(turns || []), 0);
     if (!max) return '<p class="empty">Nothing in this period.</p>';
     const h = (v) => (v ? Math.max(2, (v / max) * 100).toFixed(1) : 0);
     return (
-      '<div class="dbars" aria-hidden="true">' +
-      worked.map((w, i) => '<span title="' + esc(labels[i]) + ": worked " + dur(w) + ", you " + dur(watched[i]) + '"><i class="w" style="--h:' + h(w) + '%"></i><i class="y" style="--h:' + h(watched[i]) + '%"></i></span>').join("") +
+      '<div class="dbars' + (turns ? " three" : "") + '" aria-hidden="true">' +
+      worked
+        .map(
+          (w, i) =>
+            '<span title="' + esc(labels[i]) + (turns ? ": its turns " + dur(turns[i]) + ", seen working " : ": worked ") + dur(w) + ", you " + dur(watched[i]) + '">' +
+            (turns ? '<i class="t" style="--h:' + h(turns[i]) + '%"></i>' : "") +
+            '<i class="w" style="--h:' + h(w) + '%"></i><i class="y" style="--h:' + h(watched[i]) + '%"></i></span>',
+        )
+        .join("") +
       '</div><div class="cbars-x"><span>' + esc(labels[0]) + "</span><span>top " + dur(max) + "</span><span>" + esc(labels[labels.length - 1]) + "</span></div>" +
-      '<div class="legend dlegend"><span><i class="key w"></i>It worked</span><span><i class="key y"></i>You watched</span></div>'
+      '<div class="legend dlegend">' + (turns ? '<span><i class="key t"></i>Its turns</span><span><i class="key w"></i>Seen working</span>' : '<span><i class="key w"></i>It worked</span>') + '<span><i class="key y"></i>You watched</span></div>'
     );
   }
 
@@ -1696,11 +1705,21 @@
     const y = window.scrollY;
     const hourLabels = [...Array(24).keys()].map((h) => hourLabel(pad(h) + ":00"));
     let days = r.days || [];
+    let turnDays = r.turns ? r.turns.days : null;
     if (n === "all") {
-      const first = days.findIndex((x) => x.busy + x.focus > 0);
+      const first = days.findIndex((x, i) => x.busy + x.focus + (turnDays ? turnDays[i] : 0) > 0);
       days = first >= 0 ? days.slice(first) : days.slice(-30);
+      if (turnDays) turnDays = first >= 0 ? turnDays.slice(first) : turnDays.slice(-30);
     }
-    const chart = n === "1" ? dualBars(r.busy_hours, r.focus_hours, hourLabels) : dualBars(days.map((x) => x.busy), days.map((x) => x.focus), days.map((x) => dayLabel(x.date, { day: "numeric", month: "short" })));
+    const chart =
+      n === "1"
+        ? dualBars(r.busy_hours, r.focus_hours, hourLabels, r.turns && r.turns.hours)
+        : dualBars(
+            days.map((x) => x.busy),
+            days.map((x) => x.focus),
+            days.map((x) => dayLabel(x.date, { day: "numeric", month: "short" })),
+            turnDays,
+          );
     const nProjects = new Set((r.projects || []).filter((p) => p.busy + p.focus > 0).map((p) => p.project)).size;
     let costFigs = "";
     let costLeft = "";
@@ -1713,8 +1732,9 @@
       const shortDate = (x) => dayLabel(x, { day: "numeric", month: "short", year: "numeric" });
       // Cost per hour of work counts only days with both: the logs reach back before the tracker
       // was installed (or saw the agent), and that cost has no work time to divide by.
-      const busyOn = new Map(days.map((x) => [x.date, x.busy]));
-      if (n === "1" && !busyOn.size) busyOn.set(to, r.busy);
+      // Codex's own turn times where it has them, else the time the tracker saw it working.
+      const busyOn = new Map(days.map((x, i) => [x.date, turnDays ? turnDays[i] : x.busy]));
+      if (n === "1" && !busyOn.size) busyOn.set(to, r.turns ? r.turns.total : r.busy);
       let paid = 0;
       let worked = 0;
       for (const x of cc.days || []) {
@@ -1731,8 +1751,7 @@
           : "<div><span>At API prices</span><b>" + money(cc.cost) + "</b></div>") +
         (cc.earlier ? "<div><span>With the estimate before " + esc(dayLabel(addDays(cc.earlier.until, 1), { day: "numeric", month: "short" })) + "</span><b>about " + money(cc.cost + cc.earlier.cost) + "</b></div>" : "") +
         (perHour ? '<div title="The cost on days the tracker saw it work, divided by that work"><span>Per hour of work</span><b>' + money(perHour) + "</b></div>" : "") +
-        "<div><span>Tokens</span><b>" + tokens(all) + "</b></div>" +
-        "<div><span>From the cache</span><b>" + (context ? Math.round((t.cache_read / context) * 100) : 0) + "%</b></div>";
+        "<div><span>Tokens, " + (context ? Math.round((t.cache_read / context) * 100) : 0) + "% from the cache</span><b>" + tokens(all) + "</b></div>";
       let bars;
       if (n === "1") bars = costBars(cc.hourly, hourLabels, "No requests today.");
       else {
@@ -1768,7 +1787,9 @@
         '<div id="alive"></div>' +
         (cc && cc.reading ? '<p class="note">Reading the history for the first time: the totals grow for a moment.</p>' : "") +
         '<div class="figures">' +
-        "<div><span>It worked</span><b>" + dur(r.busy) + "</b></div>" +
+        (r.turns
+          ? '<div title="From Codex\'s own record of its turns"><span>Its turns</span><b>' + dur(r.turns.total) + '</b></div><div title="What the tracker saw running"><span>Seen working</span><b>' + dur(r.busy) + "</b></div>"
+          : "<div><span>It worked</span><b>" + dur(r.busy) + "</b></div>") +
         "<div><span>You watched it</span><b>" + dur(r.focus) + "</b></div>" +
         (cc
           ? costFigs

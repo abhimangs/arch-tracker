@@ -11,7 +11,7 @@
 //!   64-bit hash, so each response counts once.
 
 use super::claude::{
-    Found, MAX_LINE, OneLine, contains, hash, list, open_read_only, paused_spans, read_capped,
+    Found, MAX_LINE, OneLine, contains, hash, list_with, open_read_only, paused_spans, read_capped,
 };
 use crate::daemon::SharedRef;
 use crate::sources::terminal::tools::Projects;
@@ -204,7 +204,7 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
     let paused = paused_spans(conn)?;
     let mut files: Vec<Found> = vec![];
     for r in roots {
-        list(r, 0, &mut files);
+        list_with(r, 0, &mut files, true);
     }
     files.sort_by_key(|f| std::cmp::Reverse(f.mtime_ns));
     type Known = (i64, i64, i64, State);
@@ -252,7 +252,9 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
             continue;
         }
         // A file that shrank was rewritten: read it again (each response still counts once).
-        let (start, state) = if (off0 as u64) <= f.size {
+        // A compressed (archived) log is read whole whenever it changes.
+        let zst = f.path.extension().is_some_and(|x| x == "zst");
+        let (start, state) = if !zst && (off0 as u64) <= f.size {
             (off0 as u64, state0)
         } else {
             (0, State::default())
@@ -262,7 +264,12 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
             pass.done = false;
             break;
         }
-        let got = match read_file(&f.path, start, left, state, &mut projects) {
+        let read = if zst {
+            read_zst(&f.path, f.size, state, &mut projects)
+        } else {
+            read_file(&f.path, start, left, state, &mut projects)
+        };
+        let got = match read {
             Ok(g) => g,
             Err(e) => {
                 tracing::debug!("codex: skipped a log: {e}");
@@ -644,6 +651,33 @@ fn read_file(
 ) -> io::Result<Got> {
     let mut r = BufReader::with_capacity(64 << 10, open_read_only(path)?);
     r.seek(SeekFrom::Start(start))?;
+    let key = path.as_os_str().as_bytes();
+    read_lines(&mut r, start, budget, state, key, projects, false)
+}
+
+/// An archived log, compressed with zstd: read whole, through a streaming decoder. Its offset is
+/// its compressed size, so an unchanged file is not read again.
+fn read_zst(path: &Path, size: u64, state: State, projects: &mut Projects) -> io::Result<Got> {
+    let dec = ruzstd::decoding::StreamingDecoder::new(open_read_only(path)?)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let mut r = BufReader::with_capacity(64 << 10, dec);
+    let key = path.as_os_str().as_bytes();
+    let mut got = read_lines(&mut r, 0, u64::MAX, state, key, projects, true)?;
+    got.end = size;
+    Ok(got)
+}
+
+/// Reads log lines from start on. complete: the log is finished, so a last line without a
+/// newline is whole (else it is still being written and waits for the next pass).
+fn read_lines<R: io::BufRead>(
+    r: &mut R,
+    start: u64,
+    budget: u64,
+    state: State,
+    file_key: &[u8],
+    projects: &mut Projects,
+    complete: bool,
+) -> io::Result<Got> {
     let mut out = Got {
         rows: vec![],
         limits: None,
@@ -653,7 +687,6 @@ fn read_file(
     };
     // Running counts (older Codex) are kept apart until it is clear the file has no records.
     let mut counted: Vec<Usage> = vec![];
-    let file_key = path.as_os_str().as_bytes().to_vec();
     let mut buf = Vec::new();
     loop {
         if out.end - start >= budget {
@@ -661,17 +694,17 @@ fn read_file(
             break;
         }
         buf.clear();
-        let (n, newline) = read_capped(&mut r, &mut buf, MAX_LINE)?;
+        let (n, newline) = read_capped(r, &mut buf, MAX_LINE)?;
         if n == 0 {
             break;
         }
-        if !newline {
+        if !newline && !(complete && buf.len() < MAX_LINE) {
             if buf.len() < MAX_LINE {
                 // Codex is still writing this line.
                 break;
             }
             // A very long line (a reply or tool output): never one of ours. Skip it.
-            let mut rest = OneLine::new(&mut r);
+            let mut rest = OneLine::new(r);
             rest.drain()?;
             if !rest.ended {
                 break;
@@ -693,7 +726,7 @@ fn read_file(
         let Ok(line) = serde_json::from_slice::<Line>(&buf) else {
             continue;
         };
-        line.apply(&mut out, &mut counted, &file_key, projects);
+        line.apply(&mut out, &mut counted, file_key, projects);
     }
     if out.state.mode == 0 && !counted.is_empty() {
         out.state.mode = 2;
@@ -977,6 +1010,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn archived_logs_compressed_with_zstd_are_read_once() {
+        let dir = tmp("zst");
+        let arch = dir.join("archived_sessions");
+        std::fs::create_dir_all(&arch).unwrap();
+        // The last line has no newline: an archived log is finished, so it counts.
+        let text = format!("{META}\n{TURN}\n{}", record("z1", 1000, 600, 40));
+        let packed = ruzstd::encoding::compress_to_vec(
+            text.as_bytes(),
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        std::fs::write(arch.join("rollout-z.jsonl.zst"), packed).unwrap();
+        let mut conn = db(&dir);
+        let roots = vec![dir.join("sessions"), arch];
+        let p = scan(&mut conn, &roots, BUDGET, 0).unwrap();
+        assert_eq!((p.files, p.responses), (1, 1));
+        assert_eq!(sums(&conn), (1, 1000, 600, 40));
+        let thread: i64 = conn
+            .query_row("SELECT thread FROM codex_usage", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(thread, thread_key("t-one"));
+        // Unchanged: not read again.
+        assert_eq!(scan(&mut conn, &roots, BUDGET, 0).unwrap().files, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Codex's own databases, as small as the reader needs them.
     fn codex_home(dir: &Path, threads: &[(&str, i64, &str, i64)], turns: &[(&str, i64, i64)]) {
         let s = Connection::open(dir.join("state_5.sqlite")).unwrap();
@@ -1105,6 +1164,21 @@ mod tests {
             scan_threads(&mut conn, &home(), 0).unwrap()
         );
         let to = crate::util::local_date(crate::util::now_ms());
+        let cfg = crate::config::Config::default();
+        let a = crate::report::agents::agent_report(
+            &conn,
+            &cfg,
+            "codex",
+            "2026-07-01",
+            &to,
+            crate::report::Cache::ReadWrite,
+        )
+        .unwrap();
+        println!(
+            "turns: {:?} s, seen working {} s",
+            a.turns.map(|t| t.total),
+            a.busy
+        );
         for from in ["2026-01-01", to.as_str()] {
             let r = crate::report::cost::codex(&conn, &Default::default(), from, &to).unwrap();
             println!(

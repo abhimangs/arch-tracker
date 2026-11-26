@@ -17,6 +17,13 @@ All notable changes to this project are documented here. The format follows
   promotional or other discounts): gpt-5.6 Luna, Terra and Sol, gpt-6 Astra, Sol and Luna,
   gpt-6.1 Terra and Sol, and gpt-6.2 Astra and Sol.
 
+### Added
+
+- Codex's page shows how long its turns ran, from Codex's own records (back to its first use,
+  runs inside VS Code included), beside the time the tracker saw it working, per day or hour.
+  Cost per hour of work uses the turns.
+- Archived Codex conversations, which Codex compresses (.jsonl.zst), are read too.
+
 ### Changed
 
 - The sidebar lists its pages first and the Browsers and Agents groups after them; the current page

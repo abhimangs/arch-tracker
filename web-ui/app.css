@@ -1063,6 +1063,8 @@ svg.bico.logo[data-agent="claude"] { color: #d97757; }
 .dbars > span { flex: 1 1 0; min-width: 0; height: 100%; display: flex; align-items: flex-end; gap: 1px; }
 .dbars i { flex: 1 1 0; min-width: 0; height: var(--h); border-radius: 2px 2px 0 0; }
 .dbars i.w, .key.w { background: var(--agent); }
+.dbars i.t, .key.t { background: color-mix(in oklab, var(--agent) 55%, var(--text)); }
+.dbars.three > span { gap: 1px; }
 .dbars i.y, .key.y { background: color-mix(in oklab, var(--mist) 60%, transparent); }
 .dlegend { margin-top: 12px; }
 .row .rh:has(.rb.y) { grid-template-areas: "n c d" "b b b" "y y y"; row-gap: 4px; }
