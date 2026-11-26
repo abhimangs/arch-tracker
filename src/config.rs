@@ -18,7 +18,59 @@ pub struct Config {
     pub projects: Projects,
     pub insights: Insights,
     pub notifications: Notifications,
+    pub browsers: Browsers,
     pub categories: Vec<Category>,
+}
+
+/// How browsers show in the dashboard's menu. Display only: history is never rewritten.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct Browsers {
+    /// Browsers left out of the menu, by app id.
+    pub hidden: Vec<String>,
+    /// Shorter names, as id=name.
+    pub names: Vec<String>,
+}
+
+impl Browsers {
+    /// The name chosen for a browser, if any.
+    pub fn name_for(&self, id: &str) -> Option<&str> {
+        self.names
+            .iter()
+            .filter_map(|l| l.split_once('='))
+            .find(|(k, _)| k.trim() == id)
+            .map(|(_, v)| v.trim())
+            .filter(|v| !v.is_empty())
+    }
+
+    pub fn is_hidden(&self, id: &str) -> bool {
+        self.hidden.iter().any(|h| h.trim() == id)
+    }
+
+    /// Trimmed, without blanks, repeats or names that rename nothing.
+    fn sanitized(self) -> Browsers {
+        let mut hidden: Vec<String> = vec![];
+        for h in self
+            .hidden
+            .iter()
+            .map(|h| h.trim())
+            .filter(|h| !h.is_empty())
+        {
+            if !hidden.iter().any(|x| x == h) {
+                hidden.push(h.to_string());
+            }
+        }
+        let mut names: Vec<String> = vec![];
+        for (k, v) in self.names.iter().filter_map(|l| l.split_once('=')) {
+            let (k, v) = (k.trim(), v.trim());
+            if k.is_empty() || v.is_empty() {
+                continue;
+            }
+            names.retain(|l| l.split_once('=').map(|x| x.0) != Some(k));
+            names.push(format!("{k}={v}"));
+        }
+        Browsers { hidden, names }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -753,6 +805,7 @@ impl Default for Config {
             projects: Projects::default(),
             insights: Insights::default(),
             notifications: Notifications::default(),
+            browsers: Browsers::default(),
             categories: default_categories(),
         }
     }
@@ -870,6 +923,7 @@ impl Config {
         if !matches!(self.privacy.exclude_mode.as_str(), "hide" | "drop") {
             self.privacy.exclude_mode = "hide".into();
         }
+        self.browsers = self.browsers.sanitized();
         self.general.week_start = self.general.week_start.trim().to_lowercase();
         if !matches!(self.general.week_start.as_str(), "monday" | "sunday") {
             self.general.week_start = "monday".into();

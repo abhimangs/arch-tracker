@@ -18,6 +18,7 @@ futures-util = { version = "0.3.34", default-features = false, features = ["std"
 jiff = "1.0.2"
 libc = "0.2.191"
 notify = { version = "9.0.0", default-features = false }
+psl = "2"
 regex-lite = "0.1.9"
 rusqlite = "0.43.0"
 rust-embed = "8.14.0"

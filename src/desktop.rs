@@ -12,6 +12,8 @@ pub struct Entry {
     /// Categories= lists TerminalEmulator / WebBrowser.
     pub terminal: bool,
     pub browser: bool,
+    /// Icon= (a theme icon name or an absolute path).
+    pub icon: String,
     /// The program Exec= starts (its first word), without the arguments.
     pub exec: String,
 }
@@ -200,6 +202,78 @@ fn resolve_program(prog: &str) -> Option<PathBuf> {
     Some(std::fs::canonicalize(&path).unwrap_or(path))
 }
 
+/// The file for an Icon= value: an absolute path as it is, else the theme icon in the
+/// user's theme, then hicolor (where apps install theirs), then the old pixmaps folder.
+/// SVG and PNG only (what a page can show), the smallest PNG of at least 48 px.
+pub fn icon_file(icon: &str) -> Option<PathBuf> {
+    let icon = icon.trim();
+    if icon.is_empty() || icon.contains("..") {
+        return None;
+    }
+    let shown = |p: &Path| {
+        p.is_file() && matches!(p.extension().and_then(|e| e.to_str()), Some("png" | "svg"))
+    };
+    if icon.starts_with('/') {
+        let p = PathBuf::from(icon);
+        return shown(&p).then_some(p);
+    }
+    if icon.contains('/') {
+        return None;
+    }
+    let mut bases = vec![crate::util::home().join(".icons")];
+    bases.extend(data_dirs().into_iter().map(|d| d.join("icons")));
+    let mut themes = vec![];
+    if let Some(t) = icon_theme() {
+        themes.push(t);
+    }
+    themes.extend(["hicolor".to_string(), "breeze".to_string()]);
+    themes.dedup();
+    const SIZES: [u32; 8] = [48, 64, 96, 128, 256, 512, 32, 24];
+    for theme in &themes {
+        for base in &bases {
+            let dir = base.join(theme);
+            if !dir.is_dir() {
+                continue;
+            }
+            // hicolor: scalable/apps/x.svg, 48x48/apps/x.png; Breeze: apps/48/x.svg.
+            let mut tries = vec![dir.join("scalable/apps").join(format!("{icon}.svg"))];
+            for n in SIZES {
+                tries.push(dir.join(format!("apps/{n}/{icon}.svg")));
+                tries.push(dir.join(format!("{n}x{n}/apps/{icon}.png")));
+                tries.push(dir.join(format!("{n}x{n}/apps/{icon}.svg")));
+            }
+            if let Some(p) = tries.into_iter().find(|p| shown(p)) {
+                return Some(p);
+            }
+        }
+    }
+    for d in data_dirs() {
+        for ext in ["svg", "png"] {
+            let p = d.join("pixmaps").join(format!("{icon}.{ext}"));
+            if shown(&p) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// The icon theme Plasma uses (kdeglobals [Icons] Theme=).
+fn icon_theme() -> Option<String> {
+    let text = std::fs::read_to_string(crate::util::home().join(".config/kdeglobals")).ok()?;
+    let mut in_icons = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_icons = line == "[Icons]";
+        } else if in_icons && let Some(v) = line.strip_prefix("Theme=") {
+            let v = v.trim();
+            return (!v.is_empty() && !v.contains('/')).then(|| v.to_string());
+        }
+    }
+    None
+}
+
 /// "com.notion.app.desktop.notion" -> "Notion", "brave-origin-beta" -> "Brave Origin Beta"
 pub fn pretty(id: &str) -> String {
     let last = if id.contains('.') {
@@ -224,7 +298,7 @@ fn parse_entry(path: &Path, id: &str) -> Option<Entry> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut in_main = false;
     let (mut name, mut wm) = (String::new(), String::new());
-    let mut exec = String::new();
+    let (mut icon, mut exec) = (String::new(), String::new());
     let (mut terminal, mut browser) = (false, false);
     let mut is_app = true;
     for line in text.lines() {
@@ -242,6 +316,7 @@ fn parse_entry(path: &Path, id: &str) -> Option<Entry> {
         match k.trim() {
             "Name" => name = v.trim().to_string(),
             "StartupWMClass" => wm = v.trim().to_string(),
+            "Icon" => icon = v.trim().to_string(),
             "Exec" => exec = exec_program(v),
             "Type" => is_app = v.trim() == "Application",
             "Categories" => {
@@ -265,6 +340,7 @@ fn parse_entry(path: &Path, id: &str) -> Option<Entry> {
         wm_class: wm,
         terminal,
         browser,
+        icon,
         exec,
     })
 }
@@ -307,6 +383,7 @@ mod tests {
             wm_class: String::new(),
             terminal: false,
             browser,
+            icon: String::new(),
             exec: exec.into(),
         }
     }

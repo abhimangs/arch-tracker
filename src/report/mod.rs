@@ -8,6 +8,7 @@
 //!   call      microphone open (and, inside a gap, the gap is < the call threshold)
 //!   active    everything else
 
+pub mod browsers;
 pub mod cost;
 
 use crate::config::{Category, Config};
@@ -96,6 +97,9 @@ pub struct Row {
     pub visible: i64,
     #[serde(default)]
     pub titles: Vec<TitleRow>,
+    /// For sites: the browsers the time was spent in, most first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub browsers: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -169,7 +173,13 @@ pub struct DayReport {
     pub stats: DayStats,
     /// Coding time per project: terminals, editors and agents.
     pub projects: Vec<ProjectRow>,
+    /// Each browser's day (the browser pages ask for these, not the day page).
+    #[serde(skip)]
+    pub browsers: Vec<browsers::BrowserDay>,
 }
+
+/// A session's detail in a private window.
+const PRIVATE_DETAIL: &str = "Private window";
 
 /// A stretch of focus on one thing (an app; a site in a browser; a program and project in a
 /// terminal; a project in an editor). Breaks shorter than insights.session_gap_secs don't end it.
@@ -191,6 +201,12 @@ pub struct Session {
     #[serde(flatten)]
     pub times: Times,
     pub counted: i64,
+    /// The browser it was in (any session in a browser, not only sites).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub browser: String,
+    /// In an installed web app of that browser.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub web_app: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -676,6 +692,15 @@ struct Acc {
     titles: HashMap<String, i64>,
     name: String,
     category: (String, String),
+    /// Seconds per browser (site rows).
+    browsers: HashMap<String, i64>,
+}
+
+/// Browser keys, the one with the most time first.
+fn by_time(m: HashMap<String, i64>) -> Vec<String> {
+    let mut v: Vec<(String, i64)> = m.into_iter().filter(|(_, s)| *s > 0).collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    v.into_iter().map(|(k, _)| k).collect()
 }
 
 fn rows(map: HashMap<String, Acc>, max_titles: usize) -> Vec<Row> {
@@ -699,6 +724,7 @@ fn rows(map: HashMap<String, Acc>, max_titles: usize) -> Vec<Row> {
                 times: a.times,
                 visible: a.visible,
                 titles,
+                browsers: by_time(a.browsers),
             }
         })
         .filter(|r| r.total > 0 || r.visible > 0)
@@ -709,15 +735,23 @@ fn rows(map: HashMap<String, Acc>, max_titles: usize) -> Vec<Row> {
 
 pub fn build_day(conn: &Connection, cfg: &Config, date: &str) -> Result<DayReport> {
     let (_, ds, de) = parse_date(date)?;
-    build(conn, cfg, date, ds, de)
+    build(conn, cfg, date, ds, de, &browsers::BrowserMap::load(conn)?)
 }
 
-fn build(conn: &Connection, cfg: &Config, date: &str, ds: i64, de: i64) -> Result<DayReport> {
+fn build(
+    conn: &Connection,
+    cfg: &Config,
+    date: &str,
+    ds: i64,
+    de: i64,
+    map: &browsers::BrowserMap,
+) -> Result<DayReport> {
     let rules = Rules::from(cfg);
     let spans = day_spans(conn, ds, de, rules.idle_ms.max(rules.call_ms))?;
     let ids: Vec<i64> = spans.iter().map(|s| s.subject).collect();
     let subjects = store::subjects_by_id(conn, &ids)?;
-    Ok(compute(cfg, date, ds, de, &spans, &subjects))
+    let tz = jiff::tz::TimeZone::system();
+    Ok(compute_in(cfg, date, ds, de, &spans, &subjects, map, &tz))
 }
 
 /// Every span that overlaps [ds, de), clipped to it, plus the no-input pieces up to pad beyond
@@ -766,6 +800,7 @@ fn day_spans(conn: &Connection, ds: i64, de: i64, pad: i64) -> Result<Vec<Span>>
     Ok(out)
 }
 
+#[cfg(test)]
 pub fn compute(
     cfg: &Config,
     date: &str,
@@ -775,9 +810,11 @@ pub fn compute(
     subjects: &HashMap<i64, Subject>,
 ) -> DayReport {
     let tz = jiff::tz::TimeZone::system();
-    compute_in(cfg, date, ds, de, spans, subjects, &tz)
+    let map = browsers::BrowserMap::from_subjects(subjects.values());
+    compute_in(cfg, date, ds, de, spans, subjects, &map, &tz)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_in(
     cfg: &Config,
     date: &str,
@@ -785,6 +822,7 @@ fn compute_in(
     de: i64,
     spans: &[Span],
     subjects: &HashMap<i64, Subject>,
+    bmap: &browsers::BrowserMap,
     tz: &jiff::tz::TimeZone,
 ) -> DayReport {
     let rules = Rules::from(cfg);
@@ -816,7 +854,19 @@ fn compute_in(
         .map(|h| ((h.start_ms - ds) / 1000) as usize)
         .collect();
     let hour_of = |i: usize| hour_secs.partition_point(|&s| s <= i).saturating_sub(1);
+    // Hour of the local day (0-23) of each hour mark: a DST day repeats or skips one.
+    let hod: Vec<usize> = hours
+        .iter()
+        .map(|h| {
+            h.label
+                .get(..2)
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(0usize)
+                .min(23)
+        })
+        .collect();
     let mut hourly = vec![Times::default(); hours.len().max(1)];
+    let mut browsers: HashMap<String, browsers::BrowserAcc> = HashMap::new();
     // timeline: per bucket, counted seconds per subject and state counts
     let nb = n.div_ceil(BUCKET_SECS);
     let mut bucket_subj: Vec<HashMap<i64, i64>> = vec![HashMap::new(); nb];
@@ -834,18 +884,22 @@ fn compute_in(
         match s.kind {
             Kind::Focus => {
                 let mut t = Times::default();
+                let mut span_hours = [0i64; 24];
                 for (i, st) in state.iter().enumerate().take(b).skip(a) {
                     focus_cover[i] = true;
                     t.add(*st, 1);
                     match st {
                         State::Idle => totals.idle_removed += 1,
                         State::Active | State::Passive | State::Call => {
-                            hourly[hour_of(i)].add(*st, 1);
+                            let h = hour_of(i);
+                            hourly[h].add(*st, 1);
+                            span_hours[hod.get(h).copied().unwrap_or(0)] += 1;
                             *bucket_subj[i / BUCKET_SECS].entry(s.subject).or_default() += 1;
                         }
                         _ => {}
                     }
                 }
+                let browser = bmap.of(subj);
                 totals.times.merge(&t);
                 let cat = cat_of(cats, subj);
                 let title = if subj.private {
@@ -875,6 +929,16 @@ fn compute_in(
                     site.category = cat.clone();
                     site.times.merge(&t);
                     *site.titles.entry(title.clone()).or_default() += t.total();
+                    if let Some((key, _)) = &browser {
+                        *site.browsers.entry(key.clone()).or_default() += t.total();
+                    }
+                }
+                if let Some((key, web_app)) = &browser {
+                    browsers
+                        .entry(key.clone())
+                        .or_default()
+                        .named(|| bmap.name(key))
+                        .focus(subj, *web_app, &t, &span_hours, &cat);
                 }
                 let c = categories.entry(cat.0.clone()).or_default();
                 c.name = cat.0.clone();
@@ -921,6 +985,13 @@ fn compute_in(
                     }
                     site.visible += v;
                 }
+                if let Some((key, _)) = bmap.of(subj) {
+                    browsers
+                        .entry(key.clone())
+                        .or_default()
+                        .named(|| bmap.name(&key))
+                        .visible(subj, v, || cat_of(cats, subj));
+                }
             }
             Kind::BgAudio => {
                 let secs = state[a..b]
@@ -934,6 +1005,13 @@ fn compute_in(
                     subj.host.clone()
                 };
                 *bg.entry((subj.app_name.clone(), detail)).or_default() += secs;
+                if let Some((key, _)) = bmap.of(subj) {
+                    browsers
+                        .entry(key.clone())
+                        .or_default()
+                        .named(|| bmap.name(&key))
+                        .audio(subj, secs);
+                }
             }
             Kind::AgentBusy => {
                 let secs = (b - a) as i64;
@@ -1016,7 +1094,14 @@ fn compute_in(
         })
         .collect();
 
-    let (sessions, stats) = sessions_and_stats(cfg, ds, spans, subjects, &state, &hourly, &hours);
+    let (sessions, stats) =
+        sessions_and_stats(cfg, ds, spans, subjects, &state, &hourly, &hours, bmap);
+    let mut browsers: Vec<browsers::BrowserDay> = browsers
+        .into_iter()
+        .map(|(k, a)| a.finish(k, 20))
+        .filter(|b| b.total > 0 || b.visible > 0 || b.background_audio > 0)
+        .collect();
+    browsers.sort_by(|a, b| b.total.cmp(&a.total).then_with(|| a.key.cmp(&b.key)));
     let projects = projects_of(cfg, ds, spans, subjects, &state);
 
     let mut agents: Vec<AgentRow> = agents.into_values().collect();
@@ -1054,6 +1139,7 @@ fn compute_in(
         sessions,
         stats,
         projects,
+        browsers,
     }
 }
 
@@ -1081,6 +1167,7 @@ fn counted_in(state: &[State], ds: i64, s: &Span) -> (Times, Option<(i64, i64)>)
     (t, edges)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sessions_and_stats(
     cfg: &Config,
     ds: i64,
@@ -1089,6 +1176,7 @@ fn sessions_and_stats(
     state: &[State],
     hourly: &[Times],
     hours: &[Hour],
+    bmap: &browsers::BrowserMap,
 ) -> (Vec<Session>, DayStats) {
     let rules = ProjectRules::new(&cfg.projects);
     let known = known_projects(&rules, spans, subjects);
@@ -1125,7 +1213,7 @@ fn sessions_and_stats(
             "app"
         };
         let detail = if subj.private {
-            "Private window".to_string()
+            PRIVATE_DETAIL.to_string()
         } else if !subj.host.is_empty() {
             subj.host.clone()
         } else {
@@ -1139,6 +1227,7 @@ fn sessions_and_stats(
         });
         if !same {
             let (category, color) = cat_of(&cfg.categories, subj);
+            let (browser, web_app) = bmap.of(subj).unwrap_or_default();
             out.push(Session {
                 start_ms: start,
                 end_ms: end,
@@ -1149,6 +1238,8 @@ fn sessions_and_stats(
                 project,
                 category,
                 color,
+                browser,
+                web_app,
                 ..Default::default()
             });
             titles.push(HashMap::new());
@@ -1423,6 +1514,11 @@ fn merge_rows(into: &mut HashMap<String, Row>, rows: &[Row]) {
                 None => e.titles.push(t.clone()),
             }
         }
+        for b in &r.browsers {
+            if !e.browsers.contains(b) {
+                e.browsers.push(b.clone());
+            }
+        }
     }
 }
 
@@ -1448,6 +1544,8 @@ struct DayRollup {
     agents: Vec<AgentRow>,
     #[serde(default)]
     projects: Vec<ProjectRow>,
+    #[serde(default)]
+    browsers: Vec<browsers::BrowserDay>,
 }
 
 impl DayRollup {
@@ -1466,6 +1564,16 @@ impl DayRollup {
             programs: trim(r.programs, 5),
             agents: r.agents,
             projects: r.projects,
+            browsers: r
+                .browsers
+                .into_iter()
+                .map(|mut b| {
+                    for s in &mut b.sites {
+                        s.titles.truncate(10);
+                    }
+                    b
+                })
+                .collect(),
         }
     }
 }
@@ -1489,14 +1597,6 @@ pub fn range(
     to: &str,
     cache: Cache,
 ) -> Result<RangeReport> {
-    let (mut d, _, _) = parse_date(from)?;
-    let (end, _, _) = parse_date(to)?;
-    if end < d {
-        return Err(BadRequest("'to' must not be before 'from'".into()).into());
-    }
-    if d.until(end)?.get_days() >= MAX_RANGE_DAYS {
-        return Err(BadRequest(format!("a range can be at most {MAX_RANGE_DAYS} days")).into());
-    }
     let mut out = RangeReport {
         from: from.into(),
         to: to.into(),
@@ -1511,17 +1611,8 @@ pub fn range(
     );
     let mut agents: HashMap<(String, String), AgentRow> = HashMap::new();
     let mut projects: HashMap<String, ProjectRow> = HashMap::new();
-    let hash = settings_hash(cfg);
-    // A no-input gap that started before midnight is judged with the part after it, so a day
-    // is final once the longest threshold (and a flush) has passed.
-    let pad = cfg.idle.threshold_secs.max(cfg.idle.call_threshold_secs) as i64 * 1000;
-    let now = crate::util::now_ms();
-    let mut fresh: Vec<(String, String)> = Vec::new();
-    while d <= end {
-        let date = d.to_string();
-        let (_, ds, de) = parse_date(&date)?;
-        let finished = now > de.saturating_add(pad + 10 * 60_000);
-        let r = day_rollup(conn, cfg, &date, (ds, de), &hash, finished, &mut fresh)?;
+    let map = browsers::BrowserMap::load(conn)?;
+    each_day(conn, cfg, &map, from, to, cache, |date, r| {
         out.totals.times.merge(&r.totals.times);
         out.totals.screen += r.totals.screen;
         out.totals.idle_removed += r.totals.idle_removed;
@@ -1546,20 +1637,13 @@ pub fn range(
         }
         merge_projects(&mut projects, &r.projects);
         out.days.push(DaySummary {
-            date,
+            date: date.to_string(),
             totals: r.totals,
             categories: r.categories,
             coding: r.projects.iter().map(|p| p.total).sum(),
             projects: r.projects,
         });
-        d = d.tomorrow()?;
-    }
-    if cache == Cache::ReadWrite
-        && !fresh.is_empty()
-        && let Err(e) = store_rollups(conn, &hash, &fresh)
-    {
-        tracing::debug!("could not store day rollups: {e:#}");
-    }
+    })?;
     out.apps = finish(apps, 10);
     out.sites = finish(sites, 10);
     out.categories = finish(cats, 0);
@@ -1573,11 +1657,55 @@ pub fn range(
     Ok(out)
 }
 
+/// Calls f with each day of an inclusive range and its rollup: the cached one once the day is
+/// over, computed otherwise. Rollups computed for finished days are stored (unless read-only).
+fn each_day(
+    conn: &Connection,
+    cfg: &Config,
+    map: &browsers::BrowserMap,
+    from: &str,
+    to: &str,
+    cache: Cache,
+    mut f: impl FnMut(&str, DayRollup),
+) -> Result<()> {
+    let (mut d, _, _) = parse_date(from)?;
+    let (end, _, _) = parse_date(to)?;
+    if end < d {
+        return Err(BadRequest("'to' must not be before 'from'".into()).into());
+    }
+    if d.until(end)?.get_days() >= MAX_RANGE_DAYS {
+        return Err(BadRequest(format!("a range can be at most {MAX_RANGE_DAYS} days")).into());
+    }
+    let hash = settings_hash(cfg);
+    // A no-input gap that started before midnight is judged with the part after it, so a day
+    // is final once the longest threshold (and a flush) has passed.
+    let pad = cfg.idle.threshold_secs.max(cfg.idle.call_threshold_secs) as i64 * 1000;
+    let now = crate::util::now_ms();
+    let mut fresh: Vec<(String, String)> = Vec::new();
+    while d <= end {
+        let date = d.to_string();
+        let (_, ds, de) = parse_date(&date)?;
+        let finished = now > de.saturating_add(pad + 10 * 60_000);
+        let r = day_rollup(conn, cfg, map, &date, (ds, de), &hash, finished, &mut fresh)?;
+        f(&date, r);
+        d = d.tomorrow()?;
+    }
+    if cache == Cache::ReadWrite
+        && !fresh.is_empty()
+        && let Err(e) = store_rollups(conn, &hash, &fresh)
+    {
+        tracing::debug!("could not store day rollups: {e:#}");
+    }
+    Ok(())
+}
+
 /// One day of a range: nothing for a day without spans, the cached rollup for a finished day,
 /// computed otherwise (finished days are queued in fresh for the cache).
+#[allow(clippy::too_many_arguments)]
 fn day_rollup(
     conn: &Connection,
     cfg: &Config,
+    map: &browsers::BrowserMap,
     date: &str,
     (ds, de): (i64, i64),
     hash: &str,
@@ -1601,7 +1729,7 @@ fn day_rollup(
             return Ok(r);
         }
     }
-    let r = DayRollup::from_report(build(conn, cfg, date, ds, de)?);
+    let r = DayRollup::from_report(build(conn, cfg, date, ds, de, map)?);
     if finished {
         fresh.push((date.to_string(), serde_json::to_string(&r)?));
     }
@@ -1628,7 +1756,7 @@ fn store_rollups(conn: &Connection, hash: &str, rows: &[(String, String)]) -> Re
 }
 
 /// Bump when DayRollup or the classification changes shape.
-const ROLLUP_SCHEMA: u32 = 4;
+const ROLLUP_SCHEMA: u32 = 5;
 
 /// Hash of everything that changes how a day is classified (for the rollup cache). The app
 /// version is part of it: a new release may count differently, so it starts a fresh cache.
@@ -2013,15 +2141,23 @@ mod tests {
         insert(c, Kind::Focus, 1, H, 2 * H);
         insert(c, Kind::InputIdle, 0, H - 2 * M, H);
         insert(c, Kind::InputIdle, 0, H, H + 3 * M);
-        let one = build(c, &cfg, "one", DS, DS + H).unwrap();
+        let one = build(c, &cfg, "one", DS, DS + H, &Default::default()).unwrap();
         assert_eq!(one.totals.idle_removed, 2 * 60);
         assert_eq!(one.totals.screen, 3600 - 2 * 60);
-        let two = build(c, &cfg, "two", DS + H, DS + 2 * H).unwrap();
+        let two = build(c, &cfg, "two", DS + H, DS + 2 * H, &Default::default()).unwrap();
         assert_eq!(two.totals.idle_removed, 3 * 60);
         // A span that started before the day (not split) still counts inside it.
         insert(c, Kind::Focus, 1, 2 * H, 3 * H);
         insert(c, Kind::Locked, 0, 2 * H - M, 2 * H + 10 * M);
-        let three = build(c, &cfg, "three", DS + 2 * H, DS + 3 * H).unwrap();
+        let three = build(
+            c,
+            &cfg,
+            "three",
+            DS + 2 * H,
+            DS + 3 * H,
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(three.totals.screen, 3600 - 10 * 60);
     }
 
@@ -2200,7 +2336,16 @@ mod tests {
             start: three,
             end: three + H,
         }];
-        let r = compute_in(&Config::default(), "x", ds, de, &spans, &subjects, &tz);
+        let r = compute_in(
+            &Config::default(),
+            "x",
+            ds,
+            de,
+            &spans,
+            &subjects,
+            &Default::default(),
+            &tz,
+        );
         assert_eq!(r.hourly.len(), 23);
         assert_eq!(r.hours[2].label, "03:00");
         assert_eq!(r.hourly[2].active, 3600);

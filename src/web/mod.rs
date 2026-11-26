@@ -41,6 +41,9 @@ pub struct Web {
     current: Mutex<Option<(u16, oneshot::Sender<()>)>>,
     /// Why the configured port could not be served, if it couldn't.
     error: Mutex<Option<String>>,
+    /// App id -> its icon file (None: none found), and when that was looked up.
+    icons:
+        Mutex<std::collections::HashMap<String, (std::time::Instant, Option<std::path::PathBuf>)>>,
 }
 
 #[derive(Clone)]
@@ -64,6 +67,7 @@ impl Web {
             viewer,
             current: Mutex::new(None),
             error: Mutex::new(None),
+            icons: Mutex::new(Default::default()),
         }))
     }
 
@@ -138,6 +142,10 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/live", get(api_live))
         .route("/api/day", get(api_day))
         .route("/api/range", get(api_range))
+        .route("/api/browsers", get(api_browsers))
+        .route("/api/browser", get(api_browser))
+        .route("/api/browser/day", get(api_browser_day))
+        .route("/api/icon/{app}", get(api_icon))
         .route("/api/claude", get(api_claude))
         .route("/api/settings", get(api_settings).put(api_settings_put))
         .route("/api/appearance", axum::routing::put(api_appearance))
@@ -583,6 +591,132 @@ async fn api_range(State(ctx): State<Ctx>, Params(q): Params<RangeQ>) -> Respons
         report::Cache::ReadWrite
     };
     blocking(move || report::range(&db(&path, viewer)?, &cfg, &q.from, &q.to, cache)).await
+}
+
+fn cache_mode(viewer: bool) -> report::Cache {
+    if viewer {
+        report::Cache::ReadOnly
+    } else {
+        report::Cache::ReadWrite
+    }
+}
+
+/// Browsers for the menu: linked or with site history, most used first.
+async fn api_browsers(State(ctx): State<Ctx>) -> Response {
+    let cfg = ctx.web.config();
+    let path = ctx.web.db.clone();
+    let viewer = ctx.web.viewer;
+    let today = util::local_date(util::now_ms());
+    blocking(move || {
+        report::browsers::browser_list(&db(&path, viewer)?, &cfg, &today, cache_mode(viewer))
+    })
+    .await
+}
+
+/// An app's icon from the icon theme (the browsers' menu shows them). Only the icon its
+/// desktop entry names is served, never an arbitrary file.
+async fn api_icon(State(ctx): State<Ctx>, Path(app): Path<String>) -> Response {
+    let ok = !app.is_empty()
+        && app.len() <= 200
+        && app
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+    if !ok {
+        return err(StatusCode::BAD_REQUEST, "not an app id");
+    }
+    const RECHECK: std::time::Duration = std::time::Duration::from_secs(600);
+    let known = ctx.web.icons.lock().ok().and_then(|m| {
+        m.get(&app)
+            .filter(|(at, p)| p.is_some() || at.elapsed() < RECHECK)
+            .map(|(_, p)| p.clone())
+    });
+    let path = match known {
+        Some(p) => p,
+        None => {
+            let id = app.clone();
+            let found = tokio::task::spawn_blocking(move || {
+                let idx = crate::desktop::DesktopIndex::load();
+                let named = idx
+                    .by_id(&id)
+                    .or_else(|| idx.by_wmclass(&id))
+                    .map(|e| e.icon.clone())
+                    .filter(|i| !i.is_empty());
+                named
+                    .and_then(|i| crate::desktop::icon_file(&i))
+                    .or_else(|| crate::desktop::icon_file(&id))
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Ok(mut m) = ctx.web.icons.lock() {
+                m.insert(app, (std::time::Instant::now(), found.clone()));
+            }
+            found
+        }
+    };
+    let Some(path) = path else {
+        return err(StatusCode::NOT_FOUND, "no icon");
+    };
+    let svg = path.extension().is_some_and(|e| e == "svg");
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) if b.len() <= 2 << 20 => b,
+        _ => return err(StatusCode::NOT_FOUND, "no icon"),
+    };
+    let mut res = (
+        [
+            (
+                header::CONTENT_TYPE,
+                if svg { "image/svg+xml" } else { "image/png" },
+            ),
+            (header::CACHE_CONTROL, "private, max-age=86400"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        bytes,
+    )
+        .into_response();
+    // An SVG opened on its own would run in the dashboard's origin: let it do nothing.
+    res.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
+    );
+    res
+}
+
+#[derive(Deserialize)]
+struct BrowserQ {
+    id: String,
+    from: String,
+    to: String,
+}
+
+/// One browser (or "all") over a range of days.
+async fn api_browser(State(ctx): State<Ctx>, Params(q): Params<BrowserQ>) -> Response {
+    let cfg = ctx.web.config();
+    let path = ctx.web.db.clone();
+    let viewer = ctx.web.viewer;
+    blocking(move || {
+        let conn = db(&path, viewer)?;
+        report::browsers::browser_report(&conn, &cfg, &q.id, &q.from, &q.to, cache_mode(viewer))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct BrowserDayQ {
+    id: String,
+    date: Option<String>,
+}
+
+/// One browser's (or every browser's) visits on a day.
+async fn api_browser_day(State(ctx): State<Ctx>, Params(q): Params<BrowserDayQ>) -> Response {
+    let cfg = ctx.web.config();
+    let date = q.date.unwrap_or_else(|| util::local_date(util::now_ms()));
+    if let Err(e) = report::parse_date(&date) {
+        return err_field(StatusCode::BAD_REQUEST, format!("{e:#}"), "date");
+    }
+    let path = ctx.web.db.clone();
+    let viewer = ctx.web.viewer;
+    blocking(move || report::browsers::browser_day(&db(&path, viewer)?, &cfg, &q.id, &date)).await
 }
 
 /// What Claude Code's tokens in a range would cost at API prices (totals only).
