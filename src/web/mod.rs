@@ -151,6 +151,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/icon/{app}", get(api_icon))
         .route("/api/claude", get(api_claude))
         .route("/api/codex", get(api_codex))
+        .route("/api/hermes", get(api_hermes))
         .route("/api/settings", get(api_settings).put(api_settings_put))
         .route("/api/appearance", axum::routing::put(api_appearance))
         .route("/api/rule", post(api_rule))
@@ -795,6 +796,13 @@ async fn api_codex(State(ctx): State<Ctx>, Params(q): Params<RangeQ>) -> Respons
     let path = ctx.web.db.clone();
     let viewer = ctx.web.viewer;
     blocking(move || report::cost::codex(&db(&path, viewer)?, &cfg, &q.from, &q.to)).await
+}
+
+async fn api_hermes(State(ctx): State<Ctx>, Params(q): Params<RangeQ>) -> Response {
+    let cfg = ctx.web.config();
+    let path = ctx.web.db.clone();
+    let viewer = ctx.web.viewer;
+    blocking(move || report::cost::hermes(&db(&path, viewer)?, &cfg, &q.from, &q.to)).await
 }
 
 async fn api_settings(State(ctx): State<Ctx>) -> Response {

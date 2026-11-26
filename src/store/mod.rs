@@ -102,6 +102,10 @@ impl Store {
             "DELETE FROM codex_threads WHERE updated_ms < ?1",
             params![before_ms],
         )?;
+        tx.execute(
+            "DELETE FROM hermes_usage WHERE end_ms < ?1",
+            params![before_ms],
+        )?;
         if n > 0 {
             let orphans: Vec<i64> = {
                 let mut st = tx.prepare(
@@ -325,6 +329,13 @@ fn migrate(conn: &Connection) -> Result<()> {
             key INTEGER PRIMARY KEY, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL,
             model TEXT NOT NULL, project TEXT NOT NULL, tokens INTEGER NOT NULL,
             turn_ms INTEGER NOT NULL);
+         -- Hermes Agent's token use per session and model (key: a hash of the database, session,
+         -- model and route), and when that use began and last changed.
+         CREATE TABLE IF NOT EXISTS hermes_usage(
+            key INTEGER PRIMARY KEY, start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL,
+            model TEXT NOT NULL, project TEXT NOT NULL, calls INTEGER NOT NULL,
+            input INTEGER NOT NULL, cached INTEGER NOT NULL, cache_write INTEGER NOT NULL,
+            output INTEGER NOT NULL, reasoning INTEGER NOT NULL);
          -- When their turns ran (none from while tracking was paused).
          CREATE TABLE IF NOT EXISTS codex_turns(
             thread INTEGER NOT NULL, start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL,

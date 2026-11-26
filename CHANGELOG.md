@@ -23,6 +23,10 @@ All notable changes to this project are documented here. The format follows
   runs inside VS Code included), beside the time the tracker saw it working, per day or hour.
   Cost per hour of work uses the turns.
 - Archived Codex conversations, which Codex compresses (.jsonl.zst), are read too.
+- Hermes Agent at list prices: its token counts per session and model are read from its own
+  database (~/.hermes/state.db and each profile's, read-only; prompts and replies are never read)
+  and priced on its page. Models named through a router ("anthropic/claude-…") are priced as the
+  model. Settings → AI agents switches it off.
 
 ### Changed
 

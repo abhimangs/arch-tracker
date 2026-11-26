@@ -1774,7 +1774,9 @@
             )
           : "");
       foot =
-        costKind === "codex"
+        costKind === "hermes"
+          ? "Counted from Hermes Agent's own database in ~/.hermes, only read, never changed; prompts and replies are not kept. Hermes counts tokens per session and model, so each count is spread over the time it was used. Built-in list prices of " + esc(shortDate(cc.prices_as_of)) + " cover Claude and OpenAI models."
+          : costKind === "codex"
           ? "Counted from Codex's own logs in ~/.codex, only read, never changed; prompts and replies are not kept. OpenAI's list prices of " + esc(shortDate(cc.prices_as_of)) + " are built in: the standard tier, without batch, promotional or other discounts, and the long-context rate for prompts over 272K tokens." +
             (cc.estimated && cc.estimated.tokens
               ? " Codex has removed the logs of " + plural(cc.estimated.conversations, "older conversation") + "; their " + tokens(cc.estimated.tokens) + " tokens come from the totals Codex keeps for each conversation, split like your logged responses and spread over the conversation's turns, so that part is an estimate."
@@ -2181,6 +2183,7 @@
         ${field("Known agents", "One per line: id | name | names to match", `<textarea id="tools" class="code">${esc(tools)}</textarea>`)}
         ${field("Claude Code cost", "Reads token counts from Claude Code's own logs in ~/.claude, read-only, and prices them at Anthropic's API rates on the Claude Code page. Prompts and replies are never kept.", check("ccost", c.agents.claude_cost !== false, "Show what Claude Code would cost"))}
         ${field("Codex cost", "Reads token counts and plan limits from Codex's own logs in ~/.codex, read-only, and prices them at OpenAI's list prices on the Codex page. Prompts and replies are never kept.", check("xcost", c.agents.codex_cost !== false, "Show what Codex would cost"))}
+        ${field("Hermes cost", "Reads token counts from Hermes Agent's own database in ~/.hermes, read-only, and prices them at list prices on the Hermes page. Prompts and replies are never kept.", check("hcost", c.agents.hermes_cost !== false, "Show what Hermes would cost"))}
       `)}
       ${sec("privacy", "Privacy", `
         ${field("Never record these apps", "One per line, by name or app id.", `<textarea id="xapps">${esc(lines(c.privacy.exclude_apps))}</textarea>`)}
@@ -2369,6 +2372,7 @@
       next.agents.busy_write_bytes = n("awrite");
       next.agents.claude_cost = $("ccost").checked;
       next.agents.codex_cost = $("xcost").checked;
+      next.agents.hermes_cost = $("hcost").checked;
       next.agents.tools = $("tools")
         .value.split("\n")
         .map((l) => l.split("|").map((x) => x.trim()))

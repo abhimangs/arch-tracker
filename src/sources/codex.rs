@@ -413,9 +413,10 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Opens one of Codex's databases without changing it: read-only, and while Codex is not using
-/// it (no write-ahead log next to it) as immutable, so not even a lock or index file is made.
-fn open_codex_db(path: &Path) -> rusqlite::Result<Connection> {
+/// Opens another program's database (Codex's, Hermes's) without changing it: read-only, and
+/// while that program is not using it (no write-ahead log beside it) as immutable, so not even a
+/// lock or index file is made.
+pub(crate) fn open_foreign_db(path: &Path) -> rusqlite::Result<Connection> {
     let mut uri = String::from("file:");
     for &b in path.as_os_str().as_bytes() {
         if b.is_ascii_alphanumeric() || b"/._-~".contains(&b) {
@@ -507,7 +508,7 @@ pub fn scan_threads(conn: &mut Connection, home: &Path, keep_from: i64) -> Resul
     // (key, created, updated, model, project, tokens)
     let mut threads: Vec<(i64, i64, i64, String, String, i64)> = vec![];
     {
-        let src = open_codex_db(&state)?;
+        let src = open_foreign_db(&state)?;
         let cols = columns(&src, "threads")?;
         if !["id", "created_at", "updated_at", "cwd", "tokens_used"]
             .iter()
@@ -561,7 +562,7 @@ pub fn scan_threads(conn: &mut Connection, home: &Path, keep_from: i64) -> Resul
     let mut turns: Vec<(i64, i64, i64)> = vec![];
     let mut turn_ms: HashMap<i64, i64> = HashMap::new();
     if let Some(h) = &history
-        && let Ok(src) = open_codex_db(h)
+        && let Ok(src) = open_foreign_db(h)
         && let Ok(cols) = columns(&src, "thread_turns")
         && ["thread_id", "started_at", "completed_at", "duration_ms"]
             .iter()

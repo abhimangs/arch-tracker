@@ -172,6 +172,9 @@ pub struct Agents {
     /// Read Codex's token counts and plan limits from its own session logs (read-only) and show
     /// what they would cost at OpenAI's API prices.
     pub codex_cost: bool,
+    /// Read Hermes Agent's token counts from its own database (read-only) and show what they
+    /// would cost at list prices.
+    pub hermes_cost: bool,
     /// Your own prices, in USD per million tokens, for models the built-in table lacks or prices
     /// that changed: [agents.prices."claude-new-model"] input = 3.0, output = 15.0.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -516,6 +519,7 @@ impl Default for Agents {
             ],
             claude_cost: true,
             codex_cost: true,
+            hermes_cost: true,
             prices: Default::default(),
         }
     }

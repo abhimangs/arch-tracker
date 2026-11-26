@@ -141,6 +141,7 @@ pub fn agent_list(
         let cost = match id {
             "claude" if cfg.agents.claude_cost => Some("claude"),
             "codex" if cfg.agents.codex_cost => Some("codex"),
+            "hermes" if cfg.agents.hermes_cost => Some("hermes"),
             _ => None,
         };
         out.push(AgentEntry {

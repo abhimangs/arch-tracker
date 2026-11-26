@@ -120,7 +120,9 @@ const PER_SEARCH: f64 = 0.01;
 /// "us.anthropic.claude-opus-4-5-20251101-v1:0" and "claude-opus-4-5@20251101" -> "claude-opus-4-5-…".
 fn base_name(model: &str) -> String {
     let m = model.trim().to_lowercase();
-    let m = m.find("claude-").map(|i| &m[i..]).unwrap_or(&m);
+    // A router's "provider/model" (Hermes, OpenRouter) is priced as the model.
+    let m = m.rsplit('/').next().unwrap_or(&m);
+    let m = m.find("claude-").map(|i| &m[i..]).unwrap_or(m);
     let m = m.split(['@', ':']).next().unwrap_or(m);
     m.to_string()
 }
@@ -168,8 +170,10 @@ pub struct Tokens4 {
     pub web_search: u64,
     pub fast: bool,
     pub us_only: bool,
-    /// The sum of many responses (an estimate): never priced at the long-context rate.
+    /// The sum of many responses: never priced at the long-context rate.
     pub many: bool,
+    /// Estimated (Codex use whose logs are gone), not counted.
+    pub estimate: bool,
 }
 
 /// What one reply cost, in USD.
@@ -574,6 +578,7 @@ pub fn claude(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<C
                 fast: r.get(9)?,
                 us_only: r.get(10)?,
                 many: false,
+                estimate: false,
             },
         ))
     })?;
@@ -617,6 +622,7 @@ pub fn codex(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<Co
                 fast: r.get(7)?,
                 us_only: false,
                 many: false,
+                estimate: false,
             },
             1,
         ))
@@ -675,9 +681,81 @@ impl Mix {
             cache_5m,
             output: n.saturating_sub(input + cache_read + cache_5m),
             many: true,
+            estimate: true,
             ..Default::default()
         }
     }
+}
+
+/// What Hermes Agent's tokens would cost at list prices. Hermes counts tokens per session and
+/// model, so each count is spread over the time from its first to its last use, hour by hour.
+pub fn hermes(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<CostReport> {
+    let (ds, de_from, de, one_day) = range_bounds(from, to)?;
+    let mut out = CostReport {
+        from: from.into(),
+        to: to.into(),
+        prices_as_of: PRICES_AS_OF,
+        ..Default::default()
+    };
+    if !has_table(conn, "hermes_usage") {
+        return Ok(out);
+    }
+    const HOUR: i64 = 3_600_000;
+    let mut st = conn.prepare(
+        "SELECT model, project, start_ms, end_ms, calls, input, cached, cache_write, output
+         FROM hermes_usage WHERE end_ms >= ?1 AND start_ms < ?2",
+    )?;
+    let found = st.query_map([ds, de], |r| {
+        let n = |i: usize| r.get::<_, i64>(i).map(|v| v.max(0) as u64);
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
+            [n(4)?, n(5)?, n(6)?, n(7)?, n(8)?],
+        ))
+    })?;
+    let mut rows: Vec<Row> = vec![];
+    for f in found {
+        let (model, project, a, b, [calls, input, cached, write, output]) = f?;
+        let span = b - a;
+        let mut parts: Vec<(i64, f64)> = vec![];
+        if span <= 0 {
+            parts.push((a, 1.0));
+        } else {
+            let mut t = a;
+            while t < b {
+                let next = (ds + ((t - ds).div_euclid(HOUR) + 1) * HOUR).min(b);
+                parts.push((t, (next - t) as f64 / span as f64));
+                t = next;
+            }
+        }
+        let mut calls_left = calls;
+        for (at, share) in parts {
+            if at < ds || at >= de {
+                continue;
+            }
+            let part = |n: u64| (n as f64 * share).round() as u64;
+            let t = Tokens4 {
+                input: part(input),
+                output: part(output),
+                cache_5m: part(write),
+                cache_read: part(cached),
+                many: true,
+                ..Default::default()
+            };
+            rows.push((model.clone(), project.clone(), at, t, calls_left));
+            calls_left = 0;
+        }
+    }
+    rows.sort_by_key(|r| r.2);
+    aggregate(
+        &mut out,
+        cfg,
+        rows.into_iter().map(Ok),
+        (ds, de_from, de, one_day),
+    )?;
+    Ok(out)
 }
 
 /// Codex's conversations hold more tokens than the responses read from its logs when it has
@@ -806,7 +884,7 @@ fn aggregate(
         out.cost += c;
         out.cost_by.add(&parts);
         out.requests += n;
-        if n == 0 {
+        if t.estimate {
             let e = out.estimated.get_or_insert_default();
             e.cost += c;
             e.tokens += t.input + t.output + t.cache_5m + t.cache_1h + t.cache_read;
@@ -925,6 +1003,31 @@ mod tests {
             0.2 + 10.0 + 0.01
         ));
         assert!(price_for("gpt-unknown", &none).is_none());
+    }
+
+    #[test]
+    fn hermes_use_is_priced_by_model_and_spread_over_its_hours() {
+        let dir = std::env::temp_dir().join(format!("at-hermescost-{}", std::process::id()));
+        let st = crate::store::Store::open(&dir.join("t.db")).unwrap();
+        let ds = crate::util::date_bounds("2026-11-20").unwrap().0;
+        let h = 3_600_000;
+        // 10:30 to 12:30, through a router's "provider/model" name: 1M prompt, 100K reply.
+        st.conn
+            .execute(
+                "INSERT INTO hermes_usage VALUES (1, ?1, ?2, 'anthropic/claude-opus-5-5', '', 7,
+                     1000000, 0, 0, 100000, 0)",
+                [ds + 10 * h + h / 2, ds + 12 * h + h / 2],
+            )
+            .unwrap();
+        let r = hermes(&st.conn, &Default::default(), "2026-11-20", "2026-11-20").unwrap();
+        assert!(r.unpriced.is_empty(), "{:?}", r.unpriced);
+        assert_eq!(r.requests, 7);
+        assert!(r.estimated.is_none());
+        // Opus 5.5: $4 in, $20 out; the long-context rate never applies to a session's sum.
+        assert!(near(r.cost, 4.0 + 2.0), "{}", r.cost);
+        assert!(near(r.hourly[10], 1.5) && near(r.hourly[11], 3.0) && near(r.hourly[12], 1.5));
+        drop(st);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

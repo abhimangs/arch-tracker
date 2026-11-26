@@ -142,6 +142,7 @@ async fn run_async() -> Result<()> {
     }
     crate::sources::claude::spawn(shared.clone(), util::db_path());
     crate::sources::codex::spawn(shared.clone(), util::db_path());
+    crate::sources::hermes::spawn(shared.clone(), util::db_path());
     let _watcher = match watch_config(tx.clone()) {
         Ok(w) => Some(w),
         Err(e) => {
