@@ -266,9 +266,13 @@
     } else if (r.visible && r.total < r.visible) {
       detail = `${dur(r.visible)} beside other windows`;
     }
+    // Sites say which browsers their time came from, once there is more than one.
+    const tags = (prefix === "site" || prefix === "tsite") && (r.browsers || []).length && knownBrowsers().length > 1
+      ? `<span class="btags" title="${esc(r.browsers.map(browserName).join(", "))}">${r.browsers.map((b) => browserIcon(b, "mini")).join("")}</span>`
+      : "";
     return `<li class="row" data-id="${esc(id)}" data-open="${open}">
       <button class="rh" type="button" ${titles.length ? `aria-expanded="${open}"` : ""}>
-        <span class="rn"><i class="sw" style="--c:${c}"></i><span>${esc(name)}</span>${detail ? `<em>${esc(detail)}</em>` : ""}</span>
+        <span class="rn"><i class="sw" style="--c:${c}"></i><span>${esc(name)}</span>${tags}${detail ? `<em>${esc(detail)}</em>` : ""}</span>
         <span class="rc">${esc(r.category)}</span>
         <span class="rd">${dur(r.total)}</span>
         <span class="rb" aria-hidden="true"><i style="--w:${w(r.active)};--c:${c}"></i><i class="p" style="--w:${w(r.passive)};--c:${c}"></i><i class="k" style="--w:${w(r.call)};--c:${c}"></i></span>
@@ -591,7 +595,7 @@
     const ext = src.browser_extension || [];
     const browsers = ext.length || src.plasma_browser_integration
       ? `<ul class="list">${ext
-          .map((e) => `<li><span class="n">${esc(e.name || "Browser")}<em>${plural(e.windows, "window")}, ${plural(e.tabs, "tab")}</em></span><span class="v"><span class="pill" data-on="${e.alive}">${e.alive ? "Extension connected" : "Extension silent"}</span></span></li>`)
+          .map((e) => `<li><span class="n">${e.app ? `<a href="${browserHash(e.app, "1")}">${esc(e.name || "Browser")}</a>` : esc(e.name || "Browser")}<em>${plural(e.windows, "window")}, ${plural(e.tabs, "tab")}</em></span><span class="v"><span class="pill" data-on="${e.alive}">${e.alive ? "Extension connected" : "Extension silent"}</span></span></li>`)
           .join("")}${src.plasma_browser_integration && !ext.some((e) => e.alive) ? `<li><span class="n">Plasma Browser Integration<em>${plural(src.plasma_browser_integration.tabs, "tab")}</em></span><span class="v">used without the extension</span></li>` : ""}</ul>`
       : '<p class="empty">No browser extension is connected.</p>';
     const running = (s.running || []).length
@@ -788,6 +792,7 @@
   let tlFilter = "all";
   let tlQuery = "";
   let tlShort = false; // sessions under 10 s are hidden unless asked for
+  let tlBrowser = ""; // only this browser's sessions, when set
   const SHORT_SECS = 10;
   const TL_FILTERS = [
     ["all", "All"],
@@ -797,6 +802,7 @@
   ];
   function tlMatch(s) {
     if (!tlShort && s.counted < SHORT_SECS) return false;
+    if (tlBrowser && s.browser !== tlBrowser) return false;
     if (tlFilter === "app" && s.kind !== "app") return false;
     if (tlFilter === "site" && s.kind !== "site") return false;
     if (tlFilter === "code" && s.kind !== "terminal" && s.kind !== "editor") return false;
@@ -813,7 +819,7 @@
     const line = [s.detail, s.project ? `project ${s.project}` : "", s.title].filter(Boolean).join(", ");
     return `<button type="button" class="sess" data-id="${esc(id)}" aria-expanded="${open}" style="--c:${c}">
         <span class="t">${clockMs(s.start_ms)} <span class="to">to</span> ${clockMs(s.end_ms)}</span>
-        <span class="w"><b>${esc(s.app_name)}</b>${line ? `<span>${esc(line)}</span>` : ""}</span>
+        <span class="w"><b>${s.browser ? browserIcon(s.browser, "mini") : ""}${esc(s.app_name)}</b>${line ? `<span>${esc(line)}</span>` : ""}</span>
         <span class="d">${dur(s.counted)}</span>
         <span class="mix" aria-hidden="true"><i style="--w:${w(s.active)};--c:${c}"></i><i class="p" style="--w:${w(s.passive)};--c:${c}"></i><i class="k" style="--w:${w(s.call)};--c:${c}"></i></span>
       </button>
@@ -860,6 +866,8 @@
     if (stale(gen) || currentDay !== date) return;
     tlDay = d;
     learnCats(d.categories);
+    const dayBrowsers = [...new Set((d.sessions || []).map((s) => s.browser).filter(Boolean))];
+    if (!dayBrowsers.includes(tlBrowser)) tlBrowser = "";
     const st = d.stats || {};
     const y = window.scrollY;
     const keep = focusKey();
@@ -874,7 +882,8 @@
       </div>
       <div class="tl-tools">
         <div class="chips" role="group" aria-label="Show">${TL_FILTERS.map(([v, l]) => `<button type="button" class="chip" data-tl="${v}" aria-pressed="${tlFilter === v}">${l}</button>`).join("")}
-          <button type="button" class="chip" id="tlshort" aria-pressed="${tlShort}">Short ones</button></div>
+          <button type="button" class="chip" id="tlshort" aria-pressed="${tlShort}">Short ones</button>
+          ${dayBrowsers.map((b) => `<button type="button" class="chip bchip" data-tlb="${esc(b)}" aria-pressed="${tlBrowser === b}" title="Only ${esc(browserName(b))}">${browserIcon(b, "mini")}${esc(browserName(b))}</button>`).join("")}</div>
         <input type="search" id="tlq" placeholder="Search apps, sites, titles" value="${esc(tlQuery)}" aria-label="Search sessions">
       </div>
       <p class="sub">Each row is a stretch on one app, site or project, timed to the millisecond. Breaks under ${dur(prefs().insights.session_gap_secs || 60)} don't split a session. <span id="tlnote"></span></p>
@@ -886,6 +895,13 @@
       b.addEventListener("click", () => {
         tlFilter = b.dataset.tl;
         view.querySelectorAll("[data-tl]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+        document.getElementById("tl").innerHTML = tlListHtml(tlDay);
+      }),
+    );
+    view.querySelectorAll("[data-tlb]").forEach((b) =>
+      b.addEventListener("click", () => {
+        tlBrowser = tlBrowser === b.dataset.tlb ? "" : b.dataset.tlb;
+        view.querySelectorAll("[data-tlb]").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.tlb === tlBrowser)));
         document.getElementById("tl").innerHTML = tlListHtml(tlDay);
       }),
     );
@@ -903,6 +919,504 @@
       clearInterval(refreshTimer);
       refreshTimer = setInterval(refreshToday, 60000);
     }
+  }
+
+  // ---------- browsers ----------
+
+  // Every browser the extension connected from or that has site history (from /api/browsers),
+  // most used first; the sidebar lists them under Browsers.
+  let browserList = [];
+  const browserById = new Map();
+  const ALL_ID = "all";
+  const UNKNOWN_ID = "unknown";
+  const GROUP_NAME = { browser: "Browser pages", local: "Local", unknown: "Tab not known", private: "Private windows" };
+  const ICON_ALL =
+    '<svg class="ico %c" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="3"/><path d="M3.5 9.5h17"/><circle cx="6.6" cy="7.25" r=".5"/><circle cx="8.7" cy="7.25" r=".5"/></svg>';
+  const ICON_GLOBE =
+    '<svg class="ico %c" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.6 2.4 3.9 5.2 3.9 8.5s-1.3 6.1-3.9 8.5c-2.6-2.4-3.9-5.2-3.9-8.5S9.4 5.9 12 3.5z"/></svg>';
+  const noIcon = new Set();
+  function browserName(id) {
+    if (id === ALL_ID) return "All browsers";
+    const b = browserById.get(id);
+    return b ? b.name : id === UNKNOWN_ID ? "Unknown browser" : id;
+  }
+  // The browser's own icon (from the icon theme); its first letter when it has none.
+  function browserIcon(id, cls = "") {
+    if (id === ALL_ID) return ICON_ALL.replace("%c", cls);
+    if (id === UNKNOWN_ID) return ICON_GLOBE.replace("%c", cls);
+    const letter = esc((browserName(id).match(/[a-z0-9]/i) || ["?"])[0].toUpperCase());
+    if (noIcon.has(id)) return '<span class="bico letter ' + cls + '" aria-hidden="true">' + letter + "</span>";
+    return '<img class="bico ' + cls + '" src="/api/icon/' + encodeURIComponent(id) + '" alt="" decoding="async" data-bid="' + esc(id) + '" data-letter="' + letter + '">';
+  }
+  document.addEventListener(
+    "error",
+    (e) => {
+      const img = e.target;
+      if (!(img instanceof HTMLImageElement) || !img.classList.contains("bico")) return;
+      noIcon.add(img.dataset.bid);
+      const s = document.createElement("span");
+      s.className = img.className + " letter";
+      s.setAttribute("aria-hidden", "true");
+      s.textContent = img.dataset.letter || "?";
+      img.replaceWith(s);
+    },
+    true,
+  );
+  const knownBrowsers = () => browserList.filter((b) => b.id !== UNKNOWN_ID);
+  const browserHash = (id, n, date) => "#/browser/" + encodeURIComponent(id) + "/" + (n || "1") + (date && date !== today() ? "/" + date : "");
+
+  async function loadBrowsers() {
+    const first = !browserList.length;
+    try {
+      browserList = await get("/api/browsers");
+    } catch {
+      return;
+    }
+    browserById.clear();
+    for (const b of browserList) browserById.set(b.id, b);
+    renderBrowserNav();
+    // Pages drawn before the list arrived show browser names and icons once it is here.
+    if (first && browserList.length && ["today", "apps", "trends", "timeline"].includes(currentPage)) route(true);
+  }
+
+  function connectedBrowsers() {
+    const ext = (status && status.sources && status.sources.browser_extension) || [];
+    return new Set(ext.filter((e) => e.alive && e.app).map((e) => e.app));
+  }
+
+  // The sidebar's Browsers group: All browsers first, then each browser with today's time and a
+  // dot that is lit while its extension is connected.
+  const navBrowsers = document.getElementById("navbrowsers");
+  const navBHead = document.getElementById("navbhead");
+  const navBList = document.getElementById("navblist");
+  function setBrowsersOpen(open) {
+    navBHead.setAttribute("aria-expanded", String(open));
+    navBList.hidden = !open;
+    localStorage.setItem("rail-browsers", open ? "" : "closed");
+    requestAnimationFrame(moveGlide);
+  }
+  navBHead.addEventListener("click", () => setBrowsersOpen(navBHead.getAttribute("aria-expanded") !== "true"));
+  if (localStorage.getItem("rail-browsers") === "closed") {
+    navBHead.setAttribute("aria-expanded", "false");
+    navBList.hidden = true;
+  }
+  let navKey = "";
+  function renderBrowserNav() {
+    const shown = browserList.filter((b) => !b.hidden);
+    const on = connectedBrowsers();
+    const key = JSON.stringify([shown.map((b) => [b.id, b.name, b.today, b.linked]), [...on]]);
+    if (key === navKey) return;
+    navKey = key;
+    navBrowsers.hidden = !shown.length;
+    const link = (id, name, secs, dot) =>
+      '<a href="' + browserHash(id, "1") + '" data-route="browser:' + esc(id) + '" title="' + esc(name) + '"><span class="bwrap">' + browserIcon(id) + dot + "</span><span>" + esc(name) + "</span>" +
+      (secs ? '<em class="bt">' + dur(secs) + "</em>" : "") + "</a>";
+    const dot = (b) => (b.linked || on.has(b.id) ? '<i class="bdot" data-on="' + on.has(b.id) + '" title="' + (on.has(b.id) ? "Extension connected" : "Extension not connected") + '"></i>' : "");
+    const total = shown.reduce((a, b) => a + b.today, 0);
+    navBList.innerHTML = link(ALL_ID, "All browsers", total, "") + shown.map((b) => link(b.id, b.name, b.today, dot(b))).join("");
+    markNav();
+    requestAnimationFrame(moveGlide);
+  }
+
+  // ---------- a browser's page ----------
+
+  let bState = null; // { id, n, date, r, d }
+  let bView = "order"; // visits in order (the log) or by site
+  let bShort = false;
+  let bQuery = "";
+  let bAllSites = false;
+
+  const titlesHtml = (list) => {
+    const t = (list || []).filter((x) => x.title);
+    return t.length ? '<ul class="titles">' + t.map((x) => "<li><span>" + esc(x.title) + "</span><span>" + dur(x.secs) + "</span></li>").join("") + "</ul>" : "";
+  };
+  // When in the day a site was used: 24 bars, one per hour.
+  function hoursStrip(hours, c) {
+    const max = Math.max(...(hours || []), 0);
+    if (!max) return "";
+    return (
+      '<span class="hstrip" aria-hidden="true" style="--c:' + c + '">' +
+      hours.map((v, i) => "<i" + (v ? ' style="--h:' + Math.max(14, (v / max) * 100).toFixed(0) + '%"' : ' class="z"') + ' title="' + esc(hourLabel(pad(i) + ":00")) + ": " + dur(v) + '"></i>').join("") +
+      "</span>"
+    );
+  }
+  function treeRow(o) {
+    const open = openRows.has(o.id);
+    const w = (x) => ((x / o.top) * 100).toFixed(2) + "%";
+    const vis = o.visible && o.total < o.visible ? dur(o.visible) + " beside other windows" : "";
+    const note = [o.detail, vis].filter(Boolean).join(", ");
+    return (
+      '<li class="row" data-id="' + esc(o.id) + '" data-open="' + open + '"><button class="rh" type="button" ' + (o.inner ? 'aria-expanded="' + open + '"' : "") + ">" +
+      '<span class="rn"><i class="sw" style="--c:' + o.c + '"></i><span>' + esc(o.name) + "</span>" + (o.tags || "") + (note ? "<em>" + esc(note) + "</em>" : "") + "</span>" +
+      '<span class="rc">' + (o.strip || "") + "<span>" + esc(o.cat || "") + "</span></span>" +
+      '<span class="rd">' + dur(o.total) + "</span>" +
+      '<span class="rb" aria-hidden="true"><i style="--w:' + w(o.active) + ";--c:" + o.c + '"></i><i class="p" style="--w:' + w(o.passive) + ";--c:" + o.c + '"></i><i class="k" style="--w:' + w(o.call) + ";--c:" + o.c + '"></i></span>' +
+      "</button>" + (o.rule || "") + (o.inner ? '<div class="rx"><div>' + o.inner + "</div></div>" : "") + "</li>"
+    );
+  }
+  const groupKey = (group, domain, host) => (group === "site" ? "d:" + (domain || host) : "g:" + group);
+  const groupName = (group, domain, host) => (group === "site" ? domain || host : GROUP_NAME[group] || group);
+  // Sites by domain (youtube.com holds music.youtube.com and www.youtube.com); the browser's own
+  // pages, local servers and unnamed tabs in groups of their own.
+  function siteGroups(sites) {
+    const groups = new Map();
+    for (const s of sites || []) {
+      if (!(s.total > 0 || s.visible > 0)) continue;
+      const g = s.group || "site";
+      const k = groupKey(g, s.domain, s.host);
+      if (!groups.has(k)) groups.set(k, { key: k, group: g, name: groupName(g, s.domain, s.host), total: 0, visible: 0, active: 0, passive: 0, call: 0, app_secs: 0, hours: new Array(24).fill(0), hosts: [], cats: new Map() });
+      const x = groups.get(k);
+      x.total += s.total;
+      x.visible += s.visible;
+      x.active += s.active;
+      x.passive += s.passive;
+      x.call += s.call;
+      x.app_secs += s.app_secs || 0;
+      (s.hours || []).forEach((v, i) => (x.hours[i] += v));
+      x.hosts.push(s);
+      const c = s.category + "\u001f" + s.color;
+      x.cats.set(c, (x.cats.get(c) || 0) + s.total + s.visible / 1000);
+    }
+    return [...groups.values()]
+      .map((x) => {
+        const [category, color] = [...x.cats.entries()].sort((a, b) => b[1] - a[1])[0][0].split("\u001f");
+        return { ...x, category, color };
+      })
+      .sort((a, b) => b.total - a.total || b.visible - a.visible || a.name.localeCompare(b.name));
+  }
+  const appTag = (secs) => (secs ? '<em class="tag">installed app</em>' : "");
+  function sitesTreeHtml(sites, bid) {
+    const groups = siteGroups(sites);
+    if (!groups.length) return '<p class="empty">No browsing in this period.</p>';
+    const max = bAllSites ? groups.length : 40;
+    const top = Math.max(...groups.map((g) => g.total), 1);
+    const rows = groups.slice(0, max).map((g) => {
+      const c = safeColor(g.color, g.category);
+      const rule = g.group === "site" && canRule(g.name) ? ruleButton("site", g.name, g.name, g.category) : "";
+      const one = g.hosts.length === 1 ? g.hosts[0] : null;
+      let inner;
+      let detail = "";
+      if (one) {
+        if (one.host && one.host !== g.name) detail = one.host;
+        inner = titlesHtml(one.titles);
+      } else {
+        detail = plural(g.hosts.length, g.group === "site" ? "subdomain" : "page");
+        const subTop = Math.max(...g.hosts.map((h) => h.total), 1);
+        inner =
+          '<ol class="rows sub">' +
+          g.hosts
+            .map((h) => {
+              const hc = safeColor(h.color, h.category);
+              return treeRow({
+                id: "bhost:" + bid + ":" + h.host, name: h.host || GROUP_NAME.unknown, tags: appTag(h.app_secs), c: hc, cat: h.category, total: h.total, visible: h.visible,
+                active: h.active, passive: h.passive, call: h.call, top: subTop, strip: hoursStrip(h.hours, hc), inner: titlesHtml(h.titles),
+                rule: h.host && g.group !== "unknown" && canRule(h.host) ? ruleButton("site", h.host, h.host, h.category) : "",
+              });
+            })
+            .join("") +
+          "</ol>";
+      }
+      return treeRow({ id: "bsite:" + bid + ":" + g.key, name: g.name, detail, tags: appTag(g.app_secs), c, cat: g.category, total: g.total, visible: g.visible, active: g.active, passive: g.passive, call: g.call, top, strip: hoursStrip(g.hours, c), inner, rule });
+    });
+    const rest = groups.length - max;
+    return '<ol class="rows">' + rows.join("") + "</ol>" + (rest > 0 ? '<p class="more"><button type="button" class="btn ghost" id="ballsites">Show all ' + groups.length + " sites</button></p>" : "");
+  }
+  function timeBars(values, labels) {
+    const max = Math.max(...values, 0);
+    if (!max) return '<p class="empty">Nothing in this period.</p>';
+    return (
+      '<div class="cbars tbars" aria-hidden="true">' + values.map((v, i) => '<i style="--h:' + (v ? Math.max(2, (v / max) * 100).toFixed(1) : 0) + '%" title="' + esc(labels[i]) + ": " + dur(v) + '"></i>').join("") +
+      '</div><div class="cbars-x"><span>' + esc(labels[0]) + "</span><span>top " + dur(max) + "</span><span>" + esc(labels[labels.length - 1]) + "</span></div>"
+    );
+  }
+  function sharesHtml(list, n) {
+    list = (list || []).filter((b) => b.total > 0 || b.visible > 0);
+    if (!list.length) return '<p class="empty">No browsing in this period.</p>';
+    const top = Math.max(...list.map((b) => b.total), 1);
+    const sum = list.reduce((a, b) => a + b.total, 0) || 1;
+    return (
+      '<ol class="rows">' +
+      list
+        .map(
+          (b) =>
+            '<li class="row"><a class="rh" href="' + browserHash(b.id, n) + '"><span class="rn">' + browserIcon(b.id) + "<span>" + esc(b.name) + "</span>" + (b.visible > b.total ? "<em>" + dur(b.visible) + " beside other windows</em>" : "") +
+            '</span><span class="rc">' + Math.round((b.total / sum) * 100) + '%</span><span class="rd">' + dur(b.total) + '</span><span class="rb" aria-hidden="true"><i style="--w:' + ((b.total / top) * 100).toFixed(2) + '%;--c:var(--shu)"></i></span></a></li>',
+        )
+        .join("") +
+      "</ol>"
+    );
+  }
+  function whenLabel(ms) {
+    const d = ymd(new Date(ms));
+    return d === today() ? "at " + hm(ms) : dayLabel(d, { day: "numeric", month: "short" }) + ", " + hm(ms);
+  }
+  // Live: is its extension connected, how much is open, and the tab in front of you.
+  function browserLiveHtml(id) {
+    const s = status;
+    if (id === UNKNOWN_ID) return '<p class="sub">Time that older versions of arch-tracker could not tie to a browser, mostly background audio. Nothing new is filed here.</p>';
+    if (s && s.viewer) return "";
+    const ext = ((s && s.sources && s.sources.browser_extension) || []).filter((e) => e.app && (id === ALL_ID || e.app === id));
+    const alive = ext.filter((e) => e.alive);
+    const b = browserById.get(id);
+    const ids = id === ALL_ID ? new Set(browserList.map((x) => x.id)) : new Set([id]);
+    const f = s && s.focus;
+    const parts = [];
+    parts.push(alive.length ? '<span class="pill" data-on="true">Extension connected</span>' : '<span class="pill">' + (ext.length ? "Extension silent" : "Extension not connected") + "</span>");
+    if (alive.length) {
+      const wins = alive.reduce((a, e) => a + (e.windows || 0), 0);
+      const tabs = alive.reduce((a, e) => a + (e.tabs || 0), 0);
+      parts.push("<span>" + plural(wins, "window") + " and " + plural(tabs, "tab") + " open" + (id === ALL_ID && alive.length > 1 ? " in " + plural(alive.length, "browser") : "") + "</span>");
+    } else if (b && b.last_ms) parts.push("<span>Last connected " + esc(whenLabel(b.last_ms)) + "</span>");
+    if (f && ids.has(f.app)) {
+      const what = f.private ? "a private window" : f.host || f.app_name;
+      parts.push('<span class="now-on">Now on <b>' + esc(what) + "</b>" + (f.title && !f.private ? " <em>" + esc(f.title) + "</em>" : "") + ' <span class="clock" data-since="' + s.focus_since_ms + '"></span></span>');
+    }
+    return '<div class="blive">' + parts.join("") + "</div>";
+  }
+  function renderBrowserLive() {
+    const el = document.getElementById("blive");
+    if (!el || !bState) return;
+    const html = browserLiveHtml(bState.id);
+    if (el._h !== html) {
+      el._h = html;
+      el.innerHTML = html;
+      startTicker();
+    }
+  }
+
+  // What came before or after a visit, in words.
+  function neighborText(x, from) {
+    let t;
+    if (x.kind === "site") t = x.detail === "Private window" ? "a private window" : x.detail;
+    else if (x.kind === "terminal") t = x.app_name + " (" + x.detail + (x.project ? " in " + projName(x.project) : "") + ")";
+    else t = x.project ? x.app_name + " (" + projName(x.project) + ")" : x.app_name;
+    if (x.browser && x.browser !== from) t += " in " + browserName(x.browser);
+    return t;
+  }
+  function ctxHtml(v, gapMs) {
+    const b = v.before;
+    const a = v.after;
+    const before = b ? "from " + esc(neighborText(b, v.browser)) + (b.gap_ms > gapMs ? ", after " + dur(b.gap_ms / 1000) + " away" : "") : "first of the day";
+    const after = a ? "then " + esc(neighborText(a, v.browser)) + (a.gap_ms > gapMs ? ", " + dur(a.gap_ms / 1000) + " later" : "") : "last of the day";
+    return before + " → " + after;
+  }
+  const neighborFull = (x, from) => neighborText(x, from) + (x.title && x.kind !== "terminal" ? ": " + x.title : "");
+  function visitMatch(v) {
+    if (!bShort && v.counted < SHORT_SECS) return false;
+    if (!bQuery) return true;
+    const q = bQuery.toLowerCase();
+    const around = [v.before, v.after].filter(Boolean).flatMap((x) => [x.app_name, x.detail, x.title, x.project]);
+    return [v.host, v.domain, v.title, v.category, browserName(v.browser), ...around].some((x) => String(x || "").toLowerCase().includes(q));
+  }
+  const visitName = (v) => (v.private ? "Private window" : v.host || GROUP_NAME.unknown);
+  function visitHtml(v, gapMs) {
+    const id = "visit:" + v.browser + ":" + v.start_ms;
+    const open = openRows.has(id);
+    const c = safeColor(v.color, v.category);
+    const tot = Math.max(1, v.counted);
+    const w = (x) => ((x / tot) * 100).toFixed(2) + "%";
+    const all = bState.id === ALL_ID;
+    const where = [v.web_app ? "installed app" : "", all ? browserName(v.browser) : ""].filter(Boolean).join(", ");
+    const side = (x, word) => (x ? esc(neighborFull(x, v.browser)) + (x.gap_ms ? ", " + durExact(x.gap_ms) + " " + word : word === "earlier" ? ", right before" : ", right after") : word === "earlier" ? "Nothing earlier today" : "Nothing later today");
+    return (
+      '<button type="button" class="sess visit" data-id="' + esc(id) + '" aria-expanded="' + open + '" style="--c:' + c + '">' +
+      '<span class="t">' + clockMs(v.start_ms) + ' <span class="to">to</span> ' + clockMs(v.end_ms) + "</span>" +
+      '<span class="w"><b>' + (all ? browserIcon(v.browser, "mini") : "") + esc(visitName(v)) + (where ? " <em>" + esc(where) + "</em>" : "") + "</b>" + (v.title ? "<span>" + esc(v.title) + "</span>" : "") + '<span class="ctx">' + ctxHtml(v, gapMs) + "</span></span>" +
+      '<span class="d">' + dur(v.counted) + "</span>" +
+      '<span class="mix" aria-hidden="true"><i style="--w:' + w(v.active) + ";--c:" + c + '"></i><i class="p" style="--w:' + w(v.passive) + ";--c:" + c + '"></i><i class="k" style="--w:' + w(v.call) + ";--c:" + c + '"></i></span>' +
+      '</button><div class="sess-x"><div><dl class="facts">' +
+      "<dt>Started</dt><dd>" + clockMs(v.start_ms) + "</dd><dt>Ended</dt><dd>" + clockMs(v.end_ms) + "</dd>" +
+      "<dt>From first to last</dt><dd>" + durExact(v.end_ms - v.start_ms) + "</dd>" +
+      "<dt>Counted</dt><dd>" + dur(v.counted) + ": active " + dur(v.active) + ", watching " + dur(v.passive) + ", calls " + dur(v.call) + "</dd>" +
+      "<dt>Site</dt><dd>" + esc(groupName(v.private ? "private" : v.group, v.domain, v.host)) + "</dd>" +
+      "<dt>Category</dt><dd>" + esc(v.category || "Other") + "</dd>" +
+      (all ? "<dt>Browser</dt><dd>" + esc(browserName(v.browser)) + "</dd>" : "") +
+      "<dt>Before</dt><dd>" + side(v.before, "earlier") + "</dd><dt>After</dt><dd>" + side(v.after, "later") + "</dd>" +
+      "</dl></div></div>"
+    );
+  }
+  function visitsListHtml() {
+    const d = bState.d;
+    const all = d.visits || [];
+    const list = all.filter(visitMatch);
+    const short = all.filter((v) => v.counted < SHORT_SECS).length;
+    const note = document.getElementById("bnote");
+    if (note) note.textContent = !bShort && short ? short + " visits under " + SHORT_SECS + " seconds are hidden." : "";
+    if (!list.length) return '<p class="empty">' + (all.length ? "No visit matches." : "No visits on this day.") + "</p>";
+    const gap = d.session_gap_ms || 60000;
+    if (bView === "site") return visitsBySiteHtml(list, gap);
+    const groups = new Map();
+    for (const v of list) {
+      const h = new Date(v.start_ms);
+      h.setMinutes(0, 0, 0);
+      const k = h.getTime();
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(v);
+    }
+    return (
+      '<div class="tl">' +
+      [...groups.entries()].map(([k, vs]) => '<div class="tl-hour"><span>' + esc(hm(k)) + "</span><span>" + dur(vs.reduce((a, v) => a + v.counted, 0)) + "</span></div>" + vs.map((v) => visitHtml(v, gap)).join("")).join("") +
+      "</div>"
+    );
+  }
+  function visitsBySiteHtml(list, gap) {
+    const groups = new Map();
+    for (const v of list) {
+      const g = v.private ? "private" : v.group;
+      const k = groupKey(g, v.domain, v.host);
+      if (!groups.has(k)) groups.set(k, { k, name: groupName(g, v.domain, v.host), visits: [], counted: 0, active: 0, passive: 0, call: 0, color: v.color, category: v.category });
+      const x = groups.get(k);
+      x.visits.push(v);
+      x.counted += v.counted;
+      x.active += v.active;
+      x.passive += v.passive;
+      x.call += v.call;
+    }
+    const hours = new Map();
+    for (const s of bState.d.sites || []) {
+      const k = groupKey(s.group, s.domain, s.host);
+      const h = hours.get(k) || new Array(24).fill(0);
+      (s.hours || []).forEach((v, i) => (h[i] += v));
+      hours.set(k, h);
+    }
+    const gs = [...groups.values()].sort((a, b) => b.counted - a.counted);
+    const top = Math.max(...gs.map((g) => g.counted), 1);
+    return (
+      '<ol class="rows">' +
+      gs
+        .map((g) => {
+          const c = safeColor(g.color, g.category);
+          const inner =
+            '<ol class="vl">' +
+            g.visits
+              .map(
+                (v) =>
+                  '<li><span class="t">' + clockMs(v.start_ms) + ' <span class="to">to</span> ' + clockMs(v.end_ms) + '</span><span class="w"><b>' + (bState.id === ALL_ID ? browserIcon(v.browser, "mini") : "") + esc(visitName(v)) + "</b>" +
+                  (v.title ? "<span>" + esc(v.title) + "</span>" : "") + '<span class="ctx">' + ctxHtml(v, gap) + '</span></span><span class="d">' + dur(v.counted) + "</span></li>",
+              )
+              .join("") +
+            "</ol>";
+          return treeRow({ id: "bvsite:" + bState.id + ":" + g.k, name: g.name, detail: plural(g.visits.length, "visit"), c, cat: g.category, total: g.counted, active: g.active, passive: g.passive, call: g.call, top, strip: hoursStrip(hours.get(g.k), c), inner });
+        })
+        .join("") +
+      "</ol>"
+    );
+  }
+  function redrawVisits() {
+    const el = document.getElementById("vlist");
+    if (el && bState) el.innerHTML = visitsListHtml();
+  }
+  function rangeLabel(n) {
+    if (n === "1") return "Today";
+    return n === "365" ? "The last 12 months" : "The last " + n + " days";
+  }
+
+  async function loadBrowserRange(id, n) {
+    const to = today();
+    const from = n === "1" ? to : addDays(to, -(Number(n) - 1));
+    return get("/api/browser?id=" + encodeURIComponent(id) + "&from=" + from + "&to=" + to);
+  }
+
+  async function pageBrowser(id, n, date, gen, quiet) {
+    const enc = encodeURIComponent(id);
+    const reuse = !quiet && bState && bState.id === id && bState.n === n && bState.r;
+    if (!reuse && !quiet) {
+      paint(head(browserIcon(id, "big") + esc(browserName(id)), esc(rangeLabel(n)), rangeBar(n)) + '<p class="empty">Loading…</p>');
+      bindRange("browser/" + enc);
+    }
+    let r;
+    let d;
+    try {
+      [r, d] = await Promise.all([reuse ? bState.r : loadBrowserRange(id, n), get("/api/browser/day?id=" + enc + "&date=" + date)]);
+    } catch (e) {
+      if (!stale(gen) && !quiet) paint(errorHtml(e));
+      return;
+    }
+    if (stale(gen)) return;
+    if (!bState || bState.id !== id) bAllSites = false;
+    bState = { id, n, date, r, d };
+    learnCats(r.categories);
+    const y = window.scrollY;
+    const keep = focusKey();
+    const nSites = (r.sites || []).filter((s) => s.host && s.total > 0).length;
+    const isAll = id === ALL_ID;
+    const hourLabels = [...Array(24).keys()].map((h) => hourLabel(pad(h) + ":00"));
+    const chart = n === "1" ? timeBars(r.hours, hourLabels) : timeBars(r.days.map((x) => x.total), r.days.map((x) => dayLabel(x.date, { day: "numeric", month: "short" })));
+    const busiest = r.hours.indexOf(Math.max(...r.hours));
+    const audio = (r.audio || []).map((a) => ({ name: a.name, detail: "", secs: a.secs }));
+    const share = r.total ? Math.round((r.private / r.total) * 100) : 0;
+    const name = isAll ? "All browsers" : r.name;
+    paint(
+      head(browserIcon(id, "big") + esc(name), esc(rangeLabel(n)), rangeBar(n)) +
+        '<div id="blive"></div>' +
+        '<div class="figures">' +
+        "<div><span>On screen</span><b>" + dur(r.total) + "</b></div>" +
+        "<div><span>Beside other windows</span><b>" + dur(r.visible) + "</b></div>" +
+        "<div><span>Sites</span><b>" + nSites + "</b></div>" +
+        (n === "1" ? "<div><span>Visits</span><b>" + (d.visits || []).length + "</b></div>" : "<div><span>Days used</span><b>" + r.days_used + " of " + r.days.length + "</b></div>") +
+        "<div><span>Background audio</span><b>" + dur(r.background_audio) + "</b></div>" +
+        "<div><span>Private windows</span><b>" + dur(r.private) + "</b></div>" +
+        "</div>" +
+        '<div class="bcols"><div class="bcol l">' +
+        (isAll ? panel("Browsers", sharesHtml(r.browsers, n), { sub: "Screen time in each browser. Open one for its own page." }) : "") +
+        panel("Sites", sitesTreeHtml(r.sites, id), { aside: plural(nSites, "site"), sub: "Grouped by site. Open one for its subdomains, and a subdomain for its page titles. The bars show the hours of the day it was used." }) +
+        '</div><div class="bcol r">' +
+        panel(n === "1" ? "By hour" : "By day", chart, { sub: busiest >= 0 && r.hours[busiest] ? "Busiest hour: " + hourLabels[busiest] + "." : "" }) +
+        panel("Categories", catsHtml(r.categories, { limits: false })) +
+        panel("Background audio", plainHtml(audio, "Nothing played in the background.", { max: 10 }), { sub: "Tabs that played sound while something else was on screen. Not screen time." }) +
+        panel("Private windows", '<p class="bigfig">' + dur(r.private) + (share ? ' <span class="d">' + share + "% of the time here</span>" : "") + '</p><p class="sub">Private windows count as time only: never a site, a title or audio.</p>') +
+        "</div></div>" +
+        visitsSectionHtml(),
+    );
+    renderBrowserLive();
+    bindRange("browser/" + enc);
+    bindVisits();
+    if (quiet || reuse) window.scrollTo(0, y);
+    if (keep) view.querySelector(keep)?.focus({ preventScroll: true });
+    startTicker();
+    clearInterval(refreshTimer);
+    refreshTimer = n === "1" || date === today() ? setInterval(() => !document.hidden && pageBrowser(id, n, date, renderGen, true), 60000) : null;
+  }
+
+  function visitsSectionHtml() {
+    const { date, d } = bState;
+    const isToday = date === today();
+    return (
+      '<section class="panel visits" id="visits"><header><h2>Visits ' + esc(isToday ? "today" : "on " + dayLabel(date, { weekday: "long", day: "numeric", month: "long" })) + '</h2><div class="actions">' +
+      '<button class="btn" type="button" data-vgo="' + addDays(date, -1) + '" aria-label="Previous day">Previous</button>' +
+      (isToday ? "" : '<button class="btn" type="button" data-vgo="' + today() + '">Today</button>') +
+      '<button class="btn" type="button" data-vgo="' + addDays(date, 1) + '" ' + (isToday ? "disabled" : "") + ' aria-label="Next day">Next</button></div></header>' +
+      '<p class="sub">Each visit is one stretch on a site, timed to the millisecond, with what came right before and after it. Breaks under ' + dur((d.session_gap_ms || 60000) / 1000) + " don't split a visit.</p>" +
+      '<div class="tl-tools"><div class="seg" role="group" aria-label="Show visits">' +
+      [["order", "In order"], ["site", "By site"]].map(([v, l]) => '<button type="button" data-bv="' + v + '" aria-pressed="' + (bView === v) + '">' + l + "</button>").join("") +
+      '</div><div class="chips"><button type="button" class="chip" id="bshort" aria-pressed="' + bShort + '">Short ones</button></div>' +
+      '<input type="search" id="bq" placeholder="Search sites, titles, before and after" value="' + esc(bQuery) + '" aria-label="Search visits"></div>' +
+      '<p class="sub" id="bnote"></p><div id="vlist">' + visitsListHtml() + "</div></section>"
+    );
+  }
+
+  function bindVisits() {
+    view.querySelectorAll("[data-vgo]").forEach((b) => b.addEventListener("click", () => (location.hash = browserHash(bState.id, bState.n, b.dataset.vgo))));
+    view.querySelectorAll("[data-bv]").forEach((b) =>
+      b.addEventListener("click", () => {
+        bView = b.dataset.bv;
+        view.querySelectorAll("[data-bv]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+        redrawVisits();
+      }),
+    );
+    document.getElementById("bshort").addEventListener("click", (e) => {
+      bShort = !bShort;
+      e.currentTarget.setAttribute("aria-pressed", String(bShort));
+      redrawVisits();
+    });
+    document.getElementById("bq").addEventListener("input", (e) => {
+      bQuery = e.target.value.trim();
+      redrawVisits();
+    });
+    document.getElementById("ballsites")?.addEventListener("click", () => {
+      bAllSites = true;
+      pageBrowser(bState.id, bState.n, bState.date, renderGen, true);
+    });
   }
 
   // ---------- ranges ----------
@@ -1265,6 +1779,7 @@
     ["tracking", "Tracking"],
     ["agents", "AI agents"],
     ["privacy", "Privacy"],
+    ["browsers", "Browsers"],
     ["categories", "Categories"],
     ["data", "Data"],
   ];
@@ -1277,6 +1792,7 @@
       if (!stale(gen)) paint(errorHtml(e));
       return;
     }
+    if (!browserList.length) await loadBrowsers();
     if (stale(gen)) return;
     const c = s.config;
     const d = c.dashboard;
@@ -1349,6 +1865,7 @@
         ${field("Never record these sites", "One per line. Subdomains are included.", `<textarea id="xhosts">${esc(lines(c.privacy.exclude_hosts))}</textarea>`)}
         ${field("For those", "", select("xmode", c.privacy.exclude_mode, [["hide", "Count the time as Hidden, keep no details"], ["drop", "Record nothing at all"]]))}
       `)}
+      ${sec("browsers", "Browsers", browserSettingsHtml(), "The sidebar's Browsers group lists every browser the extension has connected from, and any with history. Names here are for the dashboard only: history keeps the browser's own.")}
       ${sec("categories", "Categories", `
         <div class="cat-edit" id="cats">${CAT_HEAD}${cats.map(catRow).join("")}</div>
         <div style="margin-top:12px"><button type="button" class="btn" id="addcat">Add category</button></div>
@@ -1558,6 +2075,16 @@
         break_after_mins: n("nbreakmins"),
       };
       next.categories = cats.filter((x) => x.name);
+      // Browsers not listed here (no longer seen) keep what they had.
+      const listed = new Set([...view.querySelectorAll("[data-bname]")].map((x) => x.dataset.bname));
+      const was = fresh.browsers || { hidden: [], names: [] };
+      next.browsers = {
+        hidden: [...was.hidden.filter((h) => !listed.has(h)), ...[...view.querySelectorAll("[data-bshow]")].filter((x) => !x.checked).map((x) => x.dataset.bshow)],
+        names: [
+          ...was.names.filter((l) => !listed.has(l.split("=")[0].trim())),
+          ...[...view.querySelectorAll("[data-bname]")].filter((x) => x.value.trim()).map((x) => `${x.dataset.bname}=${x.value.trim()}`),
+        ],
+      };
       Object.assign(next.dashboard, look(), {
         port: n("port"),
         tray: $("tray").checked,
@@ -1573,6 +2100,7 @@
         const link = document.getElementById("custom-css");
         link.href = "/custom.css?" + Date.now();
         await loadSettings().catch(() => {});
+        loadBrowsers();
         if (res.redirect) {
           msg(`Saved. Moving to port ${next.dashboard.port}…`);
           setTimeout(() => (location.href = res.redirect), 700);
@@ -1614,6 +2142,18 @@
     custom_css: "css",
   };
 
+  function browserSettingsHtml() {
+    if (!browserList.length) return '<p class="empty">No browser yet. Browsers show up here once the extension connects from one.</p>';
+    return `<div class="bset">${browserList
+      .map((b) => {
+        const renamed = b.name !== b.orig_name ? b.name : "";
+        return `<div class="brow"><span class="bname">${browserIcon(b.id)}<span>${esc(b.orig_name)}<em>${esc(b.id === UNKNOWN_ID ? "time from older versions" : b.linked ? b.id : `${b.id}, not linked yet`)}</em></span></span>
+          <input type="text" data-bname="${esc(b.id)}" value="${esc(renamed)}" placeholder="${esc(b.orig_name)}" maxlength="60" aria-label="Name for ${esc(b.orig_name)}">
+          <label class="check"><input type="checkbox" data-bshow="${esc(b.id)}" ${b.hidden ? "" : "checked"}> In the sidebar</label></div>`;
+      })
+      .join("")}</div>`;
+  }
+
   function markInvalid(el, text) {
     el.setAttribute("aria-invalid", "true");
     const id = `${el.id}-err`;
@@ -1632,6 +2172,8 @@
     if (s.server_ms) clockOffset = s.server_ms - Date.now();
     renderRail();
     renderNotices();
+    renderBrowserNav();
+    if (currentPage === "browser") renderBrowserLive();
     if (currentPage === "now") renderNow();
     renderNowStrip();
     startTicker();
@@ -2149,7 +2691,8 @@
   const glide = document.querySelector(".glide");
   function moveGlide() {
     const a = document.querySelector('.nav a[aria-current="page"]');
-    if (!a) {
+    // A browser in the folded Browsers group has no place to slide to.
+    if (!a || !a.offsetParent) {
       glide.style.setProperty("--glide-o", "0");
       return;
     }
@@ -2169,6 +2712,20 @@
   // ---------- router ----------
 
   const PAGES = ["now", "today", "timeline", "apps", "projects", "agents", "claude", "trends", "settings"];
+  let navCurrent = "";
+  function markNav() {
+    document.querySelectorAll(".nav a").forEach((a) => {
+      if (a.dataset.route === navCurrent) a.setAttribute("aria-current", "page");
+      else a.removeAttribute("aria-current");
+    });
+  }
+  const safeDecode = (s) => {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  };
   function route(sameView) {
     ruleClose();
     clearInterval(refreshTimer);
@@ -2177,14 +2734,15 @@
     const gen = ++renderGen;
     const start = prefs().dashboard.start_page || "today";
     const h = location.hash.replace(/^#\/?/, "") || start;
-    const [page, arg] = h.split("/");
-    const key = page === "day" ? "today" : PAGES.includes(page) ? page : "today";
+    const parts = h.split("/");
+    const [page, arg] = parts;
+    const key = page === "day" ? "today" : page === "browser" ? "browser" : PAGES.includes(page) ? page : "today";
     if (key !== currentPage && !sameView) enterNext = true;
     currentPage = key;
-    document.querySelectorAll(".nav a").forEach((a) => {
-      if (a.dataset.route === key) a.setAttribute("aria-current", "page");
-      else a.removeAttribute("aria-current");
-    });
+    const bid = page === "browser" ? safeDecode(parts[1] || "") || ALL_ID : "";
+    navCurrent = page === "browser" ? `browser:${bid}` : key;
+    if (page !== "browser") bState = null;
+    markNav();
     // The Claude Code page goes with its switch in Settings.
     const ccLink = document.querySelector('.nav a[data-route="claude"]');
     if (ccLink) ccLink.hidden = (prefs().agents || {}).claude_cost === false;
@@ -2213,6 +2771,12 @@
         return pageTrends(valid(arg, RANGES.slice(1)) || "30", gen);
       case "settings":
         return pageSettings(gen);
+      case "browser": {
+        const n = valid(parts[2], RANGES) || "1";
+        let d = /^\d{4}-\d{2}-\d{2}$/.test(parts[3] || "") ? parts[3] : today();
+        if (d > today()) d = today();
+        return pageBrowser(bid, n, d, gen);
+      }
       default:
         return pageDay(today(), false, gen);
     }
@@ -2224,6 +2788,13 @@
     const i = "123456789".indexOf(e.key);
     if (i >= 0) {
       location.hash = `#/${PAGES[i]}`;
+      return;
+    }
+    if (currentPage === "browser" && bState) {
+      const { id, n, date } = bState;
+      if (e.key === "ArrowLeft") location.hash = browserHash(id, n, addDays(date, -1));
+      else if (e.key === "ArrowRight" && date < today()) location.hash = browserHash(id, n, addDays(date, 1));
+      else if (e.key === "t") location.hash = browserHash(id, n);
       return;
     }
     const daily = currentPage === "today" || currentPage === "timeline";
@@ -2250,5 +2821,8 @@
     .then(() => {
       route();
       connectLive();
+      loadBrowsers();
+      // Today's time per browser in the sidebar.
+      setInterval(() => !document.hidden && loadBrowsers(), 60000);
     });
 })();

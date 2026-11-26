@@ -50,6 +50,11 @@ enum Act {
     Zed(&'static str, &'static str),
     Site(&'static str, &'static str),
     Video(&'static str, &'static str),
+    /// A site in the second browser.
+    Zen(&'static str, &'static str),
+    Private,
+    /// The installed web app (music in a browser's app window).
+    Music,
     Slack,
     Notes,
     Files,
@@ -101,6 +106,17 @@ fn site(host: &str, title: &str) -> Subject {
     }
 }
 
+/// An installed web app's id, the way Chromium names them (all made up).
+const MUSIC_APP: &str = "brave-cfmgknoapdifhejmkaplbaogdbnilfjk-Default";
+
+fn music() -> Subject {
+    Subject {
+        host: "music.youtube.com".into(),
+        title: "Focus mix".into(),
+        ..app(MUSIC_APP, "YouTube Music")
+    }
+}
+
 fn term(program: &str, project: &str) -> Subject {
     Subject {
         program: program.into(),
@@ -119,6 +135,16 @@ fn subject_of(a: Act) -> Subject {
             ..app("dev.zed.Zed", "Zed")
         },
         Act::Site(host, title) | Act::Video(host, title) => site(host, title),
+        Act::Zen(host, title) => Subject {
+            host: host.into(),
+            title: title.into(),
+            ..app("zen", "Zen")
+        },
+        Act::Private => Subject {
+            private: true,
+            ..app("brave-browser", "Brave")
+        },
+        Act::Music => music(),
         Act::Slack => Subject {
             title: "#release-train".into(),
             ..app("slack", "Slack")
@@ -150,6 +176,9 @@ const WORK: &[(u32, Act)] = &[
     (5, Act::Site("docs.rs", "tokio::sync::watch - Rust")),
     (3, Act::Site("claude.ai", "Designing a retry policy")),
     (3, Act::Site("linear.app", "ATL-88 Session timeline")),
+    (2, Act::Site("gist.github.com", "retry.rs")),
+    (2, Act::Site("localhost:5173", "Atlas dev server")),
+    (1, Act::Music),
     (4, Act::Slack),
     (2, Act::Notes),
     (1, Act::Files),
@@ -162,6 +191,12 @@ const EVENING: &[(u32, Act)] = &[
     ),
     (4, Act::Site("news.ycombinator.com", "Hacker News")),
     (3, Act::Site("www.reddit.com", "r/rust")),
+    (
+        3,
+        Act::Zen("en.wikipedia.org", "Rust (programming language)"),
+    ),
+    (2, Act::Zen("lobste.rs", "Lobsters")),
+    (1, Act::Private),
     (2, Act::Slack),
     (3, Act::Nvim("notes-site")),
 ];
@@ -191,6 +226,13 @@ pub fn run(db: &Path, days: u32) -> Result<()> {
     .iter()
     .map(|(a, n)| w.subject(app(a, n)))
     .collect::<Result<_>>()?;
+    // The extension connected from both browsers; the web app runs in Brave.
+    let first = now - days as i64 * 24 * HOUR;
+    store.note_browser("brave-browser", "Brave", first)?;
+    store.note_browser("zen", "Zen", first + 3 * 24 * HOUR)?;
+    store.note_browser("brave-browser", "Brave", now)?;
+    store.note_web_app(MUSIC_APP, "brave-browser")?;
+    let tunes = w.subject(music())?;
     store.conn.execute_batch("BEGIN")?;
     for back in (0..days as i64).rev() {
         let date = util::local_date(now - back * 24 * HOUR);
@@ -268,6 +310,10 @@ pub fn run(db: &Path, days: u32) -> Result<()> {
                         let docs = w.subject(site("docs.rs", "tokio::sync::watch - Rust"))?;
                         w.span(Kind::Visible, docs, t, stop)?;
                         w.span(Kind::BgAudio, spotify, t, stop)?;
+                    }
+                    // Music plays from Spotify, or from the web app in the background.
+                    Act::Nvim(_) if rng.next().is_multiple_of(3) => {
+                        w.span(Kind::BgAudio, tunes, t, stop)?
                     }
                     Act::Nvim(_) => w.span(Kind::BgAudio, spotify, t, stop)?,
                     _ => {}

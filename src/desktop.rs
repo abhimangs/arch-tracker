@@ -121,8 +121,13 @@ impl DesktopIndex {
             let Some(prog) = resolve_program(&e.exec) else {
                 continue;
             };
-            let exact = prog == exe;
-            if !exact && (shared || prog.parent() != Some(dir)) {
+            // A browser's launcher is often a script in /usr/bin that runs the real one.
+            let mut progs = vec![prog];
+            if e.browser {
+                progs.extend(script_targets(&progs[0]));
+            }
+            let exact = progs.contains(&exe);
+            if !exact && (shared || !progs.iter().any(|p| p.parent() == Some(dir))) {
                 continue;
             }
             let score = u8::from(e.browser) * 2 + u8::from(exact);
@@ -200,6 +205,29 @@ fn resolve_program(prog: &str) -> Option<PathBuf> {
             .find(|p| p.is_file())?
     };
     Some(std::fs::canonicalize(&path).unwrap_or(path))
+}
+
+/// The programs a launcher script runs: the absolute paths in it ("exec /opt/x/x \"$@\""). Only
+/// small text files that start with #! are read.
+fn script_targets(path: &Path) -> Vec<PathBuf> {
+    use std::io::Read;
+    let mut head = [0u8; 8192];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut head))
+        .unwrap_or(0);
+    let Ok(text) = std::str::from_utf8(&head[..n]) else {
+        return vec![];
+    };
+    if !text.starts_with("#!") {
+        return vec![];
+    }
+    text.lines()
+        .skip(1)
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .flat_map(|l| l.split(|c: char| c.is_whitespace() || "\"'=;()|&".contains(c)))
+        .filter(|w| w.len() > 1 && w.starts_with('/') && !w.contains('$'))
+        .map(PathBuf::from)
+        .collect()
 }
 
 /// The file for an Icon= value: an absolute path as it is, else the theme icon in the
@@ -444,6 +472,22 @@ mod tests {
         assert!(
             idx.by_exe(&bin.join("other")).is_none(),
             "a shared bin folder is no clue"
+        );
+        // A launcher script in a shared folder that runs a program from the install folder.
+        let opt_y = dir.join("opt/browser-y");
+        std::fs::create_dir_all(&opt_y).unwrap();
+        std::fs::write(opt_y.join("engine"), "").unwrap();
+        let script = bin.join("browser-y");
+        let text = format!(
+            "#!/bin/sh\n# exec /elsewhere/not-this\nexec \"{}\" \"$@\"\n",
+            p(&opt_y.join("start"))
+        );
+        std::fs::write(&script, text).unwrap();
+        let y = entry("browser-y", &p(&script), true);
+        idx.by_id.insert("browser-y".into(), Arc::new(y));
+        assert_eq!(
+            idx.by_exe(&opt_y.join("engine")).map(|e| e.id.as_str()),
+            Some("browser-y")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

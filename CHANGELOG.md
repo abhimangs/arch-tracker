@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- Browsers in the dashboard: a sidebar group lists every browser the extension has connected from
+  (and any with history), with its own icon, today's time and a dot while its extension is
+  connected, plus All browsers. A browser's page groups its sites by domain, then subdomain, then
+  page title, each with the hours of the day it was used; shows time per hour or day, categories,
+  background audio and private-window time; and lists each visit of a day to the millisecond, with
+  what came right before and after it, in order or by site. The Timeline can show one browser, site
+  rows show which browsers their time came from, and Settings can rename or hide a browser.
+  Installed web apps count under the browser that runs them.
 - One-click rules: the ⋯ menu on a row in Today, Apps and sites, and Projects sets its category,
   stops recording an app or site, or renames or ignores a project, saved to config.toml at once.
 - Dashboard redesign: a sidebar with a sliding highlight, and new Now (live, to the millisecond),

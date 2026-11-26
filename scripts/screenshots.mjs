@@ -141,7 +141,8 @@ const { url } = await ask({ cmd: "login_url", route: "today" });
 await cdp("Page.navigate", { url });
 await sleep(2500);
 // The scratch tracker has no Wayland or browser extension: hide those notices.
-await js(`document.head.insertAdjacentHTML("beforeend", "<style>#notices{display:none!important}</style>")`);
+// The sidebar highlight slides between pages; headless capture can catch it halfway.
+await js(`document.head.insertAdjacentHTML("beforeend", "<style>#notices{display:none!important}.glide{transition:none!important}</style>")`);
 
 fs.mkdirSync(out, { recursive: true });
 async function shot(name, hash, { height, theme = "dark", wait = 1800 } = {}) {
@@ -162,6 +163,7 @@ await shot("today", "#/today", { height: 1500 });
 await shot("timeline", "#/timeline", { height: 1000 });
 await shot("projects", "#/projects/7", { height: 1000 });
 await shot("trends", "#/trends/7", { height: 1100 });
+await shot("browsers", "#/browser/brave-browser/7", { height: 1250 });
 await shot("today-dawn", "#/today", { height: 1000, theme: "light" });
 // Let the live timer run a little before showing Now.
 await sleep(Math.max(0, 74_000 - (Date.now() - focusedAt)));

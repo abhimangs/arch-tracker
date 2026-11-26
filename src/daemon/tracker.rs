@@ -821,6 +821,8 @@ impl Tracker {
     /// The browser app a process's executable belongs to (no window needed).
     fn browser_exe_app(&self, pid: u32) -> Option<(String, String)> {
         let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+        // A browser updated while it runs still points at its old, deleted binary.
+        let exe = std::path::PathBuf::from(exe.to_string_lossy().trim_end_matches(" (deleted)"));
         let e = self.desktop.by_exe(&exe)?;
         (e.browser || app_kind(&e.id, &e.wm_class) == AppKind::Browser)
             .then(|| (e.id.clone(), e.name.clone()))
