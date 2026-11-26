@@ -90,6 +90,10 @@ impl Store {
             "DELETE FROM claude_usage WHERE at_ms < ?1",
             params![before_ms],
         )?;
+        tx.execute(
+            "DELETE FROM codex_usage WHERE at_ms < ?1",
+            params![before_ms],
+        )?;
         if n > 0 {
             let orphans: Vec<i64> = {
                 let mut st = tx.prepare(
@@ -282,7 +286,19 @@ fn migrate(conn: &Connection) -> Result<()> {
             app TEXT PRIMARY KEY, name TEXT NOT NULL, first_ms INTEGER NOT NULL,
             last_ms INTEGER NOT NULL);
          -- Installed web apps (app windows of a browser) and the browser that runs them.
-         CREATE TABLE IF NOT EXISTS web_apps(app TEXT PRIMARY KEY, browser TEXT NOT NULL);",
+         CREATE TABLE IF NOT EXISTS web_apps(app TEXT PRIMARY KEY, browser TEXT NOT NULL);
+         -- Codex's token use per response (counts only; id is a hash of the response id).
+         CREATE TABLE IF NOT EXISTS codex_usage(
+            id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, model TEXT NOT NULL,
+            project TEXT NOT NULL, input INTEGER NOT NULL, cached INTEGER NOT NULL,
+            cache_write INTEGER NOT NULL, output INTEGER NOT NULL, reasoning INTEGER NOT NULL,
+            fast INTEGER NOT NULL);
+         CREATE INDEX IF NOT EXISTS codex_usage_at ON codex_usage(at_ms);
+         -- How far each Codex log has been read, and the model, folder and tier in effect there.
+         CREATE TABLE IF NOT EXISTS codex_files(
+            key INTEGER PRIMARY KEY, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
+            offset INTEGER NOT NULL, model TEXT NOT NULL, cwd TEXT NOT NULL, tier TEXT NOT NULL,
+            mode INTEGER NOT NULL, last_total INTEGER NOT NULL);",
     )?;
     let v: Option<String> = conn
         .query_row(

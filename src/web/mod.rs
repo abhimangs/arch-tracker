@@ -147,6 +147,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/browser/day", get(api_browser_day))
         .route("/api/icon/{app}", get(api_icon))
         .route("/api/claude", get(api_claude))
+        .route("/api/codex", get(api_codex))
         .route("/api/settings", get(api_settings).put(api_settings_put))
         .route("/api/appearance", axum::routing::put(api_appearance))
         .route("/api/rule", post(api_rule))
@@ -747,6 +748,14 @@ async fn api_claude(State(ctx): State<Ctx>, Params(q): Params<RangeQ>) -> Respon
         Ok(r)
     })
     .await
+}
+
+/// What Codex's tokens in a range would cost at OpenAI's list prices, and its plan's limits.
+async fn api_codex(State(ctx): State<Ctx>, Params(q): Params<RangeQ>) -> Response {
+    let cfg = ctx.web.config();
+    let path = ctx.web.db.clone();
+    let viewer = ctx.web.viewer;
+    blocking(move || report::cost::codex(&db(&path, viewer)?, &cfg, &q.from, &q.to)).await
 }
 
 async fn api_settings(State(ctx): State<Ctx>) -> Response {

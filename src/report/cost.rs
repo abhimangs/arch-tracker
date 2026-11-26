@@ -76,6 +76,32 @@ const PRICES: &[(&str, Price)] = &[
     ("claude-haiku-4-5", p(1.0, 5.0, 0.1)),
 ];
 
+/// When OPENAI_PRICES was checked, against OpenAI's model pages and announcements.
+pub const OPENAI_PRICES_AS_OF: &str = "2026-11-26";
+
+const fn long(mut x: Price, over: u64, i: f64, o: f64) -> Price {
+    x.long = Some((over, i, o));
+    x
+}
+
+/// OpenAI's list prices (standard tier) for the models Codex runs. Batch, flex and background
+/// discounts are not applied. Prompts over 272K tokens are billed at 2x input (cache reads too)
+/// and 1.5x output; the fast tier costs 2x. Cache writes cost 1.25x the input price.
+const OPENAI_PRICES: &[(&str, Price)] = &[
+    (
+        "gpt-6.2-astra",
+        long(fast(p(8.0, 40.0, 0.05), 16.0, 80.0), 272_000, 16.0, 60.0),
+    ),
+    (
+        "gpt-6.2-sol",
+        long(fast(p(2.0, 10.0, 0.05), 4.0, 20.0), 272_000, 4.0, 15.0),
+    ),
+    (
+        "gpt-6.1-sol",
+        long(fast(p(2.0, 10.0, 0.05), 4.0, 20.0), 272_000, 4.0, 15.0),
+    ),
+];
+
 /// US-only inference (inference_geo "us") costs 1.1x on every token.
 const US_ONLY: f64 = 1.1;
 /// Web search: $10 per 1,000 searches. Web fetch costs only its tokens.
@@ -115,6 +141,7 @@ pub fn price_for(model: &str, own: &BTreeMap<String, ModelPrice>) -> Option<Pric
     }
     PRICES
         .iter()
+        .chain(OPENAI_PRICES)
         .filter(|(k, _)| matches(&m, k))
         .max_by_key(|(k, _)| k.len())
         .map(|(_, p)| *p)
@@ -222,7 +249,7 @@ pub struct DayCost {
 }
 
 #[derive(Serialize, Default, Clone, Debug)]
-pub struct ClaudeReport {
+pub struct CostReport {
     pub from: String,
     pub to: String,
     pub prices_as_of: &'static str,
@@ -244,6 +271,9 @@ pub struct ClaudeReport {
     /// Use from before the oldest transcript, estimated from Claude Code's own statistics,
     /// when the range reaches back that far.
     pub earlier: Option<Earlier>,
+    /// Codex: the plan's usage limits as it last reported them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<crate::sources::codex::Limits>,
 }
 
 /// Claude Code removes session transcripts after cleanupPeriodDays (30 by default), but keeps
@@ -460,7 +490,8 @@ pub fn model_label(model: &str) -> String {
 }
 
 /// Claude Code's usage between two local dates (both included), priced.
-pub fn claude(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<ClaudeReport> {
+/// The range checks every cost report makes; (start ms, first ms of the last day, end ms).
+fn range_bounds(from: &str, to: &str) -> Result<(i64, i64, i64, bool)> {
     let (start, ds, _) = parse_date(from)?;
     let (end, de_from, de) = parse_date(to)?;
     if end < start {
@@ -473,22 +504,29 @@ pub fn claude(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<C
         ))
         .into());
     }
-    let mut out = ClaudeReport {
+    Ok((ds, de_from, de, start == end))
+}
+
+fn has_table(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        [name],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+pub fn claude(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<CostReport> {
+    let (ds, de_from, de, one_day) = range_bounds(from, to)?;
+    let mut out = CostReport {
         from: from.into(),
         to: to.into(),
         prices_as_of: PRICES_AS_OF,
         ..Default::default()
     };
     // A database from before this feature (arch-tracker serve on an old copy) has no table.
-    let has_table: bool = conn
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='claude_usage'",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|n| n > 0)
-        .unwrap_or(false);
-    if !has_table {
+    if !has_table(conn, "claude_usage") {
         return Ok(out);
     }
     let mut st = conn.prepare(
@@ -514,6 +552,58 @@ pub fn claude(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<C
             },
         ))
     })?;
+    aggregate(&mut out, cfg, rows, (ds, de_from, de, one_day))?;
+    Ok(out)
+}
+
+/// What Codex's tokens would cost at OpenAI's list prices, and its plan's limits.
+pub fn codex(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<CostReport> {
+    let (ds, de_from, de, one_day) = range_bounds(from, to)?;
+    let mut out = CostReport {
+        from: from.into(),
+        to: to.into(),
+        prices_as_of: OPENAI_PRICES_AS_OF,
+        ..Default::default()
+    };
+    if !has_table(conn, "codex_usage") {
+        return Ok(out);
+    }
+    out.limits = crate::sources::codex::load_limits(conn).unwrap_or(None);
+    let mut st = conn.prepare(
+        "SELECT model, project, at_ms, input, cached, cache_write, output, fast
+         FROM codex_usage WHERE at_ms >= ?1 AND at_ms < ?2 ORDER BY at_ms",
+    )?;
+    let rows = st.query_map([ds, de], |r| {
+        let n = |i: usize| r.get::<_, i64>(i).map(|v| v.max(0) as u64);
+        let (input, cached, write) = (n(3)?, n(4)?, n(5)?);
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+            // Codex counts cached and cache-write tokens inside input.
+            Tokens4 {
+                input: input.saturating_sub(cached + write),
+                output: n(6)?,
+                cache_5m: write,
+                cache_1h: 0,
+                cache_read: cached,
+                web_search: 0,
+                fast: r.get(7)?,
+                us_only: false,
+            },
+        ))
+    })?;
+    aggregate(&mut out, cfg, rows, (ds, de_from, de, one_day))?;
+    Ok(out)
+}
+
+/// Adds priced rows (model, project folder, time, tokens) to a report, ordered by time.
+fn aggregate(
+    out: &mut CostReport,
+    cfg: &Config,
+    rows: impl Iterator<Item = rusqlite::Result<(String, String, i64, Tokens4)>>,
+    (ds, de_from, de, one_day): (i64, i64, i64, bool),
+) -> Result<()> {
     let rules = ProjectRules::new(&cfg.projects);
     let mut prices: HashMap<String, Option<Price>> = HashMap::new();
     let mut names: HashMap<String, (String, String)> = HashMap::new();
@@ -522,7 +612,7 @@ pub fn claude(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<C
     let mut days: Vec<DayCost> = vec![];
     // Local day boundaries, so each reply's date needs no time-zone lookup.
     let mut day_end = i64::MIN;
-    if start == end {
+    if one_day {
         out.hourly = vec![0.0; ((de - de_from + 3_599_999) / 3_600_000).max(1) as usize];
     }
     for row in rows {
@@ -596,7 +686,7 @@ pub fn claude(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<C
     out.projects = projects.into_values().collect();
     out.projects.sort_by(by_cost);
     out.days = days;
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -616,6 +706,63 @@ mod tests {
 
     fn near(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn codex_models_are_priced_at_openai_list_rates() {
+        let none = BTreeMap::new();
+        let (one, k100) = (1_000_000, 100_000);
+        let astra = price_for("gpt-6.2-astra", &none).unwrap();
+        // Standard rates while the prompt stays under 272K tokens.
+        assert!(near(cost(&astra, &t(k100, 0, 0, 0, 0)), 0.8), "$8 input");
+        assert!(
+            near(cost(&astra, &t(0, 0, 0, 0, k100)), 0.04),
+            "$0.40 cached input"
+        );
+        assert!(near(cost(&astra, &t(0, one, 0, 0, 0)), 40.0), "$40 output");
+        assert!(
+            near(cost(&astra, &t(0, 0, k100, 0, 0)), 1.0),
+            "cache writes at 1.25x"
+        );
+        // Over 272K prompt tokens: 2x input and cache reads, 1.5x output.
+        assert!(near(
+            cost(&astra, &t(300_000, one, 0, 0, 0)),
+            0.3 * 16.0 + 60.0
+        ));
+        assert!(
+            near(cost(&astra, &t(0, 0, 0, 0, one)), 0.8),
+            "long cached input"
+        );
+        let sol = price_for("gpt-6.1-sol", &none).unwrap();
+        assert!(near(
+            cost(&sol, &t(k100, one, 0, 0, k100)),
+            0.2 + 10.0 + 0.01
+        ));
+        assert!(price_for("gpt-unknown", &none).is_none());
+    }
+
+    #[test]
+    fn codex_report_prices_uncached_input_once() {
+        let dir = std::env::temp_dir().join(format!("at-codexcost-{}", std::process::id()));
+        let st = crate::store::Store::open(&dir.join("t.db")).unwrap();
+        let at = crate::util::date_bounds("2026-11-20").unwrap().0 + 3_600_000;
+        // 1M prompt tokens of which 900K cached; 100K output.
+        st.conn
+            .execute(
+                "INSERT INTO codex_usage(id, at_ms, model, project, input, cached, cache_write,
+                     output, reasoning, fast)
+                 VALUES (1, ?1, 'gpt-6.2-astra', '', 1000000, 900000, 0, 100000, 0, 0)",
+                [at],
+            )
+            .unwrap();
+        let r = codex(&st.conn, &Config::default(), "2026-11-20", "2026-11-20").unwrap();
+        // Over 272K: 100K uncached at $16, 900K cached at $0.80, 100K out at $60.
+        assert!(near(r.cost, 1.6 + 0.72 + 6.0), "{}", r.cost);
+        assert_eq!(r.tokens.cache_read, 900_000);
+        assert_eq!(r.tokens.input, 100_000);
+        assert_eq!(r.models[0].key, "gpt-6.2-astra");
+        assert_eq!(r.prices_as_of, OPENAI_PRICES_AS_OF);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 pub mod browser;
 pub mod claude;
+pub mod codex;
 pub mod idle;
 pub mod kwin;
 pub mod media;

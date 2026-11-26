@@ -28,7 +28,7 @@ use std::time::Duration;
 /// history takes one pass; only a very long one is spread over a few minutes.
 pub const BUDGET: u64 = 2 << 30;
 /// Lines up to this long are read whole; longer ones are parsed as a stream.
-const MAX_LINE: usize = 512 << 10;
+pub(crate) const MAX_LINE: usize = 512 << 10;
 /// projects/<folder>/<session>/subagents/workflows/<run>/<agent>.jsonl is five folders down;
 /// a little room for deeper layouts. Links are never followed, so this is the only bound needed.
 const MAX_DEPTH: usize = 8;
@@ -199,10 +199,10 @@ pub struct Usage {
     pub us_only: bool,
 }
 
-struct Found {
-    path: PathBuf,
-    size: u64,
-    mtime_ns: i64,
+pub(crate) struct Found {
+    pub(crate) path: PathBuf,
+    pub(crate) size: u64,
+    pub(crate) mtime_ns: i64,
 }
 
 /// Reads what is new in every transcript, up to `budget` bytes, and stores the replies' usage.
@@ -343,7 +343,7 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
     Ok(pass)
 }
 
-fn paused_spans(conn: &Connection) -> Result<Vec<(i64, i64)>> {
+pub(crate) fn paused_spans(conn: &Connection) -> Result<Vec<(i64, i64)>> {
     let kind = crate::model::Kind::Paused as i64;
     let mut st = conn.prepare("SELECT start_ms, end_ms FROM spans WHERE kind = ?1")?;
     Ok(st
@@ -352,7 +352,7 @@ fn paused_spans(conn: &Connection) -> Result<Vec<(i64, i64)>> {
 }
 
 /// Transcript files under dir, without following symbolic links.
-fn list(dir: &Path, depth: usize, out: &mut Vec<Found>) {
+pub(crate) fn list(dir: &Path, depth: usize, out: &mut Vec<Found>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -467,7 +467,11 @@ fn read_file(
 
 /// Reads one line into buf, keeping at most cap bytes. Returns (bytes consumed, ended with a
 /// newline). With cap reached and no newline yet, the reader is left inside the line.
-fn read_capped<R: BufRead>(r: &mut R, buf: &mut Vec<u8>, cap: usize) -> io::Result<(usize, bool)> {
+pub(crate) fn read_capped<R: BufRead>(
+    r: &mut R,
+    buf: &mut Vec<u8>,
+    cap: usize,
+) -> io::Result<(usize, bool)> {
     let mut n = 0;
     loop {
         let avail = r.fill_buf()?;
@@ -492,17 +496,17 @@ fn read_capped<R: BufRead>(r: &mut R, buf: &mut Vec<u8>, cap: usize) -> io::Resu
 }
 
 /// The rest of the current line as a reader, stopping before the newline.
-struct OneLine<'a, R: BufRead> {
+pub(crate) struct OneLine<'a, R: BufRead> {
     r: &'a mut R,
     done: bool,
     /// The line ended with a newline (not the end of the file).
-    ended: bool,
+    pub(crate) ended: bool,
     /// Bytes consumed, the newline included.
-    read: usize,
+    pub(crate) read: usize,
 }
 
 impl<'a, R: BufRead> OneLine<'a, R> {
-    fn new(r: &'a mut R) -> Self {
+    pub(crate) fn new(r: &'a mut R) -> Self {
         OneLine {
             r,
             done: false,
@@ -512,7 +516,7 @@ impl<'a, R: BufRead> OneLine<'a, R> {
     }
 
     /// Consumes what is left of the line without keeping it.
-    fn drain(&mut self) -> io::Result<()> {
+    pub(crate) fn drain(&mut self) -> io::Result<()> {
         while !self.done {
             let avail = self.r.fill_buf()?;
             if avail.is_empty() {
@@ -567,12 +571,12 @@ impl<R: BufRead> Read for OneLine<'_, R> {
     }
 }
 
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
+pub(crate) fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
 /// FNV-1a: a stable 64-bit hash (std's hasher may change between Rust releases).
-fn hash(parts: &[&[u8]]) -> i64 {
+pub(crate) fn hash(parts: &[&[u8]]) -> i64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for p in parts {
         for &b in *p {
