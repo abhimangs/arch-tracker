@@ -95,16 +95,24 @@ gnome)
       >"$TMP/gnome.log" 2>&1 &
     export WAYLAND_DISPLAY=$(wayland_socket)
     XDG_CURRENT_DESKTOP=GNOME "$BIN" daemon >"$TMP/daemon.log" 2>&1 &
+    # What a click on an agent'"'"'s notice does: the extension raises the window of a process.
+    raise() {
+      gdbus call --session --dest org.gnome.Shell --object-path /dev/archtracker/Gnome \
+        --method dev.archtracker.Gnome1.Activate "[uint32 $1]" "" >/dev/null
+    }
     foot sleep 600 >"$TMP/foot1.log" 2>&1 &
     first=$!
     wait_for ".sources.kwin.desktop == \"GNOME\" and .sources.kwin.ok and .sources.kwin.windows > 0" "the extension sends GNOME'"'"'s windows"
-    wait_for ".focus.app == \"foot\" and .focus.program == \"sleep\"" "focus on the terminal and what runs in it"
+    # GNOME starts in the Overview, where no window has focus, and new windows don'"'"'t take it.
+    raise "$first"
+    wait_for ".focus.app == \"foot\" and .focus.program == \"sleep\"" "the raised terminal has focus, and what runs in it shows"
     foot cat >"$TMP/foot2.log" 2>&1 &
-    wait_for ".focus.program == \"cat\"" "focus follows a new window"
-    # What a click on an agent'"'"'s notice does: the extension raises the first window.
-    gdbus call --session --dest org.gnome.Shell --object-path /dev/archtracker/Gnome \
-      --method dev.archtracker.Gnome1.Activate "[uint32 $first]" "" >/dev/null
-    wait_for ".focus.program == \"sleep\"" "the extension raises a window when asked"
+    second=$!
+    wait_for ".sources.kwin.windows >= 2" "a second window shows up"
+    raise "$second"
+    wait_for ".focus.program == \"cat\"" "focus follows to the second window"
+    raise "$first"
+    wait_for ".focus.program == \"sleep\"" "and back"
     wait_for ".sources.idle.ok" "idle time from Mutter'"'"'s idle monitor"
   '
   ;;
