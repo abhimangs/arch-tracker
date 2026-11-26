@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex's use counted far too low: Codex moves older conversations into its own database and
+  removes their logs, so only the newest few were read. Its database is now read too (read-only;
+  titles and prompts are never read): a conversation's tokens beyond the responses in the logs are
+  estimated, split like your logged responses and spread over its turns, and say so on the page.
+  Usage already read is kept for good, whatever Codex later removes.
+- Every model Codex has run is priced at OpenAI's list price (standard tier, no batch,
+  promotional or other discounts): gpt-5.6 Luna, Terra and Sol, gpt-6 Astra, Sol and Luna,
+  gpt-6.1 Terra and Sol, and gpt-6.2 Astra and Sol.
+
 ### Changed
 
 - The sidebar lists its pages first and the Browsers and Agents groups after them; the current page

@@ -1725,7 +1725,9 @@
       }
       const perHour = worked >= 600 && paid > 0 ? paid / (worked / 3600) : 0;
       costFigs =
-        "<div><span>At API prices</span><b>" + money(cc.cost) + "</b></div>" +
+        (cc.estimated && cc.estimated.cost > 0.005
+          ? '<div title="Includes use from conversations whose logs Codex has removed, estimated from the token totals it keeps"><span>At API prices, ' + money(cc.estimated.cost) + " of it estimated</span><b>" + money(cc.cost) + "</b></div>"
+          : "<div><span>At API prices</span><b>" + money(cc.cost) + "</b></div>") +
         (cc.earlier ? "<div><span>With the estimate before " + esc(dayLabel(addDays(cc.earlier.until, 1), { day: "numeric", month: "short" })) + "</span><b>about " + money(cc.cost + cc.earlier.cost) + "</b></div>" : "") +
         (perHour ? '<div title="The cost on days the tracker saw it work, divided by that work"><span>Per hour of work</span><b>' + money(perHour) + "</b></div>" : "") +
         "<div><span>Tokens</span><b>" + tokens(all) + "</b></div>" +
@@ -1753,7 +1755,10 @@
           : "");
       foot =
         costKind === "codex"
-          ? "Counted from Codex's own logs in ~/.codex, only read, never changed; prompts and replies are not kept. OpenAI's list prices of " + esc(shortDate(cc.prices_as_of)) + " are built in: the standard tier, without batch or other discounts, and the long-context rate for prompts over 272K tokens."
+          ? "Counted from Codex's own logs in ~/.codex, only read, never changed; prompts and replies are not kept. OpenAI's list prices of " + esc(shortDate(cc.prices_as_of)) + " are built in: the standard tier, without batch, promotional or other discounts, and the long-context rate for prompts over 272K tokens." +
+            (cc.estimated && cc.estimated.tokens
+              ? " Codex has removed the logs of " + plural(cc.estimated.conversations, "older conversation") + "; their " + tokens(cc.estimated.tokens) + " tokens come from the totals Codex keeps for each conversation, split like your logged responses and spread over the conversation's turns, so that part is an estimate."
+              : "")
           : "Counted from Claude Code's own logs in ~/.claude, only read, never changed; prompts and replies are not kept. Anthropic's prices of " + esc(shortDate(cc.prices_as_of)) + " are built in. On a Pro or Max plan you pay the plan instead.";
       if (cc.unpriced.length) foot += " No price for " + cc.unpriced.map(esc).join(", ") + ": add one in config.toml under [agents.prices].";
     }
@@ -1885,7 +1890,7 @@
   const money = (x) => (!x ? "$0" : x < 0.01 ? "<$0.01" : x < 1000 ? `$${x.toFixed(2)}` : `$${Math.round(x).toLocaleString("en-US")}`);
   const tokens = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n));
   function costRows(list, empty) {
-    list = (list || []).filter((r) => r.requests > 0);
+    list = (list || []).filter((r) => r.requests > 0 || r.cost > 0);
     if (!list.length) return `<p class="empty">${esc(empty)}</p>`;
     const top = Math.max(...list.map((r) => r.cost), 1e-9);
     return `<ul class="plain costs">${list
@@ -1893,7 +1898,7 @@
       .map((r) => {
         const t = r.tokens;
         const all = t.input + t.output + t.cache_write + t.cache_read;
-        const what = r.estimated ? `about ${tokens(all)} tokens` : `${r.requests.toLocaleString("en-US")} requests · ${tokens(all)} tokens`;
+        const what = r.estimated || !r.requests ? `about ${tokens(all)} tokens, estimated` : `${r.requests.toLocaleString("en-US")} requests · ${tokens(all)} tokens`;
         return `<li><span>${esc(r.name)} <span class="d">${what}</span></span><span>${r.priced ? money(r.cost) : `${money(r.cost)} <span class="d">+ unpriced</span>`}</span><span class="rb" aria-hidden="true"><i style="--w:${((r.cost / top) * 100).toFixed(2)}%;--c:var(--agent, #b49be8)"></i></span></li>`;
       })
       .join("")}</ul>`;

@@ -99,6 +99,9 @@ pub fn spawn(shared: SharedRef, db: PathBuf) {
                 )?;
                 conn.busy_timeout(Duration::from_secs(5))?;
                 let pass = scan(&mut conn, &roots(), BUDGET, keep_from);
+                if let Err(e) = scan_threads(&mut conn, &home(), keep_from) {
+                    tracing::debug!("codex: its conversation list was not read: {e:#}");
+                }
                 drop(conn);
                 crate::util::trim_heap();
                 pass
@@ -162,6 +165,8 @@ pub struct Usage {
     pub output: u64,
     pub reasoning: u64,
     pub fast: bool,
+    /// The conversation it belongs to (a hash of its id), 0 if unknown.
+    pub thread: i64,
 }
 
 /// The plan's limits as Codex last reported them.
@@ -190,6 +195,8 @@ struct State {
     mode: i64,
     /// The running total last counted (mode 2), so a repeated count adds nothing.
     last_total: u64,
+    /// The conversation (a hash of its id), from the log's first line.
+    thread: i64,
 }
 
 /// Reads what is new in every log, up to budget bytes, and stores usage and the latest limits.
@@ -203,7 +210,8 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
     type Known = (i64, i64, i64, State);
     let known: HashMap<i64, Known> = {
         let mut st = conn.prepare(
-            "SELECT key, size, mtime_ns, offset, model, cwd, tier, mode, last_total FROM codex_files",
+            "SELECT key, size, mtime_ns, offset, model, cwd, tier, mode, last_total, thread
+             FROM codex_files",
         )?;
         st.query_map([], |r| {
             Ok((
@@ -218,6 +226,7 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
                         tier: r.get(6)?,
                         mode: r.get(7)?,
                         last_total: r.get::<_, i64>(8)?.max(0) as u64,
+                        thread: r.get(9)?,
                     },
                 ),
             ))
@@ -278,10 +287,13 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
         let size = if got.cut { -1 } else { f.size as i64 };
         let tx = conn.transaction()?;
         {
+            // A response read again (after an upgrade) only fills in its conversation.
             let mut up = tx.prepare_cached(
-                "INSERT OR IGNORE INTO codex_usage(id, at_ms, model, project, input, cached,
-                     cache_write, output, reasoning, fast)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO codex_usage(id, at_ms, model, project, input, cached,
+                     cache_write, output, reasoning, fast, thread)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(id) DO UPDATE SET thread = excluded.thread
+                     WHERE codex_usage.thread = 0 AND excluded.thread != 0",
             )?;
             for u in rows {
                 up.execute(params![
@@ -294,14 +306,15 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
                     u.cache_write as i64,
                     u.output as i64,
                     u.reasoning as i64,
-                    u.fast
+                    u.fast,
+                    u.thread
                 ])?;
             }
             let s = &got.state;
             tx.execute(
                 "INSERT OR REPLACE INTO codex_files(key, size, mtime_ns, offset, model, cwd, tier,
-                     mode, last_total)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     mode, last_total, thread)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     key,
                     size,
@@ -311,7 +324,8 @@ pub fn scan(conn: &mut Connection, roots: &[PathBuf], budget: u64, keep_from: i6
                     s.cwd,
                     s.tier,
                     s.mode,
-                    s.last_total as i64
+                    s.last_total as i64,
+                    s.thread
                 ],
             )?;
         }
@@ -359,6 +373,258 @@ pub fn load_limits(conn: &Connection) -> Result<Option<Limits>> {
         })
         .optional()?;
     Ok(v.and_then(|v| serde_json::from_str(&v).ok()))
+}
+
+/// A conversation's key: a hash of its id, so the id itself is not kept.
+pub fn thread_key(id: &str) -> i64 {
+    hash(&[b"codex-thread", id.as_bytes()])
+}
+
+/// The newest version of one of Codex's databases in its home ("state_" finds state_5.sqlite).
+fn newest_db(home: &Path, prefix: &str) -> Option<PathBuf> {
+    std::fs::read_dir(home)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name();
+            let n = name
+                .to_str()?
+                .strip_prefix(prefix)?
+                .strip_suffix(".sqlite")?
+                .parse::<u32>()
+                .ok()?;
+            Some((n, e.path()))
+        })
+        .filter(|(_, p)| p.symlink_metadata().is_ok_and(|m| m.file_type().is_file()))
+        .max_by_key(|(n, _)| *n)
+        .map(|(_, p)| p)
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Opens one of Codex's databases without changing it: read-only, and while Codex is not using
+/// it (no write-ahead log next to it) as immutable, so not even a lock or index file is made.
+fn open_codex_db(path: &Path) -> rusqlite::Result<Connection> {
+    let mut uri = String::from("file:");
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || b"/._-~".contains(&b) {
+            uri.push(b as char);
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri.push_str(if with_suffix(path, "-wal").exists() {
+        "?mode=ro"
+    } else {
+        "?mode=ro&immutable=1"
+    });
+    let c = Connection::open_with_flags(
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    c.busy_timeout(Duration::from_secs(2))?;
+    Ok(c)
+}
+
+fn columns(conn: &Connection, table: &str) -> rusqlite::Result<HashSet<String>> {
+    let mut st = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
+    st.query_map([table], |r| r.get(0))?.collect()
+}
+
+/// Size and change time of a database and its write-ahead log, to skip one that has not changed.
+fn signature(paths: &[&Path]) -> String {
+    let mut s = String::new();
+    for p in paths {
+        for f in [p.to_path_buf(), with_suffix(p, "-wal")] {
+            if let Ok(m) = f.metadata() {
+                let t = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                s.push_str(&format!("{}:{t};", m.len()));
+            } else {
+                s.push_str("-;");
+            }
+        }
+    }
+    s
+}
+
+const THREADS_KEY: &str = "codex_threads_seen";
+
+#[derive(Debug, Default, PartialEq)]
+pub struct ThreadPass {
+    pub threads: usize,
+    pub turns: usize,
+}
+
+/// Seconds or milliseconds since 1970, as milliseconds.
+fn to_ms(t: i64) -> i64 {
+    if t < 100_000_000_000 { t * 1000 } else { t }
+}
+
+/// Copies what Codex's own databases say about each conversation: its token total (prompts,
+/// cached or not, and replies), model and folder from state_N.sqlite, and when its turns ran
+/// from thread_history_N.sqlite. Codex keeps these after it removes a conversation's log, so
+/// that use still counts. Titles, prompts and replies are not read. Rows are only added or
+/// raised, never removed, and nothing is taken from while tracking was paused.
+pub fn scan_threads(conn: &mut Connection, home: &Path, keep_from: i64) -> Result<ThreadPass> {
+    let Some(state) = newest_db(home, "state_") else {
+        return Ok(ThreadPass::default());
+    };
+    let history = newest_db(home, "thread_history_");
+    let sig = match &history {
+        Some(h) => signature(&[&state, h]),
+        None => signature(&[&state]),
+    };
+    let seen: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [THREADS_KEY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if seen.as_deref() == Some(sig.as_str()) {
+        return Ok(ThreadPass::default());
+    }
+    let paused = paused_spans(conn)?;
+    let in_pause = |t: i64| paused.iter().any(|&(a, b)| t >= a && t < b);
+    let mut projects = Projects::default();
+    // (key, created, updated, model, project, tokens)
+    let mut threads: Vec<(i64, i64, i64, String, String, i64)> = vec![];
+    {
+        let src = open_codex_db(&state)?;
+        let cols = columns(&src, "threads")?;
+        if !["id", "created_at", "updated_at", "cwd", "tokens_used"]
+            .iter()
+            .all(|c| cols.contains(*c))
+        {
+            return Ok(ThreadPass::default());
+        }
+        let pick = |ms: &str, s: &str| {
+            if cols.contains(ms) {
+                format!("coalesce({ms}, {s} * 1000)")
+            } else {
+                format!("{s} * 1000")
+            }
+        };
+        let model = if cols.contains("model") {
+            "coalesce(model, '')"
+        } else {
+            "''"
+        };
+        let sql = format!(
+            "SELECT id, {}, {}, {model}, cwd, tokens_used FROM threads",
+            pick("created_at_ms", "created_at"),
+            pick("updated_at_ms", "updated_at"),
+        );
+        let mut st = src.prepare(&sql)?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, created, updated, model, cwd, tokens) = row?;
+            if updated < keep_from || tokens <= 0 {
+                continue;
+            }
+            let project = if cwd.starts_with('/') {
+                projects.of(Path::new(&cwd))
+            } else {
+                String::new()
+            };
+            threads.push((thread_key(&id), created, updated, model, project, tokens));
+        }
+    }
+    // When each turn ran; the total per conversation counts paused turns too, so that their
+    // share of the tokens is left out rather than moved to other turns.
+    let mut turns: Vec<(i64, i64, i64)> = vec![];
+    let mut turn_ms: HashMap<i64, i64> = HashMap::new();
+    if let Some(h) = &history
+        && let Ok(src) = open_codex_db(h)
+        && let Ok(cols) = columns(&src, "thread_turns")
+        && ["thread_id", "started_at", "completed_at", "duration_ms"]
+            .iter()
+            .all(|c| cols.contains(*c))
+    {
+        let mut st = src.prepare(
+            "SELECT thread_id, started_at, completed_at, duration_ms FROM thread_turns
+             WHERE started_at IS NOT NULL",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, started, completed, dur) = row?;
+            let start = to_ms(started);
+            let end = match (dur, completed) {
+                (Some(d), _) if d > 0 => start + d,
+                (_, Some(c)) => to_ms(c),
+                _ => continue,
+            };
+            if end <= start {
+                continue;
+            }
+            let key = thread_key(&id);
+            *turn_ms.entry(key).or_default() += end - start;
+            if end >= keep_from && !in_pause(start) {
+                turns.push((key, start, end));
+            }
+        }
+    }
+    let mut pass = ThreadPass::default();
+    let tx = conn.transaction()?;
+    {
+        let mut up = tx.prepare(
+            "INSERT INTO codex_threads(key, created_ms, updated_ms, model, project, tokens, turn_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(key) DO UPDATE SET
+                 updated_ms = max(updated_ms, excluded.updated_ms),
+                 model = CASE WHEN excluded.model != '' THEN excluded.model ELSE model END,
+                 project = excluded.project,
+                 tokens = max(tokens, excluded.tokens),
+                 turn_ms = max(turn_ms, excluded.turn_ms)",
+        )?;
+        for (key, created, updated, model, project, tokens) in &threads {
+            let ms = turn_ms.get(key).copied().unwrap_or(0);
+            // A conversation without turns is placed when it last changed: not if that was paused.
+            if ms == 0 && in_pause(*updated) {
+                continue;
+            }
+            up.execute(params![key, created, updated, model, project, tokens, ms])?;
+            pass.threads += 1;
+        }
+        let mut ins = tx.prepare(
+            "INSERT OR IGNORE INTO codex_turns(thread, start_ms, end_ms) VALUES (?1, ?2, ?3)",
+        )?;
+        for (key, start, end) in &turns {
+            pass.turns += ins.execute(params![key, start, end])?;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            params![THREADS_KEY, sig],
+        )?;
+    }
+    tx.commit()?;
+    Ok(pass)
 }
 
 struct Got {
@@ -452,6 +718,9 @@ struct Line {
 struct Payload {
     #[serde(rename = "type")]
     kind: Option<String>,
+    /// The conversation's id (session_meta).
+    id: Option<String>,
+    thread_id: Option<String>,
     cwd: Option<String>,
     model: Option<String>,
     service_tier: Option<String>,
@@ -507,6 +776,7 @@ impl Line {
         if let Some(t) = p.service_tier.as_deref() {
             out.state.tier = t.to_string();
         }
+        let thread = p.thread_id.as_deref().map(thread_key);
         let usage = |c: Counts, id: i64, at_ms: i64, st: &State, projects: &mut Projects| Usage {
             id,
             at_ms,
@@ -522,9 +792,16 @@ impl Line {
             output: c.output_tokens,
             reasoning: c.reasoning_output_tokens,
             fast: matches!(st.tier.as_str(), "fast" | "priority"),
+            thread: thread.unwrap_or(st.thread),
         };
         match self.kind.as_deref() {
             Some("session_meta") | Some("turn_context") => {
+                if self.kind.as_deref() == Some("session_meta")
+                    && out.state.thread == 0
+                    && let Some(id) = p.id.as_deref().filter(|i| !i.is_empty())
+                {
+                    out.state.thread = thread_key(id);
+                }
                 if let Some(c) = p.cwd.filter(|c| !c.is_empty()) {
                     out.state.cwd = c;
                 }
@@ -622,7 +899,7 @@ mod tests {
         .unwrap()
     }
 
-    const META: &str = r#"{"timestamp":"2026-11-20T10:00:00.000Z","type":"session_meta","payload":{"cwd":"/nowhere/proj","base_instructions":"secret instructions"}}"#;
+    const META: &str = r#"{"timestamp":"2026-11-20T10:00:00.000Z","type":"session_meta","payload":{"id":"t-one","cwd":"/nowhere/proj","base_instructions":"secret instructions"}}"#;
     const TURN: &str = r#"{"timestamp":"2026-11-20T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-6.2-astra","cwd":"/nowhere/proj"}}"#;
 
     fn record(id: &str, input: u64, cached: u64, output: u64) -> String {
@@ -669,6 +946,14 @@ mod tests {
             (model.as_str(), project.as_str()),
             ("gpt-6.2-astra", "/nowhere/proj")
         );
+        let thread: i64 = conn
+            .query_row("SELECT thread FROM codex_usage", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            thread,
+            thread_key("t-one"),
+            "a response knows its conversation"
+        );
         let l = load_limits(&conn).unwrap().unwrap();
         assert_eq!(l.plan, "plus");
         assert_eq!(l.windows[0].minutes, 300);
@@ -690,6 +975,146 @@ mod tests {
             .unwrap();
         assert!(!all.contains("secret"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Codex's own databases, as small as the reader needs them.
+    fn codex_home(dir: &Path, threads: &[(&str, i64, &str, i64)], turns: &[(&str, i64, i64)]) {
+        let s = Connection::open(dir.join("state_5.sqlite")).unwrap();
+        s.execute_batch(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, cwd TEXT NOT NULL,
+                title TEXT NOT NULL, tokens_used INTEGER NOT NULL DEFAULT 0, model TEXT,
+                first_user_message TEXT NOT NULL DEFAULT '', created_at_ms INTEGER,
+                updated_at_ms INTEGER)",
+        )
+        .unwrap();
+        for (id, at, model, tokens) in threads {
+            s.execute(
+                "INSERT OR REPLACE INTO threads VALUES (?1, '/gone.jsonl', ?2, ?2, '/nowhere/proj',
+                    'secret title', ?3, ?4, 'secret prompt', NULL, NULL)",
+                params![id, at, tokens, model],
+            )
+            .unwrap();
+        }
+        let h = Connection::open(dir.join("thread_history_1.sqlite")).unwrap();
+        h.execute_batch(
+            "CREATE TABLE thread_turns (thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+                started_at INTEGER, completed_at INTEGER, duration_ms INTEGER,
+                PRIMARY KEY (thread_id, turn_id))",
+        )
+        .unwrap();
+        for (i, (id, start, dur)) in turns.iter().enumerate() {
+            h.execute(
+                "INSERT INTO thread_turns VALUES (?1, ?2, ?3, ?3 + ?4 / 1000, ?4)",
+                params![id, format!("turn{i}"), start, dur],
+            )
+            .unwrap();
+        }
+    }
+
+    fn files_of(dir: &Path) -> Vec<(String, u64)> {
+        let mut v: Vec<(String, u64)> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    e.metadata().unwrap().len(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn conversations_are_read_from_codex_database_without_changing_it() {
+        let dir = tmp("threads");
+        let home = dir.join("codex");
+        std::fs::create_dir_all(&home).unwrap();
+        let t0 = 1_795_000_000; // seconds, as Codex stores them
+        codex_home(
+            &home,
+            &[("a", t0, "gpt-6.1-sol", 5_000_000), ("b", t0 + 60, "", 0)],
+            &[("a", t0, 30_000), ("a", t0 + 100, 90_000)],
+        );
+        let before = files_of(&home);
+        let mut conn = db(&dir);
+        let p = scan_threads(&mut conn, &home, 0).unwrap();
+        assert_eq!(
+            p,
+            ThreadPass {
+                threads: 1,
+                turns: 2
+            },
+            "an empty conversation is skipped"
+        );
+        let (tokens, turn_ms, model, project): (i64, i64, String, String) = conn
+            .query_row(
+                "SELECT tokens, turn_ms, model, project FROM codex_threads WHERE key = ?1",
+                [thread_key("a")],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((tokens, turn_ms), (5_000_000, 120_000));
+        assert_eq!(
+            (model.as_str(), project.as_str()),
+            ("gpt-6.1-sol", "/nowhere/proj")
+        );
+        // Codex's files are exactly as they were: no lock, log or index file was made.
+        assert_eq!(files_of(&home), before);
+        // Unchanged: skipped. Then Codex drops the conversation: ours is kept.
+        assert_eq!(
+            scan_threads(&mut conn, &home, 0).unwrap(),
+            ThreadPass::default()
+        );
+        Connection::open(home.join("state_5.sqlite"))
+            .unwrap()
+            .execute("DELETE FROM threads", [])
+            .unwrap();
+        scan_threads(&mut conn, &home, 0).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM codex_threads", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        // No title or prompt is stored anywhere.
+        let dump: String = conn
+            .query_row(
+                "SELECT group_concat(model || project) FROM codex_threads",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!dump.contains("secret"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A check against real data, run by hand on a copy of tracker.db:
+    /// AT_DB=/path/copy.db cargo test real_codex -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_codex() {
+        let Some(path) = std::env::var_os("AT_DB").map(PathBuf::from) else {
+            return;
+        };
+        drop(crate::store::Store::open(&path).unwrap());
+        let mut conn = Connection::open(&path).unwrap();
+        println!("logs: {:?}", scan(&mut conn, &roots(), BUDGET, 0).unwrap());
+        println!(
+            "threads: {:?}",
+            scan_threads(&mut conn, &home(), 0).unwrap()
+        );
+        let to = crate::util::local_date(crate::util::now_ms());
+        for from in ["2026-01-01", to.as_str()] {
+            let r = crate::report::cost::codex(&conn, &Default::default(), from, &to).unwrap();
+            println!(
+                "{from}..{to}: ${:.2}, {} requests, tokens {:?}, estimated {:?}",
+                r.cost, r.requests, r.tokens, r.estimated
+            );
+            for m in &r.models {
+                println!("  {} ${:.2} {} requests", m.key, m.cost, m.requests);
+            }
+        }
     }
 
     #[test]

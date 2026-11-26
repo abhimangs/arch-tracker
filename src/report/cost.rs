@@ -84,22 +84,32 @@ const fn long(mut x: Price, over: u64, i: f64, o: f64) -> Price {
     x
 }
 
-/// OpenAI's list prices (standard tier) for the models Codex runs. Batch, flex and background
-/// discounts are not applied. Prompts over 272K tokens are billed at 2x input (cache reads too)
-/// and 1.5x output; the fast tier costs 2x. Cache writes cost 1.25x the input price.
+/// One OpenAI model at its standard list price (input and output per million tokens, cache
+/// reads as a share of input): 2x for the fast tier, and over 272K prompt tokens 2x input (cache
+/// reads too) and 1.5x output.
+const fn openai(input: f64, output: f64, read: f64) -> Price {
+    long(
+        fast(p(input, output, read), input * 2.0, output * 2.0),
+        272_000,
+        input * 2.0,
+        output * 1.5,
+    )
+}
+
+/// OpenAI's list prices (standard tier) for every model Codex has run here. Batch, flex and
+/// background discounts and promotional prices are not applied (gpt-5.6-sol is priced at its
+/// regular $5 / $30, not the $4 / $20 offer). Cache writes cost 1.25x the input price.
 const OPENAI_PRICES: &[(&str, Price)] = &[
-    (
-        "gpt-6.2-astra",
-        long(fast(p(8.0, 40.0, 0.05), 16.0, 80.0), 272_000, 16.0, 60.0),
-    ),
-    (
-        "gpt-6.2-sol",
-        long(fast(p(2.0, 10.0, 0.05), 4.0, 20.0), 272_000, 4.0, 15.0),
-    ),
-    (
-        "gpt-6.1-sol",
-        long(fast(p(2.0, 10.0, 0.05), 4.0, 20.0), 272_000, 4.0, 15.0),
-    ),
+    ("gpt-6.2-astra", openai(8.0, 40.0, 0.05)),
+    ("gpt-6.2-sol", openai(2.0, 10.0, 0.05)),
+    ("gpt-6.1-sol", openai(2.0, 10.0, 0.05)),
+    ("gpt-6.1-terra", openai(1.0, 5.0, 0.05)),
+    ("gpt-6-astra", openai(10.0, 50.0, 0.1)),
+    ("gpt-6-sol", openai(2.0, 10.0, 0.1)),
+    ("gpt-6-luna", openai(0.1, 0.5, 0.1)),
+    ("gpt-5.6-sol", openai(5.0, 30.0, 0.1)),
+    ("gpt-5.6-terra", openai(2.0, 12.0, 0.1)),
+    ("gpt-5.6-luna", openai(0.2, 1.2, 0.1)),
 ];
 
 /// US-only inference (inference_geo "us") costs 1.1x on every token.
@@ -158,6 +168,8 @@ pub struct Tokens4 {
     pub web_search: u64,
     pub fast: bool,
     pub us_only: bool,
+    /// The sum of many responses (an estimate): never priced at the long-context rate.
+    pub many: bool,
 }
 
 /// What one reply cost, in USD.
@@ -172,6 +184,7 @@ pub fn cost_parts(p: &Price, t: &Tokens4) -> CostBy {
     let (mut i, mut o) = (p.input, p.output);
     if let Some((over, li, lo)) = p.long
         && prompt > over
+        && !t.many
     {
         (i, o) = (li, lo);
     }
@@ -274,6 +287,17 @@ pub struct CostReport {
     /// Codex: the plan's usage limits as it last reported them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limits: Option<crate::sources::codex::Limits>,
+    /// Codex: the part of the totals above estimated from its conversation totals, for
+    /// conversations whose logs it has removed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated: Option<Estimated>,
+}
+
+#[derive(Serialize, Default, Clone, Debug)]
+pub struct Estimated {
+    pub cost: f64,
+    pub tokens: u64,
+    pub conversations: u64,
 }
 
 /// Claude Code removes session transcripts after cleanupPeriodDays (30 by default), but keeps
@@ -549,9 +573,11 @@ pub fn claude(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<C
                 web_search: n(8)?,
                 fast: r.get(9)?,
                 us_only: r.get(10)?,
+                many: false,
             },
         ))
     })?;
+    let rows = rows.map(|r| r.map(|(m, p, a, t)| (m, p, a, t, 1)));
     aggregate(&mut out, cfg, rows, (ds, de_from, de, one_day))?;
     Ok(out)
 }
@@ -576,7 +602,7 @@ pub fn codex(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<Co
     let rows = st.query_map([ds, de], |r| {
         let n = |i: usize| r.get::<_, i64>(i).map(|v| v.max(0) as u64);
         let (input, cached, write) = (n(3)?, n(4)?, n(5)?);
-        Ok((
+        Ok::<Row, rusqlite::Error>((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, i64>(2)?,
@@ -590,18 +616,173 @@ pub fn codex(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<Co
                 web_search: 0,
                 fast: r.get(7)?,
                 us_only: false,
+                many: false,
             },
+            1,
         ))
     })?;
-    aggregate(&mut out, cfg, rows, (ds, de_from, de, one_day))?;
+    let mut all: Vec<Row> = rows.collect::<rusqlite::Result<_>>()?;
+    let (conversations, guessed) = codex_estimate(conn, ds, de)?;
+    if !guessed.is_empty() {
+        all.extend(guessed);
+        all.sort_by_key(|r| r.2);
+    }
+    aggregate(
+        &mut out,
+        cfg,
+        all.into_iter().map(Ok),
+        (ds, de_from, de, one_day),
+    )?;
+    if let Some(e) = out.estimated.as_mut() {
+        e.conversations = conversations;
+    }
     Ok(out)
 }
 
-/// Adds priced rows (model, project folder, time, tokens) to a report, ordered by time.
+/// How Codex's responses split their tokens, to estimate those whose logs are gone.
+#[derive(Clone, Copy, Debug)]
+struct Mix {
+    /// Shares of all tokens (prompt, cached or not, plus reply).
+    uncached: f64,
+    cached: f64,
+    write: f64,
+}
+
+impl Mix {
+    /// What responses looked like here before any were counted: most of the prompt cached.
+    const TYPICAL: Mix = Mix {
+        uncached: 0.045,
+        cached: 0.95,
+        write: 0.0,
+    };
+
+    fn of(input: u64, cached: u64, write: u64, output: u64) -> Option<Mix> {
+        let all = (input + output) as f64;
+        (all > 0.0).then(|| Mix {
+            uncached: input.saturating_sub(cached + write) as f64 / all,
+            cached: cached as f64 / all,
+            write: write as f64 / all,
+        })
+    }
+
+    fn split(&self, n: u64) -> Tokens4 {
+        let part = |s: f64| (n as f64 * s).round() as u64;
+        let (input, cache_read, cache_5m) =
+            (part(self.uncached), part(self.cached), part(self.write));
+        Tokens4 {
+            input,
+            cache_read,
+            cache_5m,
+            output: n.saturating_sub(input + cache_read + cache_5m),
+            many: true,
+            ..Default::default()
+        }
+    }
+}
+
+/// Codex's conversations hold more tokens than the responses read from its logs when it has
+/// removed those logs (or they were never read). The rest is estimated: split like the responses
+/// that were read (per model once there are a million tokens of it, else all of them), and spread
+/// over the conversation's turns by how long each ran. Rows for [ds, de), with 0 requests.
+fn codex_estimate(conn: &Connection, ds: i64, de: i64) -> Result<(u64, Vec<Row>)> {
+    if !has_table(conn, "codex_threads") {
+        return Ok((0, vec![]));
+    }
+    let counted: HashMap<i64, u64> = {
+        let mut st = conn.prepare(
+            "SELECT thread, sum(input + output) FROM codex_usage WHERE thread != 0 GROUP BY thread",
+        )?;
+        st.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)?.max(0) as u64)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    let mut mixes: HashMap<String, (u64, Mix)> = HashMap::new();
+    let mut all = (0, 0, 0, 0);
+    {
+        let mut st = conn.prepare(
+            "SELECT model, sum(input), sum(cached), sum(cache_write), sum(output)
+             FROM codex_usage GROUP BY model",
+        )?;
+        let rows = st.query_map([], |r| {
+            let n = |i: usize| r.get::<_, i64>(i).map(|v| v.max(0) as u64);
+            Ok((r.get::<_, String>(0)?, n(1)?, n(2)?, n(3)?, n(4)?))
+        })?;
+        for row in rows {
+            let (model, i, c, w, o) = row?;
+            all = (all.0 + i, all.1 + c, all.2 + w, all.3 + o);
+            if let Some(m) = Mix::of(i, c, w, o) {
+                mixes.insert(model, (i + o, m));
+            }
+        }
+    }
+    let overall = Mix::of(all.0, all.1, all.2, all.3).unwrap_or(Mix::TYPICAL);
+    let mut turns: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
+    {
+        let mut st = conn.prepare("SELECT thread, start_ms, end_ms FROM codex_turns")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        for row in rows {
+            let (k, a, b): (i64, i64, i64) = row?;
+            turns.entry(k).or_default().push((a, b));
+        }
+    }
+    let mut out = vec![];
+    let mut conversations = 0;
+    let mut st =
+        conn.prepare("SELECT key, updated_ms, model, project, tokens, turn_ms FROM codex_threads")?;
+    let rows = st.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, i64>(4)?.max(0) as u64,
+            r.get::<_, i64>(5)?.max(0),
+        ))
+    })?;
+    for row in rows {
+        let (key, updated, model, project, tokens, turn_ms) = row?;
+        let left = tokens.saturating_sub(counted.get(&key).copied().unwrap_or(0));
+        if left == 0 {
+            continue;
+        }
+        let mix = match mixes.get(&model) {
+            Some(&(n, m)) if n >= 1_000_000 => m,
+            _ => overall,
+        };
+        let parts: Vec<(i64, f64)> = if turn_ms > 0 {
+            turns
+                .get(&key)
+                .map(|v| {
+                    v.iter()
+                        .map(|&(a, b)| (a, (b - a) as f64 / turn_ms as f64))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            vec![(updated, 1.0)]
+        };
+        let mut any = false;
+        for (at, share) in parts {
+            let n = (left as f64 * share).round() as u64;
+            if at < ds || at >= de || n == 0 {
+                continue;
+            }
+            out.push((model.clone(), project.clone(), at, mix.split(n), 0));
+            any = true;
+        }
+        conversations += any as u64;
+    }
+    Ok((conversations, out))
+}
+
+/// A priced row: model, project folder, time, tokens, and how many requests it stands for (0 for
+/// an estimate).
+type Row = (String, String, i64, Tokens4, u64);
+
+/// Adds priced rows to a report, ordered by time.
 fn aggregate(
     out: &mut CostReport,
     cfg: &Config,
-    rows: impl Iterator<Item = rusqlite::Result<(String, String, i64, Tokens4)>>,
+    rows: impl Iterator<Item = rusqlite::Result<Row>>,
     (ds, de_from, de, one_day): (i64, i64, i64, bool),
 ) -> Result<()> {
     let rules = ProjectRules::new(&cfg.projects);
@@ -616,7 +797,7 @@ fn aggregate(
         out.hourly = vec![0.0; ((de - de_from + 3_599_999) / 3_600_000).max(1) as usize];
     }
     for row in rows {
-        let (model, folder, at, t) = row?;
+        let (model, folder, at, t, n) = row?;
         let price = *prices
             .entry(model.clone())
             .or_insert_with(|| price_for(&model, &cfg.agents.prices));
@@ -624,7 +805,12 @@ fn aggregate(
         let c = parts.total();
         out.cost += c;
         out.cost_by.add(&parts);
-        out.requests += 1;
+        out.requests += n;
+        if n == 0 {
+            let e = out.estimated.get_or_insert_default();
+            e.cost += c;
+            e.tokens += t.input + t.output + t.cache_5m + t.cache_1h + t.cache_read;
+        }
         out.web_searches += t.web_search;
         out.tokens.add(&t);
         if let Some(h) = out.hourly.get_mut(((at - ds) / 3_600_000).max(0) as usize) {
@@ -638,7 +824,7 @@ fn aggregate(
             ..Default::default()
         });
         m.cost += c;
-        m.requests += 1;
+        m.requests += n;
         m.tokens.add(&t);
         m.priced &= price.is_some();
         let (pkey, pname) = names
@@ -656,7 +842,7 @@ fn aggregate(
             ..Default::default()
         });
         pr.cost += c;
-        pr.requests += 1;
+        pr.requests += n;
         pr.tokens.add(&t);
         pr.priced &= price.is_some();
         if at >= day_end {
@@ -670,7 +856,7 @@ fn aggregate(
         }
         if let Some(d) = days.last_mut() {
             d.cost += c;
-            d.requests += 1;
+            d.requests += n;
         }
     }
     out.unpriced = models
@@ -739,6 +925,53 @@ mod tests {
             0.2 + 10.0 + 0.01
         ));
         assert!(price_for("gpt-unknown", &none).is_none());
+    }
+
+    #[test]
+    fn codex_use_with_removed_logs_is_estimated_from_conversation_totals() {
+        let dir = std::env::temp_dir().join(format!("at-codexest-{}", std::process::id()));
+        let st = crate::store::Store::open(&dir.join("t.db")).unwrap();
+        let ds = crate::util::date_bounds("2026-11-20").unwrap().0;
+        let at = ds + 3_600_000;
+        let c = &st.conn;
+        // One logged response of conversation 7: 100K tokens, 90K of the prompt cached.
+        c.execute(
+            "INSERT INTO codex_usage(id, at_ms, model, project, input, cached, cache_write, output,
+                 reasoning, fast, thread)
+             VALUES (1, ?1, 'gpt-6.1-sol', '', 99000, 90000, 0, 1000, 0, 0, 7)",
+            [at],
+        )
+        .unwrap();
+        // Codex says conversation 7 used 2.1M (2M of it unlogged), and conversation 8 (no logs)
+        // 1M over two turns, the second three times as long.
+        c.execute_batch(&format!(
+            "INSERT INTO codex_threads VALUES (7, {at}, {at}, 'gpt-6.1-sol', '', 2100000, 0);
+             INSERT INTO codex_threads VALUES (8, {at}, {at}, 'gpt-6.1-sol', '', 1000000, 40000);
+             INSERT INTO codex_turns VALUES (8, {at}, {});
+             INSERT INTO codex_turns VALUES (8, {}, {});",
+            at + 10_000,
+            at + 3_600_000,
+            at + 3_630_000
+        ))
+        .unwrap();
+        let r = codex(c, &Default::default(), "2026-11-20", "2026-11-20").unwrap();
+        assert_eq!(r.requests, 1, "estimates are not requests");
+        let e = r.estimated.unwrap();
+        assert_eq!((e.tokens, e.conversations), (3_000_000, 2));
+        // Split like the logged response: 9% uncached, 90% cached, 1% output, at the standard
+        // rate although each estimate holds far more than 272K tokens.
+        let per_m = 0.09 * 2.0 + 0.90 * 0.1 + 0.01 * 10.0;
+        assert!(near(e.cost, 3.0 * per_m), "{}", e.cost);
+        assert!(near(r.cost, 3.1 * per_m), "{}", r.cost);
+        // The turns place conversation 8: a quarter in the first hour, the rest in the second.
+        assert!(
+            near(r.hourly[1] - 2.1 * per_m, 0.25 * per_m),
+            "{:?}",
+            r.hourly
+        );
+        assert!(near(r.hourly[2], 0.75 * per_m), "{:?}", r.hourly);
+        drop(st);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

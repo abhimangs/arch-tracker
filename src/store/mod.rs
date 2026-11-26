@@ -94,6 +94,14 @@ impl Store {
             "DELETE FROM codex_usage WHERE at_ms < ?1",
             params![before_ms],
         )?;
+        tx.execute(
+            "DELETE FROM codex_turns WHERE end_ms < ?1",
+            params![before_ms],
+        )?;
+        tx.execute(
+            "DELETE FROM codex_threads WHERE updated_ms < ?1",
+            params![before_ms],
+        )?;
         if n > 0 {
             let orphans: Vec<i64> = {
                 let mut st = tx.prepare(
@@ -206,6 +214,17 @@ impl Store {
 }
 
 /// A database written by an older version (opened read-only) can lack newer tables.
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2",
+            params![table, column],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 fn has_table(conn: &Connection, name: &str) -> Result<bool> {
     Ok(conn
         .prepare_cached("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?
@@ -292,14 +311,35 @@ fn migrate(conn: &Connection) -> Result<()> {
             id INTEGER PRIMARY KEY, at_ms INTEGER NOT NULL, model TEXT NOT NULL,
             project TEXT NOT NULL, input INTEGER NOT NULL, cached INTEGER NOT NULL,
             cache_write INTEGER NOT NULL, output INTEGER NOT NULL, reasoning INTEGER NOT NULL,
-            fast INTEGER NOT NULL);
+            fast INTEGER NOT NULL, thread INTEGER NOT NULL DEFAULT 0);
          CREATE INDEX IF NOT EXISTS codex_usage_at ON codex_usage(at_ms);
          -- How far each Codex log has been read, and the model, folder and tier in effect there.
          CREATE TABLE IF NOT EXISTS codex_files(
             key INTEGER PRIMARY KEY, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
             offset INTEGER NOT NULL, model TEXT NOT NULL, cwd TEXT NOT NULL, tier TEXT NOT NULL,
-            mode INTEGER NOT NULL, last_total INTEGER NOT NULL);",
+            mode INTEGER NOT NULL, last_total INTEGER NOT NULL, thread INTEGER NOT NULL DEFAULT 0);
+         -- Codex's conversations as its own database lists them (key: a hash of their id): the
+         -- token total, model and folder, and how long their turns ran in all. Kept when Codex
+         -- later drops a conversation's log, so its use still counts.
+         CREATE TABLE IF NOT EXISTS codex_threads(
+            key INTEGER PRIMARY KEY, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL,
+            model TEXT NOT NULL, project TEXT NOT NULL, tokens INTEGER NOT NULL,
+            turn_ms INTEGER NOT NULL);
+         -- When their turns ran (none from while tracking was paused).
+         CREATE TABLE IF NOT EXISTS codex_turns(
+            thread INTEGER NOT NULL, start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL,
+            PRIMARY KEY(thread, start_ms));",
     )?;
+    // Responses now remember their conversation: older databases gain the column and read the
+    // logs again (each response still counts once) to fill it in.
+    for table in ["codex_usage", "codex_files"] {
+        if !has_column(conn, table, "thread")? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN thread INTEGER NOT NULL DEFAULT 0;"
+            ))?;
+            conn.execute("DELETE FROM codex_files", [])?;
+        }
+    }
     let v: Option<String> = conn
         .query_row(
             "SELECT value FROM meta WHERE key='schema_version'",

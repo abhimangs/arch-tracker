@@ -380,6 +380,19 @@ pub fn run(db: &Path, days: u32) -> Result<()> {
         ],
     });
     store.set_meta("codex_limits", Some(&limits.to_string()))?;
+    // An older Codex conversation whose log Codex has since removed: only its total is known.
+    let at = now - 2 * 24 * HOUR - 5 * HOUR;
+    store.conn.execute(
+        "INSERT INTO codex_threads(key, created_ms, updated_ms, model, project, tokens, turn_ms)
+         VALUES (1, ?1, ?2, 'gpt-6.1-sol', '~/code/atlas', 6400000, ?3)",
+        params![at, at + 50 * MIN, 40 * MIN],
+    )?;
+    for (a, b) in [(at, at + 25 * MIN), (at + 35 * MIN, at + 50 * MIN)] {
+        store.conn.execute(
+            "INSERT INTO codex_turns(thread, start_ms, end_ms) VALUES (1, ?1, ?2)",
+            params![a, b],
+        )?;
+    }
     println!("Wrote {days} days of made-up activity to {}", db.display());
     Ok(())
 }
