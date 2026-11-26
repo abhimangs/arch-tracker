@@ -152,6 +152,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/claude", get(api_claude))
         .route("/api/codex", get(api_codex))
         .route("/api/hermes", get(api_hermes))
+        .route("/api/limits", get(api_limits))
         .route("/api/settings", get(api_settings).put(api_settings_put))
         .route("/api/appearance", axum::routing::put(api_appearance))
         .route("/api/rule", post(api_rule))
@@ -803,6 +804,24 @@ async fn api_hermes(State(ctx): State<Ctx>, Params(q): Params<RangeQ>) -> Respon
     let path = ctx.web.db.clone();
     let viewer = ctx.web.viewer;
     blocking(move || report::cost::hermes(&db(&path, viewer)?, &cfg, &q.from, &q.to)).await
+}
+
+/// Codex's plan limits as it last reported them, and the levels the alerts use.
+async fn api_limits(State(ctx): State<Ctx>) -> Response {
+    let cfg = ctx.web.config();
+    let path = ctx.web.db.clone();
+    let viewer = ctx.web.viewer;
+    blocking(move || {
+        let conn = db(&path, viewer)?;
+        let n = &cfg.notifications;
+        Ok(json!({
+            "limits": crate::sources::codex::load_limits(&conn).unwrap_or(None),
+            "on": n.plan_limits && cfg.agents.codex_cost,
+            "five": n.limit_5h_percent,
+            "week": n.limit_week_percent,
+        }))
+    })
+    .await
 }
 
 async fn api_settings(State(ctx): State<Ctx>) -> Response {

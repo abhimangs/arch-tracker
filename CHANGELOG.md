@@ -27,6 +27,9 @@ All notable changes to this project are documented here. The format follows
   database (~/.hermes/state.db and each profile's, read-only; prompts and replies are never read)
   and priced on its page. Models named through a router ("anthropic/claude-…") are priced as the
   model. Settings → AI agents switches it off.
+- Codex plan-limit alerts: a desktop notification when its 5-hour or weekly limit passes a share
+  you choose in Settings → Notifications (70% unless you change it), once per limit, and a banner
+  in the dashboard until the limit resets. Notifications can play a sound (on by default).
 
 ### Changed
 

@@ -10,6 +10,12 @@
   const noticesEl = document.getElementById("notices");
   // One listener for the whole notices area: the buttons are re-rendered on every status.
   noticesEl.addEventListener("click", (e) => {
+    const lim = e.target.closest("[data-hidelimit]");
+    if (lim) {
+      // Hidden until that limit resets.
+      localStorage.setItem("hide-limit:" + lim.dataset.hidelimit, "1");
+      return renderNotices();
+    }
     if (!e.target.closest("#hideext")) return;
     localStorage.setItem("hide-ext-notice", String(Date.now() + 7 * 86400000));
     renderNotices();
@@ -2159,10 +2165,13 @@
         ${field("Category limits", "When a category reaches its daily limit (set in Categories).", check("nlim", nt.limits, "Tell me when a limit is reached"))}
         ${field("Daily goal", "When today's screen time reaches your daily goal.", check("ngoal", nt.goal, "Tell me when I reach my goal"))}
         ${field("Heads-up", "A notice this long before a limit or the goal. 0 for none.", num("nwarn", nt.warn_mins, "minutes before", 0, 240))}
+        ${field("Codex limits", "When Codex's 5-hour or weekly limit passes this share. Codex reports its limits while it works; a notice comes once per limit, and the dashboard shows a banner until it resets.", `${check("nplan", nt.plan_limits !== false, "Tell me when a limit runs low")}${num("n5h", nt.limit_5h_percent ?? 70, "% of the 5-hour limit", 1, 100)}${num("nweek", nt.limit_week_percent ?? 70, "% of the weekly limit", 1, 100)}`)}
+        ${field("Weekly summary", "On the first morning of the week: last week's screen time, top apps and sites, and what your agents did and would cost, against the week before.", check("nweekly", nt.weekly !== false, "Send me a summary every week"))}
+        ${field("Sound", "A short sound with each notice.", check("nsound", nt.sound !== false, "Play a sound"))}
         ${field("Breaks", `A reminder after a long stretch on screen. Locking the screen, or stepping away for ${plural(Math.ceil(Math.max(c.idle.threshold_secs, c.insights.session_gap_secs) / 60), "minute")}, starts a new one. It waits until a call or a video ends.`, `${check("nbreak", nt.breaks, "Remind me to take a break")}${num("nbreakmins", nt.break_after_mins, "minutes without a break", 5, 480)}`)}
         </div>
         ${field("Try it", "Shows a sample notice now, so you can see that they reach your desktop.", `<div class="inline"><button type="button" class="btn" id="ntest">Send a test notification</button><span class="msg" id="nmsg"></span></div>`)}
-      `, "Plasma's Do Not Disturb holds these too. Each notice comes once a day.")}
+      `, "Plasma's Do Not Disturb holds these too. Each notice comes once a day; a Codex limit notice once per limit.")}
       ${sec("projects", "Projects", `
         ${field("Code editors", "Apps whose window titles name the open project. One per line, by app id or name.", `<textarea id="editors">${esc(lines(c.projects.editors))}</textarea>`)}
         ${field("Rename or merge", "One per line as old=new. Old can be a folder (~/code/site) or a name.", `<textarea id="aliases" spellcheck="false">${esc(lines(c.projects.aliases))}</textarea>`)}
@@ -2400,6 +2409,11 @@
         warn_mins: n("nwarn"),
         breaks: $("nbreak").checked,
         break_after_mins: n("nbreakmins"),
+        plan_limits: $("nplan").checked,
+        limit_5h_percent: n("n5h"),
+        limit_week_percent: n("nweek"),
+        weekly: $("nweekly").checked,
+        sound: $("nsound").checked,
       };
       next.categories = cats.filter((x) => x.name);
       // Browsers not listed here (no longer seen) keep what they had.
@@ -2464,6 +2478,8 @@
     "insights.daily_goal_mins": "goal",
     "notifications.warn_mins": "nwarn",
     "notifications.break_after_mins": "nbreakmins",
+    "notifications.limit_5h_percent": "n5h",
+    "notifications.limit_week_percent": "nweek",
     "projects.aliases": "aliases",
     "projects.folders": "pfolders",
     "projects.include": "pinclude",
@@ -2589,8 +2605,44 @@
     if (s.sources.kwin && !s.sources.kwin.ok) {
       out.push('<div class="notice"><p>KWin hasn\'t reported windows for a few minutes. The tracker reloads its KWin script automatically; if this stays, restart it with systemctl --user restart arch-tracker.</p></div>');
     }
+    for (const w of limitWarnings()) {
+      out.push(
+        '<div class="notice limit"><p>Codex has used ' + Math.round(w.used_percent) + "% of its " + esc(w.name) + " limit" +
+          (w.resets_ms ? ", which resets " + esc(whenLabel(w.resets_ms)) : "") +
+          '. <a href="#/agent/codex/1">Open Codex</a></p><div class="actions"><button type="button" class="btn" data-hidelimit="' + esc(w.key) + '">Hide until it resets</button></div></div>',
+      );
+    }
     const html = out.join("");
     if (noticesEl.innerHTML !== html) noticesEl.innerHTML = html;
+  }
+
+  // Codex's plan limits past the level chosen in Settings (/api/limits, every few minutes).
+  let limitInfo = null;
+  async function loadLimits() {
+    try {
+      limitInfo = await get("/api/limits");
+    } catch {
+      return;
+    }
+    renderNotices();
+  }
+  function limitWarnings() {
+    const l = limitInfo;
+    if (!l || !l.on || !l.limits) return [];
+    const now = Date.now();
+    return (l.limits.windows || [])
+      .map((w) => {
+        const level = w.minutes === 10080 ? l.week : l.five;
+        const name = w.minutes === 300 ? "5-hour" : w.minutes === 10080 ? "weekly" : dur(w.minutes * 60);
+        return { ...w, level, name, key: w.minutes + ":" + (w.resets_ms || l.limits.at_ms) };
+      })
+      .filter(
+        (w) =>
+          w.used_percent >= w.level &&
+          !(w.resets_ms && w.resets_ms <= now) &&
+          now - l.limits.at_ms <= w.minutes * 60000 &&
+          !localStorage.getItem("hide-limit:" + w.key),
+      );
   }
 
   // ---------- folder picker ----------
@@ -3166,11 +3218,13 @@
       connectLive();
       loadBrowsers();
       loadAgents();
-      // Today's time per browser and agent in the sidebar.
+      loadLimits();
+      // Today's time per browser and agent in the sidebar, and Codex's limits.
       setInterval(() => {
         if (document.hidden) return;
         loadBrowsers();
         loadAgents();
+        loadLimits();
       }, 60000);
     });
 })();

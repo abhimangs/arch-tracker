@@ -1,5 +1,7 @@
 //! Desktop notifications: a heads-up before, and a notice at, each category's daily limit and the
-//! daily screen-time goal; and a reminder to take a break after a long unbroken stretch.
+//! daily screen-time goal; a reminder to take a break after a long unbroken stretch; and a notice
+//! when Codex's 5-hour or weekly plan limit passes the share you chose (once per limit window,
+//! remembered in the database). Each can play a sound.
 //!
 //! `[notifications] enabled = false` turns all of it off: no report is built, nothing is sent.
 //! The numbers come from the same day report as Today, so a notice never disagrees with the page.
@@ -35,6 +37,8 @@ pub enum Cmd {
 pub struct Note {
     pub key: String,
     pub family: String,
+    /// The dashboard page a click opens ("" for Today).
+    pub route: String,
     pub summary: String,
     pub body: String,
 }
@@ -86,6 +90,8 @@ async fn run(
     // Notification ids on screen: family -> id, and id -> the activation token its click brought.
     let mut shown: HashMap<String, u32> = HashMap::new();
     let mut tokens: HashMap<u32, String> = HashMap::new();
+    // The page each notice on screen opens.
+    let mut routes: HashMap<u32, String> = HashMap::new();
     let mut signals = signal_stream(&conn).await;
     let mut tick = tokio::time::interval(CHECK_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -97,15 +103,23 @@ async fn run(
                     book.reset();
                     continue;
                 }
-                if live.paused || !wants_report(&cfg) {
+                if live.paused {
                     continue;
                 }
-                let Some(day) = today(&db, &cfg).await else { continue };
-                for note in due(&cfg, &day, crate::util::now_ms(), live, &mut book) {
+                let now = crate::util::now_ms();
+                let mut notes = vec![];
+                if wants_report(&cfg)
+                    && let Some(day) = today(&db, &cfg).await
+                {
+                    notes.extend(due(&cfg, &day, now, live, &mut book));
+                }
+                notes.extend(lasting(&db, &cfg, now, live).await);
+                for note in notes {
                     let replaces = shown.get(&note.family).copied().unwrap_or(0);
-                    match notify(&conn, &note, replaces).await {
+                    match notify(&conn, &note, replaces, cfg.notifications.sound).await {
                         Ok(id) => {
                             shown.insert(note.family.clone(), id);
+                            routes.insert(id, note.route.clone());
                         }
                         Err(e) => tracing::warn!("notification not shown: {e}"),
                     }
@@ -116,11 +130,13 @@ async fn run(
                     let note = Note {
                         key: "test".into(),
                         family: "test".into(),
+                        route: String::new(),
                         summary: "Notifications work".into(),
                         body: "Limits, your daily goal and break reminders will show up like this.".into(),
                     };
                     let replaces = shown.get("test").copied().unwrap_or(0);
-                    let r = notify(&conn, &note, replaces).await.map(|id| {
+                    let sound = snapshot(&shared).0.notifications.sound;
+                    let r = notify(&conn, &note, replaces, sound).await.map(|id| {
                         shown.insert("test".into(), id);
                     });
                     let _ = reply.send(r.map_err(|e| e.to_string()));
@@ -134,12 +150,15 @@ async fn run(
                 }
                 Signal::Clicked(id) => {
                     if shown.values().any(|v| *v == id) {
-                        crate::tray::open_dashboard(&conn, &web, "today", tokens.remove(&id)).await;
+                        let route = routes.get(&id).filter(|r| !r.is_empty()).cloned();
+                        let route = route.as_deref().unwrap_or("today");
+                        crate::tray::open_dashboard(&conn, &web, route, tokens.remove(&id)).await;
                     }
                 }
                 Signal::Closed(id) => {
                     shown.retain(|_, v| *v != id);
                     tokens.remove(&id);
+                    routes.remove(&id);
                 }
             },
         }
@@ -208,6 +227,7 @@ pub fn due(cfg: &Config, d: &DayReport, now: i64, live: Live, book: &mut Book) -
             out.push(Note {
                 key: format!("goal:{goal}"),
                 family: "goal".into(),
+                route: String::new(),
                 summary: "Daily screen-time goal reached".into(),
                 body: format!(
                     "{} on screen today; your goal is to stay under {}.",
@@ -219,6 +239,7 @@ pub fn due(cfg: &Config, d: &DayReport, now: i64, live: Live, book: &mut Book) -
             out.push(Note {
                 key: format!("goal-warn:{goal}:{warn}"),
                 family: "goal".into(),
+                route: String::new(),
                 summary: format!("{} left of today's screen-time goal", dur(goal - used)),
                 body: format!(
                     "{} on screen today; your goal is to stay under {}.",
@@ -242,6 +263,7 @@ pub fn due(cfg: &Config, d: &DayReport, now: i64, live: Live, book: &mut Book) -
                 out.push(Note {
                     key: format!("limit:{}:{lim}", c.name),
                     family: format!("limit:{}", c.name),
+                    route: String::new(),
                     summary: format!("{} limit reached", c.name),
                     body: format!(
                         "{} on {} today; your daily limit is {}.",
@@ -254,6 +276,7 @@ pub fn due(cfg: &Config, d: &DayReport, now: i64, live: Live, book: &mut Book) -
                 out.push(Note {
                     key: format!("limit-warn:{}:{lim}:{warn}", c.name),
                     family: format!("limit:{}", c.name),
+                    route: String::new(),
                     summary: format!("{} left for {}", dur(lim - used), c.name),
                     body: format!("{} of your {} daily limit used.", dur(used), dur(lim)),
                 });
@@ -275,6 +298,7 @@ pub fn due(cfg: &Config, d: &DayReport, now: i64, live: Live, book: &mut Book) -
                 out.push(Note {
                     key,
                     family: "break".into(),
+                    route: String::new(),
                     summary: "Time for a break".into(),
                     body: format!(
                         "{} on screen without a break. Lock the screen or step away for {} to start fresh.",
@@ -297,6 +321,128 @@ pub fn due(cfg: &Config, d: &DayReport, now: i64, live: Live, book: &mut Book) -
     out
 }
 
+/// Notices that are not about one day (Codex's plan limits), each sent once and remembered in
+/// the database, so a restart does not repeat them.
+async fn lasting(db: &std::path::Path, cfg: &Config, now: i64, live: Live) -> Vec<Note> {
+    let n = &cfg.notifications;
+    if !n.plan_limits {
+        return vec![];
+    }
+    let (db, cfg) = (db.to_path_buf(), cfg.clone());
+    let _ = live;
+    tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Note>> {
+        let conn = rusqlite::Connection::open_with_flags(
+            &db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        let mut sent = load_sent(&conn);
+        let before = sent.len();
+        let mut out = vec![];
+        if let Some(l) = crate::sources::codex::load_limits(&conn)? {
+            out.extend(due_limits(&cfg, &l, now, &mut sent));
+        }
+        // Forget what is more than ten days old.
+        sent.retain(|_, at| now - *at < 10 * 86_400_000);
+        if !out.is_empty() || sent.len() != before {
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+                rusqlite::params![SENT_KEY, serde_json::to_string(&sent)?],
+            )?;
+        }
+        Ok(out)
+    })
+    .await
+    .ok()
+    .and_then(|r| r.map_err(|e| tracing::debug!("notifications: {e:#}")).ok())
+    .unwrap_or_default()
+}
+
+const SENT_KEY: &str = "notices_sent";
+
+/// The lasting notices sent: key -> when (ms).
+fn load_sent(conn: &rusqlite::Connection) -> HashMap<String, i64> {
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", [SENT_KEY], |r| {
+        r.get::<_, String>(0)
+    })
+    .ok()
+    .and_then(|v| serde_json::from_str(&v).ok())
+    .unwrap_or_default()
+}
+
+/// A time as the dashboard shows it: "20:52" today, else "Nov 29, 18:38".
+fn when(ms: i64, now: i64, h12: bool) -> String {
+    let tz = jiff::tz::TimeZone::system();
+    let (Ok(t), Ok(n)) = (
+        jiff::Timestamp::from_millisecond(ms),
+        jiff::Timestamp::from_millisecond(now),
+    ) else {
+        return String::new();
+    };
+    let (t, n) = (t.to_zoned_datetime(tz.clone()), n.to_zoned_datetime(tz));
+    let clock = if h12 {
+        t.strftime("%-I:%M %P").to_string()
+    } else {
+        t.strftime("%H:%M").to_string()
+    };
+    if t.date() == n.date() {
+        format!("at {clock}")
+    } else {
+        format!("{}, {clock}", t.strftime("%b %-d"))
+    }
+}
+
+/// Codex's plan limits past the level you chose, once per limit window. Pure, for tests.
+pub fn due_limits(
+    cfg: &Config,
+    l: &crate::sources::codex::Limits,
+    now: i64,
+    sent: &mut HashMap<String, i64>,
+) -> Vec<Note> {
+    let n = &cfg.notifications;
+    let mut out = vec![];
+    for w in &l.windows {
+        let (name, level) = match w.minutes {
+            300 => ("5-hour".to_string(), n.limit_5h_percent),
+            10080 => ("weekly".to_string(), n.limit_week_percent),
+            m => (format!("{}-hour", m / 60), n.limit_5h_percent),
+        };
+        if level == 0 || w.used_percent < level as f64 {
+            continue;
+        }
+        // A limit that has reset since Codex last reported starts again from nothing, and a
+        // report older than the limit's window says nothing about now.
+        let window_ms = w.minutes as i64 * 60_000;
+        if w.resets_ms.is_some_and(|r| r <= now) || now - l.at_ms > window_ms {
+            continue;
+        }
+        let window = w.resets_ms.unwrap_or(l.at_ms / window_ms.max(1));
+        let key = format!("plan:{}:{window}:{level}", w.minutes);
+        if sent.contains_key(&key) {
+            continue;
+        }
+        sent.insert(key.clone(), now);
+        let h12 = cfg.dashboard.time_format == "12h";
+        out.push(Note {
+            key,
+            family: format!("plan:{}", w.minutes),
+            route: "agent/codex/1".into(),
+            summary: format!(
+                "Codex has used {}% of its {name} limit",
+                w.used_percent.round()
+            ),
+            body: match w.resets_ms {
+                Some(r) => format!(
+                    "It resets {}. You get this notice at {level}%; change that in Settings.",
+                    when(r, now, h12)
+                ),
+                None => format!("You get this notice at {level}%; change that in Settings."),
+            },
+        });
+    }
+    out
+}
+
 /// The unbroken stretch of screen time that ends last today: (start, end) in ms. Sessions closer
 /// together than the session break belong to one stretch, as in Today's stats.
 fn stretch(d: &DayReport, gap: i64) -> Option<(i64, i64)> {
@@ -310,9 +456,18 @@ fn stretch(d: &DayReport, gap: i64) -> Option<(i64, i64)> {
     cur
 }
 
-async fn notify(conn: &Connection, n: &Note, replaces: u32) -> zbus::Result<u32> {
+async fn notify(conn: &Connection, n: &Note, replaces: u32, sound: bool) -> zbus::Result<u32> {
     let mut hints: HashMap<&str, Variant<'_>> = HashMap::new();
     hints.insert("urgency", Variant::from(1u8));
+    if sound {
+        hints.insert("sound-name", Variant::from("message-new-instant"));
+    }
+    let open = match n.route.as_str() {
+        "" | "today" => "Open Today",
+        r if r.starts_with("agent/") => "Open the agent",
+        r if r.starts_with("week") => "Open the week",
+        _ => "Open",
+    };
     let reply = conn
         .call_method(
             Some(BUS),
@@ -325,7 +480,7 @@ async fn notify(conn: &Connection, n: &Note, replaces: u32) -> zbus::Result<u32>
                 "appointment-soon",
                 n.summary.as_str(),
                 n.body.as_str(),
-                vec!["default", "Open Today"],
+                vec!["default", open],
                 hints,
                 -1i32,
             ),
@@ -437,6 +592,60 @@ mod tests {
         v.iter()
             .map(|n| n.key.split(':').next().unwrap().to_string())
             .collect()
+    }
+
+    #[test]
+    fn plan_limit_notices_come_once_per_limit_window() {
+        use crate::sources::codex::{LimitWindow, Limits};
+        let mut c = cfg();
+        c.notifications.limit_week_percent = 80;
+        let now = 1_795_000_000_000;
+        let w = |minutes: u64, used: f64, resets: i64| LimitWindow {
+            minutes,
+            used_percent: used,
+            resets_ms: Some(resets),
+        };
+        let l = Limits {
+            at_ms: now - 60_000,
+            plan: "plus".into(),
+            windows: vec![
+                w(300, 74.0, now + 3_600_000),
+                w(10080, 72.0, now + 86_400_000),
+            ],
+        };
+        let mut sent = HashMap::new();
+        let v = due_limits(&c, &l, now, &mut sent);
+        assert_eq!(
+            v.len(),
+            1,
+            "the 5-hour limit passed 70%; the weekly one is under 80%"
+        );
+        assert_eq!(v[0].route, "agent/codex/1");
+        assert!(
+            v[0].summary.contains("74% of its 5-hour limit"),
+            "{}",
+            v[0].summary
+        );
+        assert!(
+            due_limits(&c, &l, now + 60_000, &mut sent).is_empty(),
+            "once per window"
+        );
+        // The next window, after a reset, can tell again.
+        let next = Limits {
+            at_ms: now + 4_000_000,
+            windows: vec![w(300, 90.0, now + 3_600_000 + 18_000_000)],
+            ..l.clone()
+        };
+        assert_eq!(due_limits(&c, &next, now + 4_100_000, &mut sent).len(), 1);
+        // A limit that has reset since the report, or a report too old, says nothing.
+        let mut fresh = HashMap::new();
+        assert!(due_limits(&c, &l, now + 3_700_000, &mut fresh).is_empty());
+        c.notifications.limit_5h_percent = 50;
+        let old = Limits {
+            at_ms: now - 6 * 3_600_000,
+            ..l.clone()
+        };
+        assert!(due_limits(&c, &old, now, &mut fresh).is_empty());
     }
 
     #[test]

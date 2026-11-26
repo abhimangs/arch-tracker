@@ -132,6 +132,14 @@ pub struct Notifications {
     pub breaks: bool,
     /// ...after this many minutes on screen without one.
     pub break_after_mins: u64,
+    /// When Codex's plan limits pass these shares (percent, 1 to 100).
+    pub plan_limits: bool,
+    pub limit_5h_percent: u64,
+    pub limit_week_percent: u64,
+    /// Play a sound with each notice.
+    pub sound: bool,
+    /// On the first morning of the week, a summary of the week before.
+    pub weekly: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -464,6 +472,11 @@ impl Default for Notifications {
             warn_mins: 5,
             breaks: true,
             break_after_mins: 50,
+            plan_limits: true,
+            limit_5h_percent: 70,
+            limit_week_percent: 70,
+            sound: true,
+            weekly: true,
         }
     }
 }
@@ -905,6 +918,8 @@ impl Config {
         self.titles.max_len = self.titles.max_len.clamp(20, 1000);
         self.notifications.warn_mins = self.notifications.warn_mins.min(240);
         self.notifications.break_after_mins = self.notifications.break_after_mins.clamp(5, 480);
+        self.notifications.limit_5h_percent = self.notifications.limit_5h_percent.clamp(1, 100);
+        self.notifications.limit_week_percent = self.notifications.limit_week_percent.clamp(1, 100);
         if self.dashboard.port < 1024 {
             self.dashboard.port = 7600;
         }
@@ -1084,6 +1099,20 @@ impl Config {
             5,
             480,
             "Break after (minutes)",
+        )?;
+        whole(
+            "notifications.limit_5h_percent",
+            nt.limit_5h_percent,
+            1,
+            100,
+            "5-hour limit alert (percent)",
+        )?;
+        whole(
+            "notifications.limit_week_percent",
+            nt.limit_week_percent,
+            1,
+            100,
+            "Weekly limit alert (percent)",
         )?;
         for line in &self.projects.aliases {
             let ok = line
