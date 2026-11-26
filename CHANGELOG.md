@@ -8,9 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- Browsers in the dashboard: a sidebar group lists every browser the extension has connected from
-  (and any with history), with its own icon, today's time and a dot while its extension is
-  connected, plus All browsers. A browser's page groups its sites by domain, then subdomain, then
+- Browsers in the dashboard: a sidebar group lists every browser the extension has connected from,
+  with its own icon, today's time and a dot while its extension is connected, plus All browsers
+  when there are two or more. A browser's page groups its sites by domain, then subdomain, then
   page title, each with the hours of the day it was used; shows time per hour or day, categories,
   background audio and private-window time; and lists each visit of a day to the millisecond, with
   what came right before and after it, in order or by site. The Timeline can show one browser, site

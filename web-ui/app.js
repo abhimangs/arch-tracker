@@ -267,8 +267,9 @@
       detail = `${dur(r.visible)} beside other windows`;
     }
     // Sites say which browsers their time came from, once there is more than one.
-    const tags = (prefix === "site" || prefix === "tsite") && (r.browsers || []).length && knownBrowsers().length > 1
-      ? `<span class="btags" title="${esc(r.browsers.map(browserName).join(", "))}">${r.browsers.map((b) => browserIcon(b, "mini")).join("")}</span>`
+    const linked = (r.browsers || []).filter((b) => browserById.has(b));
+    const tags = (prefix === "site" || prefix === "tsite") && linked.length && knownBrowsers().length > 1
+      ? `<span class="btags" title="${esc(linked.map(browserName).join(", "))}">${linked.map((b) => browserIcon(b, "mini")).join("")}</span>`
       : "";
     return `<li class="row" data-id="${esc(id)}" data-open="${open}">
       <button class="rh" type="button" ${titles.length ? `aria-expanded="${open}"` : ""}>
@@ -866,7 +867,7 @@
     if (stale(gen) || currentDay !== date) return;
     tlDay = d;
     learnCats(d.categories);
-    const dayBrowsers = [...new Set((d.sessions || []).map((s) => s.browser).filter(Boolean))];
+    const dayBrowsers = [...new Set((d.sessions || []).map((s) => s.browser).filter((b) => browserById.has(b)))];
     if (!dayBrowsers.includes(tlBrowser)) tlBrowser = "";
     const st = d.stats || {};
     const y = window.scrollY;
@@ -962,7 +963,7 @@
     },
     true,
   );
-  const knownBrowsers = () => browserList.filter((b) => b.id !== UNKNOWN_ID);
+  const knownBrowsers = () => browserList;
   const browserHash = (id, n, date) => "#/browser/" + encodeURIComponent(id) + "/" + (n || "1") + (date && date !== today() ? "/" + date : "");
 
   async function loadBrowsers() {
@@ -1013,7 +1014,7 @@
       (secs ? '<em class="bt">' + dur(secs) + "</em>" : "") + "</a>";
     const dot = (b) => (b.linked || on.has(b.id) ? '<i class="bdot" data-on="' + on.has(b.id) + '" title="' + (on.has(b.id) ? "Extension connected" : "Extension not connected") + '"></i>' : "");
     const total = shown.reduce((a, b) => a + b.today, 0);
-    navBList.innerHTML = link(ALL_ID, "All browsers", total, "") + shown.map((b) => link(b.id, b.name, b.today, dot(b))).join("");
+    navBList.innerHTML = (shown.length > 1 ? link(ALL_ID, "All browsers", total, "") : "") + shown.map((b) => link(b.id, b.name, b.today, dot(b))).join("");
     markNav();
     requestAnimationFrame(moveGlide);
   }

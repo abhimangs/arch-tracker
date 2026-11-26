@@ -37,7 +37,7 @@ work, then shows it all in a local dashboard with a tray icon. It runs as a smal
 - **Projects**: coding time per project from terminals, code editors and agents.
 - **Browsers**: a sidebar group with every browser the extension has connected from (Brave, Zen,
   Helium…), each with its own icon, today's time and a dot while its extension is connected, and
-  All browsers on top. A browser's page groups its sites by domain, then subdomain, then page title,
+  All browsers on top once there are two. A browser's page groups its sites by domain, then subdomain, then page title,
   with the hours of the day each was used; adds background audio and private-window time; and lists
   each visit of a day with its exact start and end and what came right before and after it.
 - **Apps and sites**, **Agents** and **Trends** over a day, a week, a month or a year.

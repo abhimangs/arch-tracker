@@ -39,8 +39,6 @@ pub struct BrowserMap {
     by_name: HashMap<String, String>,
     /// Browser -> (first, last) time the extension connected from it.
     linked: HashMap<String, (i64, i64)>,
-    /// Some stored time belongs to no browser that can be told.
-    unknown: bool,
 }
 
 impl BrowserMap {
@@ -88,15 +86,6 @@ impl BrowserMap {
                 self.add(app, name);
             }
         }
-        let site = |app: &str, name: &str| Subject {
-            app: app.into(),
-            app_name: name.into(),
-            host: "x".into(),
-            ..Default::default()
-        };
-        self.unknown = seen
-            .iter()
-            .any(|(a, n)| self.of(&site(a, n)).is_some_and(|(k, _)| k == UNKNOWN));
     }
 
     fn add(&mut self, app: &str, name: &str) {
@@ -137,6 +126,16 @@ impl BrowserMap {
         }
         let named = self.by_name.get(&s.app_name.to_lowercase());
         Some((named.cloned().unwrap_or_else(|| UNKNOWN.into()), false))
+    }
+
+    /// Whether a browser's time belongs in the view for id: that browser, or for ALL every
+    /// browser the extension has connected from.
+    pub fn wanted(&self, id: &str, key: &str) -> bool {
+        if id == ALL {
+            self.linked.contains_key(key)
+        } else {
+            key == id
+        }
     }
 
     pub fn name(&self, key: &str) -> String {
@@ -520,12 +519,13 @@ pub fn browser_report(
         return Err(BadRequest("no browser given".into()).into());
     }
     let map = BrowserMap::load(conn)?;
+    let wanted = |key: &str| map.wanted(id, key);
     let mut acc = BrowserAcc::default();
     let mut shares: HashMap<String, BrowserShare> = HashMap::new();
     let mut days = vec![];
     each_day(conn, cfg, &map, from, to, cache, |date, r: DayRollup| {
         let mut day = Times::default();
-        for b in r.browsers.iter().filter(|b| id == ALL || b.key == id) {
+        for b in r.browsers.iter().filter(|b| wanted(&b.key)) {
             acc.add_day(b);
             day.merge(&b.times);
             let s = shares.entry(b.key.clone()).or_insert_with(|| BrowserShare {
@@ -700,7 +700,7 @@ pub fn browser_day(
     let map = BrowserMap::load(conn)?;
     let r = super::build(conn, cfg, date, ds, de, &map)?;
     let mut acc = BrowserAcc::default();
-    for b in r.browsers.iter().filter(|b| id == ALL || b.key == id) {
+    for b in r.browsers.iter().filter(|b| map.wanted(id, &b.key)) {
         acc.add_day(b);
     }
     let mut d = acc.finish(id.to_string(), 10);
@@ -714,7 +714,10 @@ pub fn browser_day(
             display(cfg, id, map.name(id))
         },
         session_gap_ms: cfg.insights.session_gap_secs as i64 * 1000,
-        visits: visits(&r.sessions, id),
+        visits: visits(&r.sessions, id)
+            .into_iter()
+            .filter(|v| map.wanted(id, &v.browser))
+            .collect(),
         sites: d.sites,
         hours: d.hours,
     })
@@ -737,7 +740,7 @@ pub struct BrowserEntry {
     pub recent: i64,
 }
 
-/// Every browser the extension connected from or that has site history, most used first.
+/// Every browser the extension has connected from, most used first.
 pub fn browser_list(
     conn: &Connection,
     cfg: &Config,
@@ -767,16 +770,8 @@ pub fn browser_list(
             }
         },
     )?;
-    let mut keys: Vec<String> = map.names.keys().cloned().collect();
-    if map.unknown || time.contains_key(UNKNOWN) {
-        keys.push(UNKNOWN.into());
-    }
-    keys.extend(
-        time.keys()
-            .filter(|k| !keys.contains(k))
-            .cloned()
-            .collect::<Vec<_>>(),
-    );
+    // Only browsers the extension has connected from: others have no exact tabs to show.
+    let keys: Vec<String> = map.linked.keys().cloned().collect();
     let mut out: Vec<BrowserEntry> = keys
         .into_iter()
         .map(|id| {
@@ -799,7 +794,6 @@ pub fn browser_list(
     out.sort_by(|a, b| {
         b.recent
             .cmp(&a.recent)
-            .then_with(|| (a.id == UNKNOWN).cmp(&(b.id == UNKNOWN)))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(out)
@@ -890,7 +884,6 @@ mod tests {
             "by its name"
         );
         assert_eq!(m.of(&app), Some(("browser-a".into(), true)), "by its id");
-        assert!(m.unknown);
         // A browser window without a tab anyone could name is still that browser's time.
         let untold = Subject::app("browser-a", "Browser A");
         assert_eq!(m.of(&untold), Some(("browser-a".into(), false)));
@@ -1072,6 +1065,10 @@ mod tests {
             day("2020-01-01") + 3 * h + 30 * M,
         );
         span(1, day("2020-01-03") + h, day("2020-01-03") + h + 20 * M);
+        st.note_browser("browser-a", "Browser A", day("2020-01-01"))
+            .unwrap();
+        st.note_browser("browser-b", "Browser B", day("2020-01-01"))
+            .unwrap();
         st.note_browser("browser-c", "Browser C", day("2020-01-02"))
             .unwrap();
         st
@@ -1130,22 +1127,33 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_lists_linked_browsers_and_browsers_with_history() {
+    fn the_menu_lists_only_browsers_the_extension_connected_from() {
         let st = sample_db();
+        st.conn
+            .execute("DELETE FROM browsers WHERE app = 'browser-b'", [])
+            .unwrap();
         let mut cfg = Config::default();
-        cfg.browsers.hidden = vec!["browser-b".into()];
+        cfg.browsers.hidden = vec!["browser-c".into()];
         let list = browser_list(&st.conn, &cfg, "2020-01-03", Cache::ReadOnly).unwrap();
         let ids: Vec<&str> = list.iter().map(|b| b.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            ["browser-a", "browser-b", "browser-c"],
-            "most used first"
-        );
+        assert_eq!(ids, ["browser-a", "browser-c"], "no history-only browser");
         assert_eq!((list[0].today, list[0].recent), (1200, 6600));
-        assert!(list[1].hidden && !list[1].linked);
-        let c = &list[2];
-        assert!(c.linked && c.recent == 0, "linked, no browsing yet");
+        let c = &list[1];
+        assert!(
+            c.linked && c.hidden && c.recent == 0,
+            "linked, no browsing yet"
+        );
         assert_eq!(c.first_ms, Some(day("2020-01-02")));
+        // All browsers covers only the linked ones.
+        let all = browser_report(
+            &st.conn,
+            &cfg,
+            ALL,
+            "2020-01-01",
+            "2020-01-03",
+            Cache::ReadOnly,
+        );
+        assert_eq!(all.unwrap().total, 6600);
     }
 
     #[test]
