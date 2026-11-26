@@ -156,6 +156,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/settings", get(api_settings).put(api_settings_put))
         .route("/api/appearance", axum::routing::put(api_appearance))
         .route("/api/rule", post(api_rule))
+        .route("/api/plan", post(api_plan))
         .route("/api/pause", post(api_pause))
         .route("/api/recompute", post(api_recompute))
         .route("/api/notify-test", post(api_notify_test))
@@ -1010,6 +1011,47 @@ async fn api_rule(State(ctx): State<Ctx>, JsonBody(rule): JsonBody<config::Rule>
     };
     if let Err(e) = cfg.apply_rule(&rule) {
         return err_field(StatusCode::BAD_REQUEST, e.message, e.field);
+    }
+    if let Err(e) = cfg.validate() {
+        return err_field(StatusCode::BAD_REQUEST, e.message, e.field);
+    }
+    let cfg = cfg.sanitized();
+    if let Err(e) = cfg.save() {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not save settings: {e:#}"),
+        );
+    }
+    let _ = ctx.web.tx.send(Event::ConfigChanged(Box::new(cfg)));
+    Json(json!({"ok": true})).into_response()
+}
+
+#[derive(Deserialize)]
+struct PlanBody {
+    agent: String,
+    /// A plan id from config::PLANS; empty for none.
+    plan: String,
+}
+
+/// Saves the plan you pay for an agent (the plan picker on its page).
+async fn api_plan(State(ctx): State<Ctx>, JsonBody(b): JsonBody<PlanBody>) -> Response {
+    if ctx.web.viewer {
+        return err(StatusCode::FORBIDDEN, VIEWER_MSG);
+    }
+    let mut cfg = match Config::load() {
+        Ok(c) => c,
+        Err(_) if !config::config_path().exists() => ctx.web.config(),
+        Err(_) => {
+            return err(
+                StatusCode::CONFLICT,
+                "config.toml has an error, so the plan wasn't saved. Fix the file, or save Settings to replace it.",
+            );
+        }
+    };
+    if b.plan.is_empty() {
+        cfg.agents.plans.remove(&b.agent);
+    } else {
+        cfg.agents.plans.insert(b.agent, b.plan);
     }
     if let Err(e) = cfg.validate() {
         return err_field(StatusCode::BAD_REQUEST, e.message, e.field);

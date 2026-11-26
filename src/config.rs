@@ -164,6 +164,21 @@ pub struct Visibility {
     pub min_pixels: i64,
 }
 
+/// Subscription plans an agent's API-equivalent cost can be compared with: (agent, id, name, USD a
+/// month). List prices billed monthly, no annual discount, as of PLANS_AS_OF.
+pub const PLANS: &[(&str, &str, &str, f64)] = &[
+    ("claude", "pro", "Claude Pro", 20.0),
+    ("claude", "max-5x", "Claude Max 5x", 100.0),
+    ("claude", "max-20x", "Claude Max 20x", 200.0),
+    ("codex", "go", "ChatGPT Go", 8.0),
+    ("codex", "plus", "ChatGPT Plus", 20.0),
+    ("codex", "pro-100", "ChatGPT Pro, $100", 100.0),
+    ("codex", "pro-200", "ChatGPT Pro, $200", 200.0),
+    ("codex", "pro-500", "ChatGPT Pro, $500", 500.0),
+    ("codex", "business", "ChatGPT Business, one seat", 25.0),
+];
+pub const PLANS_AS_OF: &str = "2026-11-26";
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Agents {
@@ -183,6 +198,10 @@ pub struct Agents {
     /// Read Hermes Agent's token counts from its own database (read-only) and show what they
     /// would cost at list prices.
     pub hermes_cost: bool,
+    /// The plan you pay for, per agent ("claude" = "max-20x"), to compare its API-equivalent cost
+    /// against. Codex's is read from its logs unless set here. Ids are in PLANS.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub plans: std::collections::BTreeMap<String, String>,
     /// Your own prices, in USD per million tokens, for models the built-in table lacks or prices
     /// that changed: [agents.prices."claude-new-model"] input = 3.0, output = 15.0.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -533,6 +552,7 @@ impl Default for Agents {
             claude_cost: true,
             codex_cost: true,
             hermes_cost: true,
+            plans: Default::default(),
             prices: Default::default(),
         }
     }
@@ -1085,6 +1105,14 @@ impl Config {
             24 * 60,
             "Daily goal (minutes)",
         )?;
+        for (agent, plan) in &self.agents.plans {
+            if !PLANS.iter().any(|(a, id, _, _)| a == agent && id == plan) {
+                return Err(invalid(
+                    "agents.plans",
+                    format!("There is no plan \"{plan}\" for {agent}."),
+                ));
+            }
+        }
         let nt = &self.notifications;
         whole(
             "notifications.warn_mins",
@@ -1285,6 +1313,17 @@ impl Config {
         {
             Some(mut existing) => {
                 merge_tables(existing.as_table_mut(), fresh.as_table());
+                // Your plans are written whole, so one you take out is gone from the file too.
+                if let Some(agents) = existing.get_mut("agents").and_then(|a| a.as_table_mut()) {
+                    match fresh.get("agents").and_then(|a| a.get("plans")) {
+                        Some(p) => {
+                            agents.insert("plans", p.clone());
+                        }
+                        None => {
+                            agents.remove("plans");
+                        }
+                    }
+                }
                 existing.to_string()
             }
             None => {

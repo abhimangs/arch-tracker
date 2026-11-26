@@ -30,6 +30,9 @@ All notable changes to this project are documented here. The format follows
 - Codex plan-limit alerts: a desktop notification when its 5-hour or weekly limit passes a share
   you choose in Settings → Notifications (70% unless you change it), once per limit, and a banner
   in the dashboard until the limit resets. Notifications can play a sound (on by default).
+- Plan value on Claude Code's and Codex's pages: pick the plan you pay for (Codex's is read from
+  its logs) and see its monthly list price for the period next to the API-equivalent cost, and how
+  many times over the plan pays for itself.
 
 ### Changed
 

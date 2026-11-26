@@ -295,6 +295,9 @@ pub struct CostReport {
     /// conversations whose logs it has removed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated: Option<Estimated>,
+    /// Your plan against the API-equivalent cost (Claude Code, Codex).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PlanValue>,
 }
 
 #[derive(Serialize, Default, Clone, Debug)]
@@ -584,6 +587,7 @@ pub fn claude(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<C
     })?;
     let rows = rows.map(|r| r.map(|(m, p, a, t)| (m, p, a, t, 1)));
     aggregate(&mut out, cfg, rows, (ds, de_from, de, one_day))?;
+    plan_value(&mut out, cfg, "claude", None);
     Ok(out)
 }
 
@@ -642,6 +646,8 @@ pub fn codex(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<Co
     if let Some(e) = out.estimated.as_mut() {
         e.conversations = conversations;
     }
+    let detected = out.limits.as_ref().map(|l| l.plan.to_lowercase());
+    plan_value(&mut out, cfg, "codex", detected.as_deref());
     Ok(out)
 }
 
@@ -685,6 +691,81 @@ impl Mix {
             ..Default::default()
         }
     }
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct PlanOption {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub usd_month: f64,
+}
+
+/// The plan you pay for, against what the same use would cost at API prices.
+#[derive(Serialize, Default, Clone, Debug)]
+pub struct PlanValue {
+    pub options: Vec<PlanOption>,
+    /// The plan compared with, if any: yours from Settings, else the one Codex reports.
+    pub chosen: Option<String>,
+    /// It came from Codex's own report, not from you.
+    pub detected: bool,
+    pub name: String,
+    pub usd_month: f64,
+    /// The days compared (the period, from its first use when it reaches back further).
+    pub days: f64,
+    /// The plan's price for those days.
+    pub cost: f64,
+    pub as_of: &'static str,
+}
+
+/// Fills in the plan comparison for an agent's report.
+fn plan_value(out: &mut CostReport, cfg: &Config, agent: &str, detected: Option<&str>) {
+    let options: Vec<PlanOption> = crate::config::PLANS
+        .iter()
+        .filter(|(a, ..)| *a == agent)
+        .map(|&(_, id, name, usd_month)| PlanOption {
+            id,
+            name,
+            usd_month,
+        })
+        .collect();
+    if options.is_empty() {
+        return;
+    }
+    let mine = cfg.agents.plans.get(agent).cloned();
+    let guess = detected.and_then(|p| match p {
+        "go" => Some("go"),
+        "plus" => Some("plus"),
+        "pro" => Some("pro-200"),
+        "business" | "team" => Some("business"),
+        _ => None,
+    });
+    let chosen = mine.clone().or(guess.map(String::from));
+    let mut v = PlanValue {
+        detected: mine.is_none() && chosen.is_some(),
+        chosen: chosen.clone(),
+        as_of: crate::config::PLANS_AS_OF,
+        ..Default::default()
+    };
+    if let Some(p) = chosen
+        .as_deref()
+        .and_then(|c| options.iter().find(|o| o.id == c))
+    {
+        // The days of the period; a long one (all time) only from the first day used.
+        let day = |d: &str| parse_date(d).map(|(_, s, _)| s).unwrap_or(0);
+        let mut from = day(&out.from);
+        let to = parse_date(&out.to).map(|(_, _, e)| e).unwrap_or(from);
+        if to - from > 366 * 86_400_000
+            && let Some(first) = out.days.first()
+        {
+            from = from.max(day(&first.date));
+        }
+        v.days = ((to - from) as f64 / 86_400_000.0).round().max(1.0);
+        v.name = p.name.into();
+        v.usd_month = p.usd_month;
+        v.cost = p.usd_month * v.days * 12.0 / 365.25;
+    }
+    v.options = options;
+    out.plan = Some(v);
 }
 
 /// What Hermes Agent's tokens would cost at list prices. Hermes counts tokens per session and
@@ -1003,6 +1084,42 @@ mod tests {
             0.2 + 10.0 + 0.01
         ));
         assert!(price_for("gpt-unknown", &none).is_none());
+    }
+
+    #[test]
+    fn plan_value_compares_the_period_with_the_plan_price() {
+        let dir = std::env::temp_dir().join(format!("at-plan-{}", std::process::id()));
+        let st = crate::store::Store::open(&dir.join("t.db")).unwrap();
+        let mut cfg = Config::default();
+        // Codex reports a Plus plan; nothing chosen: compared with Plus, said to be detected.
+        let mut out = CostReport {
+            from: "2026-11-01".into(),
+            to: "2026-11-30".into(),
+            ..Default::default()
+        };
+        plan_value(&mut out, &cfg, "codex", Some("plus"));
+        let p = out.plan.clone().unwrap();
+        assert_eq!(
+            (p.chosen.as_deref(), p.detected, p.days),
+            (Some("plus"), true, 30.0)
+        );
+        assert!(near(p.cost, 20.0 * 30.0 * 12.0 / 365.25));
+        // Yours wins over Codex's report; Hermes has no plans.
+        cfg.agents.plans.insert("codex".into(), "pro-200".into());
+        plan_value(&mut out, &cfg, "codex", Some("plus"));
+        let p = out.plan.clone().unwrap();
+        assert_eq!(
+            (p.chosen.as_deref(), p.detected, p.usd_month),
+            (Some("pro-200"), false, 200.0)
+        );
+        let mut h = CostReport::default();
+        plan_value(&mut h, &cfg, "hermes", None);
+        assert!(h.plan.is_none());
+        // An unknown plan id does not validate.
+        cfg.agents.plans.insert("claude".into(), "ultra".into());
+        assert_eq!(cfg.validate().unwrap_err().field, "agents.plans");
+        drop(st);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

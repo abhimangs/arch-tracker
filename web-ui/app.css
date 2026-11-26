@@ -1073,6 +1073,10 @@ svg.bico.logo[data-agent="claude"] { color: #d97757; }
 .rb.y i { background: color-mix(in oklab, var(--mist) 60%, transparent); }
 .limits li .rb { grid-column: 1 / -1; }
 .cc-foot { margin-top: var(--gap); }
+.planpick { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.planpick span { color: var(--mist); }
+.planpick select { max-width: 70%; }
+#planmsg:empty { display: none; }
 
 /* ---------- small screens ---------- */
 

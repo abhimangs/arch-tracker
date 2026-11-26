@@ -1626,6 +1626,24 @@
     return '<ul class="plain costs limits">' + rows + '</ul><p class="sub">' + (l.plan ? esc(cap(l.plan)) + " plan, as" : "As") + " Codex last reported it, " + esc(whenLabel(l.at_ms)) + (reset ? "; a limit that has reset since starts again from 0%" : "") + ".</p>";
   }
 
+  // The plan you pay for against the same use at API prices, with a picker that saves your plan.
+  function planHtml(p, cost, agent) {
+    const opts =
+      '<option value="">No plan</option>' +
+      p.options.map((o) => '<option value="' + esc(o.id) + '"' + (o.id === p.chosen ? " selected" : "") + ">" + esc(o.name) + ", " + money(o.usd_month) + " a month</option>").join("");
+    let html = '<label class="planpick"><span>Your plan</span><select id="planpick" data-agent="' + esc(agent) + '">' + opts + '</select></label><p class="msg" id="planmsg" role="status"></p>';
+    if (p.chosen && p.cost > 0) {
+      const x = cost / p.cost;
+      html +=
+        '<dl class="facts cc-facts"><dt>At API prices</dt><dd><b>' + money(cost) + "</b></dd><dt>Your plan for " + plural(p.days, "day") + "</dt><dd>" + money(p.cost) + "</dd><dt>That is</dt><dd><b>" +
+        (x >= 10 ? Math.round(x) : x.toFixed(1)) + "×</b> what you pay</dd></dl>";
+      if (p.detected) html += '<p class="sub">Codex reports this plan; pick yours if it differs.</p>';
+    } else {
+      html += '<p class="sub">Pick the plan you pay for to see what it is worth against API prices.</p>';
+    }
+    return html + '<p class="sub">Monthly list prices of ' + esc(dayLabel(p.as_of, { day: "numeric", month: "short", year: "numeric" })) + ", without annual discounts, for the days in this period.</p>";
+  }
+
   function agentSessionsHtml(list, gap) {
     const all = aState.id === AGENT_ALL;
     if (!list.length) return '<p class="empty">You did not have its terminal in front of you on this day.</p>';
@@ -1769,6 +1787,7 @@
       }
       costLeft = panel(n === "1" ? "Cost per hour" : "Cost per day", bars) + panel("By project", costRows(cc.projects, "No requests in this period."));
       costRight =
+        (cc.plan ? panel("Plan value", planHtml(cc.plan, cc.cost, costKind)) : "") +
         (cc.limits ? panel("Plan limits", limitsHtml(cc.limits)) : "") +
         panel("Where the cost goes", kindRows(cc)) +
         panel("By model", costRows(cc.models, "No requests in this period.")) +
@@ -1825,6 +1844,21 @@
   }
 
   function bindAgentDay() {
+    const pick = document.getElementById("planpick");
+    if (pick)
+      pick.addEventListener("change", async () => {
+        pick.disabled = true;
+        try {
+          await send("POST", "/api/plan", { agent: pick.dataset.agent, plan: pick.value });
+          await loadSettings().catch(() => null);
+          if (aState) aState.cc = null;
+          pageAgent(aState.id, aState.n, aState.date, renderGen, true);
+        } catch (e) {
+          pick.disabled = false;
+          const m = document.getElementById("planmsg");
+          if (m) m.textContent = e.message;
+        }
+      });
     view.querySelectorAll("[data-ago]").forEach((b) => b.addEventListener("click", () => (location.hash = agentHash(aState.id, aState.n, b.dataset.ago))));
     view.querySelectorAll("[data-av]").forEach((b) =>
       b.addEventListener("click", () => {
