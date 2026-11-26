@@ -111,15 +111,18 @@ export async function openDemo({ port: demoPort = 7690, days = 7 } = {}) {
   const cdpPort = 9400 + Math.floor(Math.random() * 400);
   const chrome = spawn(findChrome(), ["--headless", "--disable-gpu", "--hide-scrollbars", `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${path.join(tmp, "chrome")}`, "--window-size=1440,1000", ...(process.env.CI ? ["--no-sandbox"] : []), "about:blank"], { stdio: "ignore" });
   let ws;
-  for (let i = 0; i < 60 && !ws; i++) {
+  // A first start of a full Chrome (as on CI) can take a while; wait up to 30 s for its page.
+  for (let i = 0; i < 150 && !ws; i++) {
     try {
       const pages = await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json();
       const page = pages.find((p) => p.type === "page");
       if (page) ws = new WebSocket(page.webSocketDebuggerUrl);
     } catch {
-      await sleep(200);
+      // Not listening yet.
     }
+    if (!ws) await sleep(200);
   }
+  if (!ws) throw new Error(`Chromium did not start or opened no page: ${findChrome()}`);
   await new Promise((r) => ws.addEventListener("open", r));
   let id = 0;
   const waiting = new Map();
