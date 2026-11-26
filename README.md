@@ -40,9 +40,12 @@ work, then shows it all in a local dashboard with a tray icon. It runs as a smal
   All browsers on top once there are two. A browser's page groups its sites by domain, then subdomain, then page title,
   with the hours of the day each was used; adds background audio and private-window time; and lists
   each visit of a day with its exact start and end and what came right before and after it.
-- **Apps and sites**, **Agents** and **Trends** over a day, a week, a month or a year.
-- **Claude Code**: what its requests would cost at API prices, per day, kind of token, model and
-  project, updated seconds after each request.
+- **Agents**: a sidebar group for Claude Code and Codex (and Hermes once it is installed), with
+  All agents on top. An agent's page shows the time it worked beside the time you watched it, per
+  project and per hour or day, your sessions in its terminal with what came before and after, and
+  its stretches of work. Claude Code and Codex add what their requests would cost at API prices
+  (by day, kind of token, model and project), and Codex its plan's 5-hour and weekly limits.
+- **Apps and sites** and **Trends** over a day, a week, a month or a year.
 
 ## How screen time is decided
 
@@ -66,14 +69,17 @@ Change a threshold in Settings and every past day is re-classified.
 </tr>
 <tr>
 <td><img src="docs/screenshots/trends.png" alt="Trends: screen time per day by category"></td>
-<td><img src="docs/screenshots/today-dawn.png" alt="Today in the Rosé Pine Dawn light theme"></td>
+<td><img src="docs/screenshots/today-light.png" alt="Today in the OLED theme's light mode"></td>
 </tr>
 <tr>
 <td colspan="2"><img src="docs/screenshots/browsers.png" alt="A browser's page: its sites grouped by domain with the hours each was used, time per day, categories, background audio and private windows"></td>
 </tr>
+<tr>
+<td colspan="2"><img src="docs/screenshots/agent.png" alt="An agent's page: the time Claude Code worked and you watched, per project and day, with what its requests would cost"></td>
+</tr>
 </table>
 
-Screenshots use made-up data (`arch-tracker demo`) in the Rosé Pine theme; `node scripts/screenshots.mjs` regenerates them.
+Screenshots use made-up data (`arch-tracker demo`) in the OLED theme; `node scripts/screenshots.mjs` regenerates them.
 
 ## Install
 
@@ -181,8 +187,8 @@ are picked up live. You can change:
   from a folder browser that also suggests the folders you worked in; and folders that aren't
   projects
 - how many days of history to keep, and recomputing past days after changes the cache can't notice
-- the look: Catppuccin (Mocha, Macchiato, Frappé, Latte), Rosé Pine (Main, Moon, Dawn) or the
-  original Aizome, any of their accents, following the system or fixed dark or light. Category
+- the look: OLED (true black, the default, with a Paper light mode), Catppuccin (Mocha, Macchiato,
+  Frappé, Latte), Rosé Pine (Main, Moon, Dawn) or the original Aizome, any of their accents, following the system or fixed dark or light. Category
   colours follow the theme unless you switch that off. The palette button in the header switches
   it instantly.
 

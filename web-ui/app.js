@@ -133,7 +133,7 @@
     const n = name || catByColor.get(hex.toLowerCase());
     return n ? `var(--cat-${slotFor(n)})` : hex;
   };
-  const FLAVOR = { mocha: "Mocha", macchiato: "Macchiato", frappe: "Frappé", main: "Main", moon: "Moon", night: "Night", latte: "Latte", dawn: "Dawn", fog: "Fog" };
+  const FLAVOR = { black: "Black", paper: "Paper", mocha: "Mocha", macchiato: "Macchiato", frappe: "Frappé", main: "Main", moon: "Moon", night: "Night", latte: "Latte", dawn: "Dawn", fog: "Fog" };
   const look = () => ({
     theme: root.dataset.theme,
     palette: root.dataset.palette,
@@ -609,7 +609,7 @@
       <dt>Windows</dt><dd>${src.kwin ? `${plural(src.kwin.windows, "window")} seen, ${src.kwin.ok ? "up to date" : "out of date"}` : "unknown"}</dd>
       <dt>Idle detection</dt><dd>${src.idle && src.idle.ok ? "working" : esc((src.idle && src.idle.error) || "not available")}</dd>
       <dt>Lock and sleep</dt><dd>${src.logind && src.logind.ok ? "working" : "not available"}</dd>
-      <dt>Started</dt><dd>${esc(hm(s.started_ms))}</dd>
+      <dt>Started</dt><dd>${s.started_ms ? esc(hm(s.started_ms)) : "–"}</dd>
       <dt>Version</dt><dd>${esc(s.version || "")}</dd>
     </dl>`;
     return [
@@ -820,7 +820,7 @@
     const line = [s.detail, s.project ? `project ${s.project}` : "", s.title].filter(Boolean).join(", ");
     return `<button type="button" class="sess" data-id="${esc(id)}" aria-expanded="${open}" style="--c:${c}">
         <span class="t">${clockMs(s.start_ms)} <span class="to">to</span> ${clockMs(s.end_ms)}</span>
-        <span class="w"><b>${s.browser ? browserIcon(s.browser, "mini") : ""}${esc(s.app_name)}</b>${line ? `<span>${esc(line)}</span>` : ""}</span>
+        <span class="w"><b>${s.browser ? browserIcon(s.browser, "mini") : s.kind === "terminal" && AGENT_MARK[s.detail] ? agentIcon(s.detail, "mini") : ""}${esc(s.app_name)}</b>${line ? `<span>${esc(line)}</span>` : ""}</span>
         <span class="d">${dur(s.counted)}</span>
         <span class="mix" aria-hidden="true"><i style="--w:${w(s.active)};--c:${c}"></i><i class="p" style="--w:${w(s.passive)};--c:${c}"></i><i class="k" style="--w:${w(s.call)};--c:${c}"></i></span>
       </button>
@@ -1420,6 +1420,364 @@
     });
   }
 
+  // ---------- AI agents ----------
+
+  // Claude Code, Codex and Hermes (when installed or seen), from /api/agents: the sidebar lists them
+  // under AI agents, each with a page like a browser's.
+  let agentList = [];
+  const agentById = new Map();
+  const AGENT_ALL = "all";
+  const AGENT_MARK = { claude: "CC", codex: "CX", hermes: "H" };
+  const AGENT_NAME = { claude: "Claude Code", codex: "Codex", hermes: "Hermes" };
+  const ICON_AGENTS =
+    '<svg class="ico %c" viewBox="0 0 24 24" aria-hidden="true"><rect x="4.5" y="8" width="15" height="11.5" rx="3.5"/><path d="M12 4v4M9.3 13.3h.01M14.7 13.3h.01M9.8 16.4h4.4"/></svg>';
+  function agentName(id) {
+    if (id === AGENT_ALL) return "All agents";
+    const a = agentById.get(id);
+    return a ? a.name : AGENT_NAME[id] || id;
+  }
+  function agentIcon(id, cls = "") {
+    if (id === AGENT_ALL) return ICON_AGENTS.replace("%c", cls);
+    const mark = AGENT_MARK[id] || (agentName(id).match(/[a-z0-9]/i) || ["?"])[0].toUpperCase();
+    return '<span class="bico letter mono ' + cls + '" data-agent="' + esc(id) + '" aria-hidden="true">' + esc(mark) + "</span>";
+  }
+  const agentHash = (id, n, date) => "#/agent/" + encodeURIComponent(id) + "/" + (n || "1") + (date && date !== today() ? "/" + date : "");
+  const AGENT_RANGES = [
+    ["1", "Today"],
+    ["7", "7 days"],
+    ["30", "30 days"],
+    ["365", "12 months"],
+    ["all", "All time"],
+  ];
+
+  async function loadAgents() {
+    try {
+      agentList = await get("/api/agents");
+    } catch {
+      return;
+    }
+    agentById.clear();
+    for (const a of agentList) agentById.set(a.id, a);
+    renderAgentNav();
+  }
+
+  // The agents running now (status), for one agent or all of them.
+  function liveAgents(id) {
+    return ((status && status.agents) || []).filter((a) => id === AGENT_ALL || a.subject.program === id);
+  }
+
+  const navAgents = document.getElementById("navagents");
+  const navAHead = document.getElementById("navahead");
+  const navAList = document.getElementById("navalist");
+  function setAgentsOpen(open) {
+    navAHead.setAttribute("aria-expanded", String(open));
+    navAList.hidden = !open;
+    localStorage.setItem("rail-agents", open ? "" : "closed");
+    requestAnimationFrame(moveGlide);
+  }
+  navAHead.addEventListener("click", () => setAgentsOpen(navAHead.getAttribute("aria-expanded") !== "true"));
+  if (localStorage.getItem("rail-agents") === "closed") {
+    navAHead.setAttribute("aria-expanded", "false");
+    navAList.hidden = true;
+  }
+  let agentNavKey = "";
+  function renderAgentNav() {
+    const live = (id) => liveAgents(id);
+    const key = JSON.stringify([agentList.map((a) => [a.id, a.name, a.today_busy]), agentList.map((a) => live(a.id).map((x) => x.busy))]);
+    if (key === agentNavKey) return;
+    agentNavKey = key;
+    navAgents.hidden = !agentList.length;
+    const link = (id, name, secs, dot) =>
+      '<a href="' + agentHash(id, "1") + '" data-route="agent:' + esc(id) + '" title="' + esc(name) + '"><span class="bwrap">' + agentIcon(id) + dot + "</span><span>" + esc(name) + "</span>" +
+      (secs ? '<em class="bt" title="Worked today">' + dur(secs) + "</em>" : "") + "</a>";
+    const dot = (id) => {
+      const l = live(id);
+      if (!l.length) return "";
+      const busy = l.some((a) => a.busy);
+      return '<i class="bdot" data-on="' + busy + '" title="' + (busy ? "Working now" : "Running, waiting") + '"></i>';
+    };
+    const total = agentList.reduce((a, x) => a + x.today_busy, 0);
+    navAList.innerHTML = (agentList.length > 1 ? link(AGENT_ALL, "All agents", total, "") : "") + agentList.map((a) => link(a.id, a.name, a.today_busy, dot(a.id))).join("");
+    markNav();
+    requestAnimationFrame(moveGlide);
+  }
+
+  // ---------- an agent's page ----------
+
+  let aState = null; // { id, n, date, r, d, cc, costKind }
+  let aView = "sessions";
+
+  function agentLiveHtml(id) {
+    const s = status;
+    if (s && s.viewer) return "";
+    const list = liveAgents(id);
+    if (!list.length) return '<div class="blive"><span class="pill">Not running</span></div>';
+    const busy = list.filter((a) => a.busy).length;
+    const where = [...new Set(list.map((a) => projName(a.subject.project)).filter(Boolean))];
+    const cpu = list.reduce((x, a) => x + (a.cpu_percent || 0), 0);
+    return (
+      '<div class="blive"><span class="pill" data-on="' + (busy > 0) + '">' + (busy ? (busy > 1 ? busy + " working" : "Working") : "Waiting") + "</span>" +
+      "<span>" + plural(list.length, "session") + " open" + (id === AGENT_ALL ? " (" + [...new Set(list.map((a) => agentName(a.subject.program)))].map(esc).join(", ") + ")" : "") + "</span>" +
+      (where.length ? "<span>in <b>" + where.map(esc).join("</b>, <b>") + "</b></span>" : "") +
+      "<span>" + cpu.toFixed(1) + "% CPU</span></div>"
+    );
+  }
+  function renderAgentLive() {
+    const el = document.getElementById("alive");
+    if (!el || !aState) return;
+    const html = agentLiveHtml(aState.id);
+    if (el._h !== html) {
+      el._h = html;
+      el.innerHTML = html;
+    }
+  }
+
+  // Worked (the agent's colour) and watched (yours), side by side per hour or day.
+  function dualBars(worked, watched, labels) {
+    const max = Math.max(...worked, ...watched, 0);
+    if (!max) return '<p class="empty">Nothing in this period.</p>';
+    const h = (v) => (v ? Math.max(2, (v / max) * 100).toFixed(1) : 0);
+    return (
+      '<div class="dbars" aria-hidden="true">' +
+      worked.map((w, i) => '<span title="' + esc(labels[i]) + ": worked " + dur(w) + ", you " + dur(watched[i]) + '"><i class="w" style="--h:' + h(w) + '%"></i><i class="y" style="--h:' + h(watched[i]) + '%"></i></span>').join("") +
+      '</div><div class="cbars-x"><span>' + esc(labels[0]) + "</span><span>top " + dur(max) + "</span><span>" + esc(labels[labels.length - 1]) + "</span></div>" +
+      '<div class="legend dlegend"><span><i class="key w"></i>It worked</span><span><i class="key y"></i>You watched</span></div>'
+    );
+  }
+
+  // Per project: the time it worked there and the time you watched it.
+  function agentProjectsHtml(list, isAll) {
+    list = (list || []).filter((p) => p.busy > 0 || p.focus > 0);
+    if (!list.length) return '<p class="empty">No agent work in this period.</p>';
+    const top = Math.max(...list.map((p) => Math.max(p.busy, p.focus)), 1);
+    const w = (x) => ((x / top) * 100).toFixed(2) + "%";
+    return (
+      '<ol class="rows">' +
+      list
+        .slice(0, 40)
+        .map((p) => {
+          const name = p.project ? projName(p.project) : "No project";
+          return (
+            '<li class="row"><div class="rh">' +
+            '<span class="rn">' + (isAll ? agentIcon(p.tool, "mini") : "") + "<span title=\"" + esc(p.project || "") + '">' + esc(name) + "</span>" + (isAll ? "<em>" + esc(agentName(p.tool)) + "</em>" : "") + "</span>" +
+            '<span class="rc">you ' + dur(p.focus) + '</span><span class="rd">' + dur(p.busy) + "</span>" +
+            '<span class="rb two" aria-hidden="true"><i class="w" style="--w:' + w(p.busy) + '"></i></span><span class="rb two y" aria-hidden="true"><i style="--w:' + w(p.focus) + '"></i></span>' +
+            "</div></li>"
+          );
+        })
+        .join("") +
+      "</ol>"
+    );
+  }
+  function agentSharesHtml(list, n) {
+    list = (list || []).filter((a) => a.busy > 0 || a.focus > 0);
+    if (!list.length) return '<p class="empty">No agent work in this period.</p>';
+    const top = Math.max(...list.map((a) => a.busy), 1);
+    return (
+      '<ol class="rows">' +
+      list
+        .map(
+          (a) =>
+            '<li class="row"><a class="rh" href="' + agentHash(a.tool, n) + '"><span class="rn">' + agentIcon(a.tool) + "<span>" + esc(agentName(a.tool)) + "</span><em>you watched " + dur(a.focus) + "</em></span>" +
+            '<span class="rc"></span><span class="rd">' + dur(a.busy) + '</span><span class="rb" aria-hidden="true"><i style="--w:' + ((a.busy / top) * 100).toFixed(2) + '%;--c:var(--agent)"></i></span></a></li>',
+        )
+        .join("") +
+      "</ol>"
+    );
+  }
+
+  // The plan's usage limits as Codex last reported them.
+  function limitsHtml(l) {
+    if (!l || !(l.windows || []).length) return "";
+    const name = (m) => (m === 300 ? "5-hour limit" : m === 10080 ? "Weekly limit" : dur(m * 60) + " limit");
+    const rows = l.windows
+      .map((w) => {
+        const pct = Math.max(0, Math.min(100, w.used_percent));
+        const reset = w.resets_ms ? (w.resets_ms > Date.now() ? "resets " + whenLabel(w.resets_ms) : "has reset since") : "";
+        return '<li><span>' + esc(name(w.minutes)) + ' <span class="d">' + esc(reset) + "</span></span><span>" + Math.round(pct) + '% used</span><span class="rb" aria-hidden="true"><i style="--w:' + pct.toFixed(1) + "%;--c:" + (pct >= 90 ? "var(--bad)" : pct >= 70 ? "var(--warn)" : "var(--text)") + '"></i></span></li>';
+      })
+      .join("");
+    return '<ul class="plain costs limits">' + rows + '</ul><p class="sub">' + (l.plan ? esc(cap(l.plan)) + " plan, as" : "As") + " Codex reported it " + esc(whenLabel(l.at_ms)) + ".</p>";
+  }
+
+  function agentSessionsHtml(list, gap) {
+    const all = aState.id === AGENT_ALL;
+    if (!list.length) return '<p class="empty">You did not have its terminal in front of you on this day.</p>';
+    return (
+      '<div class="tl">' +
+      list
+        .map((s) => {
+          const id = "asess:" + s.tool + ":" + s.start_ms;
+          const tot = Math.max(1, s.counted);
+          const w = (x) => ((x / tot) * 100).toFixed(2) + "%";
+          const v = { ...s, browser: "" };
+          return (
+            '<div class="sess visit" data-id="' + esc(id) + '" style="--c:var(--agent)"><span class="t">' + clockMs(s.start_ms) + ' <span class="to">to</span> ' + clockMs(s.end_ms) + "</span>" +
+            '<span class="w"><b>' + (all ? agentIcon(s.tool, "mini") : "") + esc(s.project || "No project") + (all ? " <em>" + esc(agentName(s.tool)) + "</em>" : "") + '</b><span class="ctx">' + ctxHtml(v, gap) + "</span></span>" +
+            '<span class="d">' + dur(s.counted) + '</span><span class="mix" aria-hidden="true"><i style="--w:' + w(s.active) + ';--c:var(--agent)"></i><i class="p" style="--w:' + w(s.passive) + ';--c:var(--agent)"></i><i class="k" style="--w:' + w(s.call) + ';--c:var(--agent)"></i></span></div>'
+          );
+        })
+        .join("") +
+      "</div>"
+    );
+  }
+  function stretchesHtml(list) {
+    const all = aState.id === AGENT_ALL;
+    if (!list.length) return '<p class="empty">It did no work on this day.</p>';
+    const top = Math.max(...list.map((s) => s.end_ms - s.start_ms), 1);
+    return (
+      '<div class="tl">' +
+      list
+        .map((s) => {
+          const len = s.end_ms - s.start_ms;
+          return (
+            '<div class="sess visit" style="--c:var(--agent)"><span class="t">' + clockMs(s.start_ms) + ' <span class="to">to</span> ' + clockMs(s.end_ms) + "</span>" +
+            '<span class="w"><b>' + (all ? agentIcon(s.tool, "mini") : "") + esc(s.project ? projName(s.project) : "No project") + (all ? " <em>" + esc(agentName(s.tool)) + "</em>" : "") + "</b>" + (s.project ? '<span class="ctx">' + esc(s.project) + "</span>" : "") + "</span>" +
+            '<span class="d">' + durExact(len) + '</span><span class="mix" aria-hidden="true"><i style="--w:' + ((len / top) * 100).toFixed(2) + '%;--c:var(--agent)"></i></span></div>'
+          );
+        })
+        .join("") +
+      "</div>"
+    );
+  }
+  function agentDaySectionHtml() {
+    const { date, d } = aState;
+    const isToday = date === today();
+    const body = aView === "work" ? stretchesHtml(d.stretches || []) : agentSessionsHtml(d.sessions || [], d.session_gap_ms || 60000);
+    return (
+      '<section class="panel visits" id="aday"><header><h2>' + esc(isToday ? "Today" : dayLabel(date, { weekday: "long", day: "numeric", month: "long" })) + '</h2><div class="actions">' +
+      '<button class="btn" type="button" data-ago="' + addDays(date, -1) + '" aria-label="Previous day">Previous</button>' +
+      (isToday ? "" : '<button class="btn" type="button" data-ago="' + today() + '">Today</button>') +
+      '<button class="btn" type="button" data-ago="' + addDays(date, 1) + '" ' + (isToday ? "disabled" : "") + ' aria-label="Next day">Next</button></div></header>' +
+      '<div class="tl-tools"><div class="seg" role="group" aria-label="Show">' +
+      [["sessions", "Your sessions (" + (d.sessions || []).length + ")"], ["work", "Its work (" + (d.stretches || []).length + ")"]].map(([v, l]) => '<button type="button" data-av="' + v + '" aria-pressed="' + (aView === v) + '">' + l + "</button>").join("") +
+      '</div></div><div id="alist">' + body + "</div></section>"
+    );
+  }
+
+  async function pageAgent(id, n, date, gen, quiet) {
+    const enc = encodeURIComponent(id);
+    const isAll = id === AGENT_ALL;
+    const to = today();
+    const from = n === "1" ? to : n === "all" ? addDays(to, -1199) : addDays(to, -(Number(n) - 1));
+    const entry = agentById.get(id);
+    const costKind = entry ? entry.cost : null;
+    const reuse = !quiet && aState && aState.id === id && aState.n === n && aState.r;
+    if (!reuse && !quiet) {
+      paint(head(agentIcon(id, "big") + esc(agentName(id)), esc(rangeLabel(n)), rangeBar(n, AGENT_RANGES)) + '<p class="empty">Loading…</p>');
+      bindRange("agent/" + enc);
+    }
+    let r;
+    let d;
+    let cc;
+    try {
+      [r, d, cc] = await Promise.all([
+        reuse ? aState.r : get("/api/agent?id=" + enc + "&from=" + from + "&to=" + to),
+        get("/api/agent/day?id=" + enc + "&date=" + date),
+        reuse ? aState.cc : costKind ? get("/api/" + costKind + "?from=" + from + "&to=" + to).catch(() => null) : null,
+      ]);
+    } catch (e) {
+      if (!stale(gen) && !quiet) paint(errorHtml(e));
+      return;
+    }
+    if (stale(gen)) return;
+    aState = { id, n, date, r, d, cc, costKind };
+    const y = window.scrollY;
+    const hourLabels = [...Array(24).keys()].map((h) => hourLabel(pad(h) + ":00"));
+    let days = r.days || [];
+    if (n === "all") {
+      const first = days.findIndex((x) => x.busy + x.focus > 0);
+      days = first >= 0 ? days.slice(first) : days.slice(-30);
+    }
+    const chart = n === "1" ? dualBars(r.busy_hours, r.focus_hours, hourLabels) : dualBars(days.map((x) => x.busy), days.map((x) => x.focus), days.map((x) => dayLabel(x.date, { day: "numeric", month: "short" })));
+    const nProjects = new Set((r.projects || []).filter((p) => p.busy + p.focus > 0).map((p) => p.project)).size;
+    let costFigs = "";
+    let costLeft = "";
+    let costRight = "";
+    let foot = "";
+    if (cc) {
+      const t = cc.tokens;
+      const all = t.input + t.output + t.cache_write + t.cache_read;
+      const context = t.input + t.cache_write + t.cache_read;
+      const shortDate = (x) => dayLabel(x, { day: "numeric", month: "short", year: "numeric" });
+      costFigs =
+        "<div><span>At API prices</span><b>" + money(cc.cost) + "</b></div>" +
+        (cc.earlier ? "<div><span>With the estimate before " + esc(dayLabel(addDays(cc.earlier.until, 1), { day: "numeric", month: "short" })) + "</span><b>about " + money(cc.cost + cc.earlier.cost) + "</b></div>" : "") +
+        (r.busy >= 600 && cc.cost ? "<div><span>Per hour of work</span><b>" + money(cc.cost / (r.busy / 3600)) + "</b></div>" : "") +
+        "<div><span>Tokens</span><b>" + tokens(all) + "</b></div>" +
+        "<div><span>From the cache</span><b>" + (context ? Math.round((t.cache_read / context) * 100) : 0) + "%</b></div>";
+      let bars;
+      if (n === "1") bars = costBars(cc.hourly, hourLabels, "No requests today.");
+      else {
+        const start = n === "all" ? (cc.days[0] || {}).date || to : from;
+        const by = Object.fromEntries(cc.days.map((x) => [x.date, x.cost]));
+        const dates = [];
+        for (let x = start; x <= to; x = addDays(x, 1)) dates.push(x);
+        bars = costBars(dates.map((x) => by[x] || 0), dates.map((x) => dayLabel(x, { day: "numeric", month: "short" })), "No requests in this period.");
+      }
+      costLeft = panel(n === "1" ? "Cost per hour" : "Cost per day", bars) + panel("By project", costRows(cc.projects, "No requests in this period."));
+      costRight =
+        (cc.limits ? panel("Plan limits", limitsHtml(cc.limits)) : "") +
+        panel("Where the cost goes", kindRows(cc)) +
+        panel("By model", costRows(cc.models, "No requests in this period.")) +
+        (cc.earlier
+          ? panel(
+              "Before " + dayLabel(addDays(cc.earlier.until, 1), { day: "numeric", month: "short" }) + ", estimated",
+              '<dl class="facts cc-facts"><dt>At API prices</dt><dd><b>about ' + money(cc.earlier.cost) + "</b></dd><dt>Tokens</dt><dd>about " + tokens(cc.earlier.tokens) + "</dd><dt>From</dt><dd>" + esc(shortDate(cc.earlier.from)) + " to " + esc(shortDate(cc.earlier.until)) + "</dd></dl>",
+              { sub: "Claude Code deletes transcripts after 30 days; its own statistics still count that use. This estimate prices it like your later use." },
+            )
+          : "");
+      foot =
+        costKind === "codex"
+          ? "Counted from Codex's own logs in ~/.codex, only read, never changed; prompts and replies are not kept. OpenAI's list prices of " + esc(shortDate(cc.prices_as_of)) + " are built in: the standard tier, without batch or other discounts, and the long-context rate for prompts over 272K tokens."
+          : "Counted from Claude Code's own logs in ~/.claude, only read, never changed; prompts and replies are not kept. Anthropic's prices of " + esc(shortDate(cc.prices_as_of)) + " are built in. On a Pro or Max plan you pay the plan instead.";
+      if (cc.unpriced.length) foot += " No price for " + cc.unpriced.map(esc).join(", ") + ": add one in config.toml under [agents.prices].";
+    }
+    paint(
+      head(agentIcon(id, "big") + esc(agentName(id)), esc(rangeLabel(n)), rangeBar(n, AGENT_RANGES)) +
+        '<div id="alive"></div>' +
+        (cc && cc.reading ? '<p class="note">Reading the history for the first time: the totals grow for a moment.</p>' : "") +
+        '<div class="figures">' +
+        "<div><span>It worked</span><b>" + dur(r.busy) + "</b></div>" +
+        "<div><span>You watched it</span><b>" + dur(r.focus) + "</b></div>" +
+        (cc
+          ? costFigs
+          : "<div><span>Projects</span><b>" + nProjects + "</b></div>" +
+            (n === "1" ? "<div><span>Your sessions</span><b>" + (d.sessions || []).length + "</b></div>" : "<div><span>Days used</span><b>" + r.days_used + " of " + (n === "all" ? days.length : r.days.length) + "</b></div>")) +
+        "</div>" +
+        '<div class="bcols"><div class="bcol l">' +
+        (isAll ? panel("Agents", agentSharesHtml(r.agents, n)) : "") +
+        panel("Projects", agentProjectsHtml(r.projects, isAll), { aside: plural(nProjects, "project") }) +
+        costLeft +
+        '</div><div class="bcol r">' +
+        panel(n === "1" ? "By hour" : "By day", chart) +
+        costRight +
+        "</div></div>" +
+        agentDaySectionHtml() +
+        (foot ? '<p class="sub cc-foot">' + foot + "</p>" : ""),
+    );
+    renderAgentLive();
+    bindRange("agent/" + enc);
+    bindAgentDay();
+    if (quiet || reuse) window.scrollTo(0, y);
+    startTicker();
+    clearInterval(refreshTimer);
+    refreshTimer = n === "1" || date === today() ? setInterval(() => !document.hidden && pageAgent(id, n, date, renderGen, true), 60000) : null;
+  }
+
+  function bindAgentDay() {
+    view.querySelectorAll("[data-ago]").forEach((b) => b.addEventListener("click", () => (location.hash = agentHash(aState.id, aState.n, b.dataset.ago))));
+    view.querySelectorAll("[data-av]").forEach((b) =>
+      b.addEventListener("click", () => {
+        aView = b.dataset.av;
+        view.querySelectorAll("[data-av]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+        const el = document.getElementById("alist");
+        const d = aState.d;
+        if (el) el.innerHTML = aView === "work" ? stretchesHtml(d.stretches || []) : agentSessionsHtml(d.sessions || [], d.session_gap_ms || 60000);
+      }),
+    );
+  }
+
   // ---------- ranges ----------
 
   const RANGES = [
@@ -1491,7 +1849,7 @@
         <div><span>Agents worked</span><b>${dur(sum("agent_busy"))}</b></div>
         <div><span>Projects</span><b>${list.length}</b></div>
       </div>
-      <div class="key-row"><span><i style="background:var(--cat-development, #6f9ee8)"></i>Editor</span><span><i style="background:var(--cat-ai, #b49be8)"></i>Terminal</span><span><i style="background:repeating-linear-gradient(135deg, var(--agent, #b49be8) 0 2px, transparent 2px 4px)"></i>Agent working</span></div>
+      <div class="key-row"><span><i style="background:var(--cat-development, #6f9ee8)"></i>Editor</span><span><i style="background:var(--cat-ai, #b49be8)"></i>Terminal</span><span><i style="background:var(--agent, #b49be8);opacity:0.6"></i>Agent working</span></div>
       <section class="panel w12">${projectsHtml(list, {
         days: n === "1" ? null : r.days,
         empty: "No coding in this period. Projects come from git folders your terminals are in and from code editor window titles (VS Code, Cursor, Zed, JetBrains…). The editor list is in Settings.",
@@ -1520,9 +1878,9 @@
 
   const CC_RANGES = [...RANGES, ["all", "All time"]];
   // Bars with a date (or hour) under each end and the top value beside them.
-  function costBars(values, labels) {
+  function costBars(values, labels, empty = "No requests in this period.") {
     const max = Math.max(...values, 0);
-    if (!max) return '<p class="empty">No Claude Code requests in this period.</p>';
+    if (!max) return '<p class="empty">' + esc(empty) + "</p>";
     return `<div class="cbars" aria-hidden="true">${values
       .map((v, i) => `<i style="--h:${v ? Math.max(2, (v / max) * 100).toFixed(1) : 0}%" title="${esc(labels[i])}: ${money(v)}"></i>`)
       .join("")}</div><div class="cbars-x"><span>${esc(labels[0])}</span><span>top ${money(max)}</span><span>${esc(labels[labels.length - 1])}</span></div>`;
@@ -1538,101 +1896,12 @@
     ];
     if (cc.web_searches) rows.push(["Web searches", `${cc.web_searches.toLocaleString("en-US")} searches`, 0, c.web_search]);
     const top = Math.max(...rows.map((r) => r[3]), 1e-9);
+    // A kind of token this agent never used (Codex writes no cache) is left out.
     return `<ul class="plain costs">${rows
+      .filter(([name, , tok, cost]) => tok || cost || name === "Input")
       .map(([name, hint, tok, cost]) => `<li><span>${esc(name)} <span class="d">${tok ? `${tokens(tok)} tokens` : esc(hint)}</span></span><span>${money(cost)} <span class="d">${cc.cost ? Math.round((cost / cc.cost) * 100) : 0}%</span></span><span class="rb" aria-hidden="true"><i style="--w:${((cost / top) * 100).toFixed(2)}%;--c:var(--agent, #b49be8)"></i></span></li>`)
       .join("")}</ul>`;
   };
-
-  async function pageClaude(n, gen) {
-    paint(loading("Claude Code", n, CC_RANGES));
-    bindRange("claude");
-    const to = today();
-    const from = n === "1" ? to : n === "all" ? addDays(to, -1199) : addDays(to, -(Number(n) - 1));
-    let cc;
-    let r = null;
-    try {
-      [cc, r] = await Promise.all([get(`/api/claude?from=${from}&to=${to}`), n === "all" ? null : loadRange(n).catch(() => null)]);
-    } catch (e) {
-      if (!stale(gen)) paint(errorHtml(e));
-      return;
-    }
-    if (stale(gen)) return;
-    const t = cc.tokens;
-    const all = t.input + t.output + t.cache_write + t.cache_read;
-    const context = t.input + t.cache_write + t.cache_read;
-    const worked = r ? (r.agents || []).filter((a) => a.tool === "claude").reduce((s, a) => s + a.busy, 0) : 0;
-    let chart;
-    if (n === "1") {
-      chart = costBars(cc.hourly, cc.hourly.map((_, i) => hourLabel(`${pad(i)}:00`)));
-    } else {
-      const start = n === "all" ? (cc.days[0] || {}).date || to : from;
-      const by = Object.fromEntries(cc.days.map((d) => [d.date, d.cost]));
-      const dates = [];
-      for (let d = start; d <= to; d = addDays(d, 1)) dates.push(d);
-      chart = costBars(dates.map((d) => by[d] || 0), dates.map((d) => dayLabel(d, { day: "numeric", month: "short" })));
-    }
-    const e = cc.earlier;
-    const short = (d) => dayLabel(d, { day: "numeric", month: "short", year: "numeric" });
-    const earlierHtml = e
-      ? panel(
-          `Before ${dayLabel(addDays(e.until, 1), { day: "numeric", month: "short" })}, estimated`,
-          `<dl class="facts cc-facts"><dt>At API prices</dt><dd><b>about ${money(e.cost)}</b></dd><dt>Tokens</dt><dd>about ${tokens(e.tokens)}</dd><dt>From</dt><dd>${esc(short(e.from))} to ${esc(short(e.until))}</dd></dl>${costRows(e.models.map((m) => ({ ...m, requests: 1, estimated: true })), "")}`,
-          {
-            w: "w12",
-            sub: "Claude Code deletes session transcripts after 30 days, so these are gone. Its own statistics still count that use, adding each request once per line it fills in the transcript (two to three times). This estimate divides that out, using the ratio measured on the transcripts still on disk, and prices the rest like your later use.",
-          },
-        )
-      : "";
-    paint(`${head("Claude Code", "What its requests would cost at Anthropic's API prices. On a Pro or Max plan you pay the plan instead.", rangeBar(n, CC_RANGES))}
-      ${cc.reading ? '<p class="note">Reading Claude Code\'s history for the first time: the totals grow for a moment.</p>' : ""}
-      <div class="figures">
-        <div><span>At API prices</span><b>${money(cc.cost)}</b></div>
-        ${e ? `<div><span>With the estimate before ${esc(dayLabel(addDays(e.until, 1), { day: "numeric", month: "short" }))}</span><b>about ${money(cc.cost + e.cost)}</b></div>` : ""}
-        <div><span>Requests</span><b>${cc.requests.toLocaleString("en-US")}</b></div>
-        <div><span>Tokens</span><b>${tokens(all)}</b></div>
-        <div><span>Context from the cache</span><b>${context ? Math.round((t.cache_read / context) * 100) : 0}%</b></div>
-        ${worked ? `<div><span>Claude worked</span><b>${dur(worked)}</b></div>` : ""}
-        ${worked >= 600 && cc.cost ? `<div><span>Per hour of work</span><b>${money(cc.cost / (worked / 3600))}</b></div>` : ""}
-      </div>
-      <div class="grid">
-        ${panel(n === "1" ? "Cost per hour" : "Cost per day", chart, { w: "w12" })}
-        ${panel("Where the cost goes", kindRows(cc), { w: "w4" })}
-        ${panel("By model", costRows(cc.models, "No Claude Code requests in this period."), { w: "w4" })}
-        ${panel("By project", costRows(cc.projects, "No Claude Code requests in this period."), { w: "w4" })}
-        ${earlierHtml}
-      </div>
-      <p class="sub cc-foot">Counted from Claude Code's own logs in ~/.claude, which are only read, never changed. Prompts and replies are not kept. Anthropic's prices of ${esc(short(cc.prices_as_of))} are built in, so nothing is looked up online.${cc.unpriced.length ? ` No price for ${cc.unpriced.map(esc).join(", ")}: add one in config.toml under [agents.prices].` : ""}</p>`);
-    bindRange("claude");
-  }
-
-  async function pageAgents(n, gen) {
-    paint(loading("AI agents", n));
-    bindRange("agents");
-    let r;
-    let cc = null;
-    try {
-      const to = today();
-      const from = n === "1" ? to : addDays(to, -(Number(n) - 1));
-      const wantCost = (prefs().agents || {}).claude_cost !== false;
-      [r, cc] = await Promise.all([loadRange(n), wantCost ? get(`/api/claude?from=${from}&to=${to}`).catch(() => null) : null]);
-    } catch (e) {
-      if (!stale(gen)) paint(errorHtml(e));
-      return;
-    }
-    if (stale(gen)) return;
-    const busy = (r.agents || []).reduce((a, x) => a + x.busy, 0);
-    const focus = (r.agents || []).reduce((a, x) => a + x.focus, 0);
-    paint(`${head("AI agents", "An agent counts as working while it uses CPU or writes to its terminal, focused or not.", rangeBar(n))}
-      <div class="figures">
-        <div><span>Agents worked</span><b>${dur(busy)}</b></div>
-        <div><span>You watched them</span><b>${dur(focus)}</b></div>
-        <div><span>Agents</span><b>${new Set((r.agents || []).map((a) => a.tool)).size}</b></div>
-        ${cc && cc.requests ? `<div><span>Claude Code at API prices</span><b><a class="figlink" href="#/claude/${n}">${money(cc.cost)}</a></b></div>` : ""}
-      </div>
-      <section class="panel w12">${agentsHtml(r.agents, "No AI agents ran in this period. Agents are recognised by name; add more in Settings.")}</section>
-`);
-    bindRange("agents");
-  }
 
   // ---------- trends ----------
 
@@ -1860,6 +2129,7 @@
         ${field("…or it writes", "Output to its terminal per 10 seconds.", num("awrite", c.agents.busy_write_bytes, "bytes or more", 0, 10000000))}
         ${field("Known agents", "One per line: id | name | names to match", `<textarea id="tools" class="code">${esc(tools)}</textarea>`)}
         ${field("Claude Code cost", "Reads token counts from Claude Code's own logs in ~/.claude, read-only, and prices them at Anthropic's API rates on the Claude Code page. Prompts and replies are never kept.", check("ccost", c.agents.claude_cost !== false, "Show what Claude Code would cost"))}
+        ${field("Codex cost", "Reads token counts and plan limits from Codex's own logs in ~/.codex, read-only, and prices them at OpenAI's list prices on the Codex page. Prompts and replies are never kept.", check("xcost", c.agents.codex_cost !== false, "Show what Codex would cost"))}
       `)}
       ${sec("privacy", "Privacy", `
         ${field("Never record these apps", "One per line, by name or app id.", `<textarea id="xapps">${esc(lines(c.privacy.exclude_apps))}</textarea>`)}
@@ -2047,6 +2317,7 @@
       next.agents.busy_child_cpu_percent = n("akid");
       next.agents.busy_write_bytes = n("awrite");
       next.agents.claude_cost = $("ccost").checked;
+      next.agents.codex_cost = $("xcost").checked;
       next.agents.tools = $("tools")
         .value.split("\n")
         .map((l) => l.split("|").map((x) => x.trim()))
@@ -2102,6 +2373,7 @@
         link.href = "/custom.css?" + Date.now();
         await loadSettings().catch(() => {});
         loadBrowsers();
+        loadAgents();
         if (res.redirect) {
           msg(`Saved. Moving to port ${next.dashboard.port}…`);
           setTimeout(() => (location.href = res.redirect), 700);
@@ -2174,7 +2446,9 @@
     renderRail();
     renderNotices();
     renderBrowserNav();
+    renderAgentNav();
     if (currentPage === "browser") renderBrowserLive();
+    if (currentPage === "agent") renderAgentLive();
     if (currentPage === "now") renderNow();
     renderNowStrip();
     startTicker();
@@ -2712,7 +2986,7 @@
 
   // ---------- router ----------
 
-  const PAGES = ["now", "today", "timeline", "apps", "projects", "agents", "claude", "trends", "settings"];
+  const PAGES = ["now", "today", "timeline", "apps", "projects", "trends", "settings"];
   let navCurrent = "";
   function markNav() {
     document.querySelectorAll(".nav a").forEach((a) => {
@@ -2737,16 +3011,20 @@
     const h = location.hash.replace(/^#\/?/, "") || start;
     const parts = h.split("/");
     const [page, arg] = parts;
-    const key = page === "day" ? "today" : page === "browser" ? "browser" : PAGES.includes(page) ? page : "today";
+    // The Agents and Claude Code pages moved under AI agents.
+    if (page === "agents" || page === "claude") {
+      history.replaceState(null, "", agentHash(page === "claude" ? "claude" : AGENT_ALL, arg || (page === "claude" ? "30" : "7")));
+      return route(sameView);
+    }
+    const key = page === "day" ? "today" : page === "browser" || page === "agent" ? page : PAGES.includes(page) ? page : "today";
     if (key !== currentPage && !sameView) enterNext = true;
     currentPage = key;
     const bid = page === "browser" ? safeDecode(parts[1] || "") || ALL_ID : "";
-    navCurrent = page === "browser" ? `browser:${bid}` : key;
+    const aid = page === "agent" ? safeDecode(parts[1] || "") || AGENT_ALL : "";
+    navCurrent = page === "browser" ? `browser:${bid}` : page === "agent" ? `agent:${aid}` : key;
     if (page !== "browser") bState = null;
+    if (page !== "agent") aState = null;
     markNav();
-    // The Claude Code page goes with its switch in Settings.
-    const ccLink = document.querySelector('.nav a[data-route="claude"]');
-    if (ccLink) ccLink.hidden = (prefs().agents || {}).claude_cost === false;
     moveGlide();
     // One title for every page: the tracker records this tab too, and a title that changed with the
     // page would show up as a new window each time you moved around.
@@ -2764,14 +3042,16 @@
         return pageApps(valid(arg, RANGES) || "1", gen);
       case "projects":
         return pageProjects(valid(arg, RANGES) || "7", gen);
-      case "agents":
-        return pageAgents(valid(arg, RANGES) || "7", gen);
-      case "claude":
-        return pageClaude(valid(arg, CC_RANGES) || "30", gen);
       case "trends":
         return pageTrends(valid(arg, RANGES.slice(1)) || "30", gen);
       case "settings":
         return pageSettings(gen);
+      case "agent": {
+        const n = valid(parts[2], AGENT_RANGES) || "1";
+        let d = /^\d{4}-\d{2}-\d{2}$/.test(parts[3] || "") ? parts[3] : today();
+        if (d > today()) d = today();
+        return pageAgent(aid, n, d, gen);
+      }
       case "browser": {
         const n = valid(parts[2], RANGES) || "1";
         let d = /^\d{4}-\d{2}-\d{2}$/.test(parts[3] || "") ? parts[3] : today();
@@ -2789,6 +3069,13 @@
     const i = "123456789".indexOf(e.key);
     if (i >= 0) {
       location.hash = `#/${PAGES[i]}`;
+      return;
+    }
+    if (currentPage === "agent" && aState) {
+      const { id, n, date } = aState;
+      if (e.key === "ArrowLeft") location.hash = agentHash(id, n, addDays(date, -1));
+      else if (e.key === "ArrowRight" && date < today()) location.hash = agentHash(id, n, addDays(date, 1));
+      else if (e.key === "t") location.hash = agentHash(id, n);
       return;
     }
     if (currentPage === "browser" && bState) {
@@ -2823,7 +3110,12 @@
       route();
       connectLive();
       loadBrowsers();
-      // Today's time per browser in the sidebar.
-      setInterval(() => !document.hidden && loadBrowsers(), 60000);
+      loadAgents();
+      // Today's time per browser and agent in the sidebar.
+      setInterval(() => {
+        if (document.hidden) return;
+        loadBrowsers();
+        loadAgents();
+      }, 60000);
     });
 })();

@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- An Agents group in the sidebar, like Browsers: Claude Code and Codex (and Hermes once it is
+  installed), each with its icon, the time it worked today and a dot while it runs, plus All agents.
+  An agent's page shows the time it worked beside the time you watched it, per project and per hour
+  or day, your sessions in its terminal with what came right before and after, and its stretches of
+  work. The Agents and Claude Code pages moved here; Claude Code's cost is on its page.
+- Codex at API prices: its token use per response is read from its own logs in ~/.codex (read-only;
+  prompts and replies are never kept) and priced at OpenAI's list prices (standard tier, no batch or
+  other discounts, long-context rates over 272K tokens), with its plan's 5-hour and weekly limits.
+  Settings → AI agents switches it off.
+- An OLED theme, now the default: true black with near-black panels, one quiet accent and soft
+  category colours, with a Paper light mode.
 - Browsers in the dashboard: a sidebar group lists every browser the extension has connected from,
   with its own icon, today's time and a dot while its extension is connected, plus All browsers
   when there are two or more. A browser's page groups its sites by domain, then subdomain, then
@@ -53,6 +64,10 @@ All notable changes to this project are documented here. The format follows
   turns them all off, and Settings can send a test notice.
 
 ### Changed
+
+- A calmer look on every page: headline numbers without boxes, solid bars instead of hatched and
+  dotted ones, neutral charts, tighter headings, a wider sidebar whose times are never cut off, and a
+  content width limit on very wide screens.
 
 - A session is an unbroken stretch of screen time: switching apps or sites no longer ends one (the
   Timeline still lists each app), so session counts and deep work mean something.

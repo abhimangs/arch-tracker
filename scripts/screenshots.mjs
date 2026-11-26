@@ -54,9 +54,6 @@ fs.writeFileSync(
   `[dashboard]
 port = ${port}
 theme = "dark"
-palette = "rose-pine"
-dark_flavor = "main"
-accent = "iris"
 tray = false
 
 [insights]
@@ -67,6 +64,11 @@ daily_goal_mins = 420
 id = "claude"
 name = "Claude Code"
 matches = ["demo-agent-that-does-not-exist"]
+
+[[agents.tools]]
+id = "codex"
+name = "Codex"
+matches = ["demo-codex-that-does-not-exist"]
 `,
 );
 execFileSync(bin, ["demo", "--db", path.join(env.XDG_DATA_HOME, "arch-tracker/tracker.db"), "--days", "7"], { env, stdio: "inherit" });
@@ -164,7 +166,8 @@ await shot("timeline", "#/timeline", { height: 1000 });
 await shot("projects", "#/projects/7", { height: 1000 });
 await shot("trends", "#/trends/7", { height: 1100 });
 await shot("browsers", "#/browser/brave-browser/7", { height: 1250 });
-await shot("today-dawn", "#/today", { height: 1000, theme: "light" });
+await shot("agent", "#/agent/claude/7", { height: 1200 });
+await shot("today-light", "#/today", { height: 1000, theme: "light" });
 // Let the live timer run a little before showing Now.
 await sleep(Math.max(0, 74_000 - (Date.now() - focusedAt)));
 await shot("now", "#/now", { height: 1000 });

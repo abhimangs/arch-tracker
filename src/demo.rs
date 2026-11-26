@@ -46,6 +46,7 @@ impl Rng {
 enum Act {
     Nvim(&'static str),
     Claude(&'static str),
+    Codex(&'static str),
     Cargo(&'static str),
     Zed(&'static str, &'static str),
     Site(&'static str, &'static str),
@@ -64,6 +65,7 @@ struct Writer<'a> {
     store: &'a Store,
     ids: HashMap<Subject, i64>,
     next: i64,
+    next_request: i64,
 }
 
 impl Writer<'_> {
@@ -81,6 +83,41 @@ impl Writer<'_> {
         )?;
         self.ids.insert(s, self.next);
         Ok(self.next)
+    }
+
+    /// Made-up requests while an agent works: a few a minute, mostly read from the cache.
+    fn requests(&mut self, tool: &str, project: &str, a: i64, b: i64, rng: &mut Rng) -> Result<()> {
+        let folder = format!("~/code/{project}");
+        let mut t = a;
+        while t < b {
+            self.next_request += 1;
+            let id = self.next_request;
+            let context = 40_000 + (rng.next() % 90_000) as i64;
+            let fresh = 1_500 + (rng.next() % 6_000) as i64;
+            let out = 300 + (rng.next() % 2_500) as i64;
+            if tool == "claude" {
+                let model = if rng.next().is_multiple_of(4) {
+                    "claude-sonnet-5-5"
+                } else {
+                    "claude-opus-5-5"
+                };
+                self.store.conn.execute(
+                    "INSERT INTO claude_usage(id, at_ms, model, project, input, output, cache_5m,
+                         cache_1h, cache_read, web_search, fast, us_only)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, 0, 0, 0)",
+                    params![id, t, model, folder, 6, out, fresh, context],
+                )?;
+            } else {
+                self.store.conn.execute(
+                    "INSERT INTO codex_usage(id, at_ms, model, project, input, cached, cache_write,
+                         output, reasoning, fast)
+                     VALUES (?1, ?2, 'gpt-6.2-astra', ?3, ?4, ?5, 0, ?6, ?7, 0)",
+                    params![id, t, folder, context + fresh, context, out, out / 3],
+                )?;
+            }
+            t += 25_000 + (rng.next() % 70_000) as i64;
+        }
+        Ok(())
     }
 
     fn span(&self, kind: Kind, subject: i64, a: i64, b: i64) -> Result<()> {
@@ -129,6 +166,7 @@ fn subject_of(a: Act) -> Subject {
     match a {
         Act::Nvim(p) => term("nvim", p),
         Act::Claude(p) => term("claude", p),
+        Act::Codex(p) => term("codex", p),
         Act::Cargo(p) => term("cargo", p),
         Act::Zed(p, file) => Subject {
             title: format!("{p} — {file}"),
@@ -168,6 +206,8 @@ const WORK: &[(u32, Act)] = &[
     (6, Act::Zed("ember", "src/lib.rs")),
     (5, Act::Nvim("ember")),
     (4, Act::Claude("ember")),
+    (5, Act::Codex("ember")),
+    (3, Act::Codex("atlas")),
     (4, Act::Zed("notes-site", "content/now.md")),
     (
         7,
@@ -211,6 +251,7 @@ pub fn run(db: &Path, days: u32) -> Result<()> {
         store: &store,
         ids: HashMap::new(),
         next: 0,
+        next_request: 0,
     };
     let now = util::now_ms();
     let flag = 0;
@@ -276,7 +317,7 @@ pub fn run(db: &Path, days: u32) -> Result<()> {
                 last = Some(act);
                 let len = match act {
                     Act::Nvim(_) | Act::Zed(..) => rng.mins(8, 34),
-                    Act::Claude(_) => rng.mins(5, 22),
+                    Act::Claude(_) | Act::Codex(_) => rng.mins(5, 22),
                     Act::Video(..) => rng.mins(12, 32),
                     Act::Cargo(_) | Act::Files => rng.mins(1, 3),
                     Act::Slack => rng.mins(1, 6),
@@ -288,19 +329,20 @@ pub fn run(db: &Path, days: u32) -> Result<()> {
                 let id = w.subject(subject_of(act))?;
                 w.span(Kind::Focus, id, t, stop)?;
                 match act {
-                    Act::Claude(p) => {
+                    Act::Claude(p) | Act::Codex(p) => {
                         // The agent keeps working after you look away.
+                        let (tool, name) = match act {
+                            Act::Claude(_) => ("claude", "Claude Code"),
+                            _ => ("codex", "Codex"),
+                        };
                         let busy = w.subject(Subject {
-                            program: "claude".into(),
+                            program: tool.into(),
                             project: format!("~/code/{p}"),
-                            ..app("agent:claude", "Claude Code")
+                            ..app(&format!("agent:{tool}"), name)
                         })?;
-                        w.span(
-                            Kind::AgentBusy,
-                            busy,
-                            t + MIN,
-                            (stop + rng.mins(4, 18)).min(day_end),
-                        )?;
+                        let until = (stop + rng.mins(4, 18)).min(day_end);
+                        w.span(Kind::AgentBusy, busy, t + MIN, until)?;
+                        w.requests(tool, p, t + MIN, until, &mut rng)?;
                     }
                     Act::Video(..) => {
                         w.span(Kind::MediaVisible, id, t, stop)?;
@@ -329,6 +371,15 @@ pub fn run(db: &Path, days: u32) -> Result<()> {
         }
     }
     store.conn.execute_batch("COMMIT")?;
+    // Codex's plan limits, as it would report them.
+    let limits = serde_json::json!({
+        "at_ms": now - 20 * MIN, "plan": "plus",
+        "windows": [
+            {"minutes": 300, "used_percent": 38.0, "resets_ms": now + 2 * HOUR + 14 * MIN},
+            {"minutes": 10080, "used_percent": 21.0, "resets_ms": now + 3 * 24 * HOUR},
+        ],
+    });
+    store.set_meta("codex_limits", Some(&limits.to_string()))?;
     println!("Wrote {days} days of made-up activity to {}", db.display());
     Ok(())
 }

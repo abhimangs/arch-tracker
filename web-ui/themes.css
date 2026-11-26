@@ -1,9 +1,37 @@
-/* Theme palettes: Aizome (the original), Catppuccin and Rosé Pine.
+/* Theme palettes: OLED (the default), Aizome (the original), Catppuccin and Rosé Pine.
    <html> carries data-palette, data-theme (system | dark | light), data-dark (the dark flavour)
    and data-accent. Each flavour defines raw --p-* colours; each palette maps them onto the
    semantic variables app.css uses (--bg, --raise, --line, --text, --mist, --faint, --shu …)
    and onto --cat-* slots that category colours use when "follow theme" is on.
    Catppuccin: https://catppuccin.com/palette  ·  Rosé Pine: https://rosepinetheme.com/palette */
+
+/* ---------- OLED ---------- */
+/* True black for OLED screens: depth from near-black panels and hairlines instead of tints. One
+   accent (white by default), and soft category colours that read on black without glowing. */
+
+:root[data-palette="oled"] {
+  --p-bg: #000000;
+  --p-panel: #0a0a0a;
+  --p-raise: #141414;
+  --p-line: #232323;
+  --p-hair: #171717;
+  --p-text: #ededed;
+  --p-mist: #8f8f8f;
+  --p-faint: #3d3d3d;
+  --p-white: #f2f2f2;
+  --p-blue: #7f9ddf;
+  --p-green: #62b98e;
+  --p-amber: #d6a55a;
+  --p-rose: #d97f8f;
+  --p-violet: #a493dc;
+  --p-red: #d26a5e;
+  --p-teal: #55b2ac;
+  --p-lime: #a8b970;
+  --p-orange: #d88d5d;
+  --p-sky: #72b3ca;
+  --p-grey: #8c8c8c;
+  color-scheme: dark;
+}
 
 /* ---------- Aizome ---------- */
 
@@ -156,7 +184,32 @@
   color-scheme: dark;
 }
 
-/* ---------- light flavours: Fog, Latte, Dawn ---------- */
+/* ---------- light flavours: Paper, Fog, Latte, Dawn ---------- */
+
+:root[data-palette="oled"][data-theme="light"] {
+  --p-bg: #f6f6f6;
+  --p-panel: #ffffff;
+  --p-raise: #ededed;
+  --p-line: #d9d9d9;
+  --p-hair: #e6e6e6;
+  --p-text: #121212;
+  --p-mist: #626262;
+  --p-faint: #b4b4b4;
+  --p-white: #161616;
+  --p-blue: #3a5fbf;
+  --p-green: #2f8a5c;
+  --p-amber: #a8701c;
+  --p-rose: #b8475d;
+  --p-violet: #6a52b8;
+  --p-red: #b8483b;
+  --p-teal: #1f817b;
+  --p-lime: #6b7f2a;
+  --p-orange: #b25e26;
+  --p-sky: #2e7f9c;
+  --p-grey: #6e6e6e;
+  color-scheme: light;
+}
+
 
 :root[data-palette="aizome"][data-theme="light"] {
   --p-bg: #eef1f7;
@@ -225,6 +278,30 @@
 }
 
 @media (prefers-color-scheme: light) {
+  :root[data-palette="oled"][data-theme="system"] {
+    --p-bg: #f6f6f6;
+    --p-panel: #ffffff;
+    --p-raise: #ededed;
+    --p-line: #d9d9d9;
+    --p-hair: #e6e6e6;
+    --p-text: #121212;
+    --p-mist: #626262;
+    --p-faint: #b4b4b4;
+    --p-white: #161616;
+    --p-blue: #3a5fbf;
+    --p-green: #2f8a5c;
+    --p-amber: #a8701c;
+    --p-rose: #b8475d;
+    --p-violet: #6a52b8;
+    --p-red: #b8483b;
+    --p-teal: #1f817b;
+    --p-lime: #6b7f2a;
+    --p-orange: #b25e26;
+    --p-sky: #2e7f9c;
+    --p-grey: #6e6e6e;
+    color-scheme: light;
+  }
+
   :root[data-palette="aizome"][data-theme="system"] {
     --p-bg: #eef1f7;
     --p-raise: #e2e7f1;
@@ -293,6 +370,45 @@
 }
 
 /* ---------- semantic mapping ---------- */
+
+:root[data-palette="oled"] {
+  --rail: var(--p-bg);
+  --bg: var(--p-bg);
+  --panel: var(--p-panel);
+  --raise: var(--p-raise);
+  --line: var(--p-line);
+  --hair: var(--p-hair);
+  --text: var(--p-text);
+  --mist: var(--p-mist);
+  --faint: var(--p-faint);
+  --shu: var(--p-accent, var(--p-white));
+  --ok: var(--p-green);
+  --bad: var(--p-red);
+  --warn: var(--p-amber);
+  --info: var(--p-teal);
+  --agent: var(--p-violet);
+  --heat: var(--p-accent, var(--p-white));
+  --cat-ai: var(--p-violet);
+  --cat-development: var(--p-blue);
+  --cat-social: var(--p-rose);
+  --cat-video: var(--p-red);
+  --cat-messaging: var(--p-green);
+  --cat-music: var(--p-amber);
+  --cat-meetings: var(--p-teal);
+  --cat-productivity: var(--p-lime);
+  --cat-learning: var(--p-orange);
+  --cat-system: var(--p-grey);
+  --cat-browsing: var(--p-sky);
+  --cat-other: color-mix(in oklab, var(--p-grey) 70%, var(--p-bg));
+  --cat-x1: color-mix(in oklab, var(--p-rose) 50%, var(--p-amber));
+  --cat-x2: color-mix(in oklab, var(--p-blue) 50%, var(--p-violet));
+  --cat-x3: color-mix(in oklab, var(--p-teal) 50%, var(--p-blue));
+  --cat-x4: color-mix(in oklab, var(--p-red) 45%, var(--p-rose));
+  /* Flat controls: no glass on black. */
+  --glass-rim: transparent;
+  --glass-sheen: linear-gradient(transparent, transparent);
+  --glass-drop: transparent;
+}
 
 :root[data-palette="aizome"] {
   --rail: color-mix(in oklab, var(--p-bg) 80%, var(--p-raise));
@@ -384,6 +500,9 @@
 
 /* ---------- accents (any palette that defines the colour) ---------- */
 
+:root[data-accent="white"] { --p-accent: var(--p-white); }
+:root[data-accent="amber"] { --p-accent: var(--p-amber); }
+:root[data-accent="violet"] { --p-accent: var(--p-violet); }
 :root[data-accent="rosewater"] { --p-accent: var(--p-rosewater); }
 :root[data-accent="flamingo"] { --p-accent: var(--p-flamingo); }
 :root[data-accent="pink"] { --p-accent: var(--p-pink); }
@@ -408,3 +527,15 @@
 :root[data-accent="jade"] { --p-accent: var(--p-jade); }
 :root[data-accent="lilac"] { --p-accent: var(--p-lilac); }
 :root[data-accent="sakura"] { --p-accent: var(--p-sakura); }
+
+/* ---------- OLED components: flat on black ---------- */
+
+:root[data-palette="oled"] .glide { background: var(--raise); box-shadow: none; }
+:root[data-palette="oled"] .nav a[aria-current="page"] .ico { color: var(--text); }
+:root[data-palette="oled"] .seg { background: var(--panel); box-shadow: inset 0 0 0 1px var(--hair); }
+:root[data-palette="oled"] .seg button[aria-pressed="true"],
+:root[data-palette="oled"] .seg button[aria-checked="true"] { background: var(--raise); border-color: var(--line); box-shadow: none; }
+:root[data-palette="oled"] .btn:not(.primary), :root[data-palette="oled"] .icon-btn { background: var(--panel); box-shadow: none; }
+:root[data-palette="oled"] .live { background: var(--panel); box-shadow: inset 0 0 0 1px var(--hair); }
+:root[data-palette="oled"] .rail { border-right-color: var(--hair); }
+:root[data-palette="oled"] .pop { background: color-mix(in oklab, var(--panel) 92%, transparent); border-color: var(--line); }

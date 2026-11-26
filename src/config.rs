@@ -202,11 +202,11 @@ pub struct Dashboard {
     pub port: u16,
     /// "system", "dark" or "light".
     pub theme: String,
-    /// "catppuccin", "rose-pine" or "aizome" (the original look).
+    /// "oled" (true black, the default), "catppuccin", "rose-pine" or "aizome" (the original look).
     pub palette: String,
-    /// Flavour used in dark mode: mocha/macchiato/frappe, main/moon, or night.
+    /// Flavour used in dark mode: black, mocha/macchiato/frappe, main/moon, or night.
     pub dark_flavor: String,
-    /// Accent colour name from the palette (mauve, iris, cinnabar, …).
+    /// Accent colour name from the palette (white, mauve, iris, cinnabar, …).
     pub accent: String,
     /// Category colours follow the palette instead of the colours set per category.
     pub theme_categories: bool,
@@ -236,6 +236,13 @@ pub struct Palette {
 }
 
 pub const PALETTES: &[Palette] = &[
+    Palette {
+        id: "oled",
+        name: "OLED",
+        dark: &["black"],
+        light: "paper",
+        accents: &["white", "blue", "green", "amber", "rose", "violet"],
+    },
     Palette {
         id: "catppuccin",
         name: "Catppuccin",
@@ -519,9 +526,9 @@ impl Default for Dashboard {
         Dashboard {
             port: 7600,
             theme: "system".into(),
-            palette: "catppuccin".into(),
-            dark_flavor: "mocha".into(),
-            accent: "mauve".into(),
+            palette: "oled".into(),
+            dark_flavor: "black".into(),
+            accent: "white".into(),
             theme_categories: true,
             tray: true,
             time_format: "24h".into(),
@@ -1381,10 +1388,11 @@ mod tests {
         assert_eq!(cfg.dashboard.accent, "iris");
         let mut cfg = Config::default();
         cfg.dashboard.palette = "nope".into();
-        assert_eq!(cfg.sanitized().dashboard.palette, "catppuccin");
+        assert_eq!(cfg.sanitized().dashboard.palette, "oled");
         let cfg: Config = toml::from_str("[dashboard]\ntheme = \"dark\"\n").unwrap();
-        assert_eq!(cfg.dashboard.palette, "catppuccin");
-        assert_eq!(cfg.dashboard.accent, "mauve");
+        assert_eq!(cfg.dashboard.palette, "oled");
+        assert_eq!(cfg.dashboard.dark_flavor, "black");
+        assert_eq!(cfg.dashboard.accent, "white");
         assert!(cfg.dashboard.tray && cfg.dashboard.theme_categories);
     }
 
