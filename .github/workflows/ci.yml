@@ -58,6 +58,22 @@ jobs:
       - name: Open every page on demo data
         run: CHROME="$(command -v google-chrome || command -v chromium)" node scripts/smoke-dashboard.mjs
 
+  desktops:
+    name: Window tracking on Sway
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install compositors, a terminal and D-Bus
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsqlite3-dev dbus jq sway foot fonts-dejavu-core
+      - name: Build
+        run: cargo build --locked
+      - name: Sway
+        run: scripts/desktop-smoke.sh sway
+
   package:
     name: Arch package
     runs-on: ubuntu-latest

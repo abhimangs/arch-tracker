@@ -22,7 +22,7 @@ mod web;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
-/// Local screen-time and activity tracker for KDE Plasma (Wayland).
+/// Local screen-time and activity tracker for KDE Plasma, Hyprland and Sway (Wayland).
 #[derive(Parser)]
 #[command(name = "arch-tracker", version, about)]
 struct Cli {

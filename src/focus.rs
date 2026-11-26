@@ -1,5 +1,6 @@
 //! Brings an AI agent's terminal forward (a click on its notice): the tmux pane it runs in, the
-//! kitty tab and pane, and the desktop window that shows them.
+//! kitty tab and pane, and the desktop window that shows them (through KWin, Hyprland, Sway or
+//! the GNOME extension).
 
 use crate::sources::terminal::{kitty, procfs, tmux};
 use anyhow::{Result, bail};
@@ -42,7 +43,15 @@ pub async fn agent(conn: &Connection, pid: u32) -> Result<()> {
         }
         break;
     }
-    crate::sources::kwin::activate(conn, &chain, caption.as_deref()).await
+    use crate::sources::wm::Wm;
+    match crate::sources::wm::detect() {
+        Wm::Kwin => crate::sources::kwin::activate(conn, &chain, caption.as_deref()).await,
+        Wm::Hyprland(dir) => {
+            crate::sources::hyprland::focus(&dir, &chain, caption.as_deref()).await
+        }
+        Wm::Sway(sock) => crate::sources::sway::focus(&sock, &chain, caption.as_deref()).await,
+        Wm::Gnome => bail!("windows can't be raised on GNOME yet"),
+    }
 }
 
 /// A process and its parents, nearest first.

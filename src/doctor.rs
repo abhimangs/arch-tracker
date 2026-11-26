@@ -210,10 +210,32 @@ pub async fn run() -> anyhow::Result<()> {
     };
     r.line(true, "daemon answers on the control socket", "");
     let src = &s["sources"];
+    let desktop = src["kwin"]["desktop"].as_str().unwrap_or("KDE Plasma");
+    let (source, fix) = match desktop {
+        "Hyprland" => (
+            "Hyprland's IPC socket",
+            "The tracker finds Hyprland through HYPRLAND_INSTANCE_SIGNATURE or the sockets in $XDG_RUNTIME_DIR/hypr.\nAdd to hyprland.conf: exec-once = systemctl --user import-environment HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY XDG_CURRENT_DESKTOP\nthen: systemctl --user restart arch-tracker",
+        ),
+        "Sway" => (
+            "Sway's IPC socket",
+            "The tracker finds sway through SWAYSOCK or the socket in $XDG_RUNTIME_DIR.\nAdd to the sway config: exec systemctl --user import-environment SWAYSOCK WAYLAND_DISPLAY XDG_CURRENT_DESKTOP\nthen: systemctl --user restart arch-tracker",
+        ),
+        "GNOME" => (
+            "the GNOME Shell extension",
+            "Turn it on: gnome-extensions enable arch-tracker@archtracker.dev\nthen log out and back in (GNOME on Wayland loads new extensions at login).",
+        ),
+        _ => (
+            "a KWin script",
+            "The KWin script is reloaded automatically. If this persists: systemctl --user restart arch-tracker",
+        ),
+    };
     r.line(
         src["kwin"]["ok"].as_bool().unwrap_or(false),
-        &format!("KWin window tracking ({} windows)", src["kwin"]["windows"]),
-        "The KWin script is reloaded automatically. If this persists: systemctl --user restart arch-tracker",
+        &format!(
+            "{desktop} window tracking through {source} ({} windows)",
+            src["kwin"]["windows"]
+        ),
+        fix,
     );
     r.line(
         src["idle"]["ok"].as_bool().unwrap_or(false),

@@ -297,6 +297,8 @@ pub struct Tracker {
     /// Next KWin script reload attempt while snapshots are missing, and the delay after it.
     kwin_retry_at: i64,
     kwin_backoff_ms: i64,
+    /// The desktop the windows come from (the KWin script is reloaded only on Plasma).
+    wm: crate::sources::wm::Wm,
     /// KWin's focused window and its caption, and when either last changed.
     focus_key: Option<(String, String)>,
     focus_changed_at: i64,
@@ -361,6 +363,11 @@ impl Tracker {
         Self::build(store, cfg, shared, Some(conn))
     }
 
+    /// The desktop the windows come from.
+    pub fn set_wm(&mut self, wm: crate::sources::wm::Wm) {
+        self.wm = wm;
+    }
+
     fn build(store: Store, cfg: Config, shared: SharedRef, conn: Option<zbus::Connection>) -> Self {
         let now = now_ms();
         let paused = stored_pause(&store, now);
@@ -386,6 +393,7 @@ impl Tracker {
             kwin_last: now,
             kwin_retry_at: 0,
             kwin_backoff_ms: KWIN_RETRY_MIN_MS,
+            wm: crate::sources::wm::Wm::Kwin,
             focus_key: None,
             focus_changed_at: 0,
             regrace: false,
@@ -706,6 +714,7 @@ impl Tracker {
         // Reload it, retrying with a growing delay until a snapshot arrives again.
         if now - self.kwin_last > KWIN_STALE_MS
             && now >= self.kwin_retry_at
+            && self.wm == crate::sources::wm::Wm::Kwin
             && let Some(conn) = self.conn.clone()
         {
             self.kwin_retry_at = now + self.kwin_backoff_ms;
@@ -1558,7 +1567,8 @@ impl Tracker {
             "open_spans": self.ledger.open_count(),
             "sources": {
                 "kwin": {"ok": now - self.kwin_last <= KWIN_STALE_MS, "last_ms": self.kwin_last,
-                         "windows": self.kwin.as_ref().map(|k| k.windows.len()).unwrap_or(0)},
+                         "windows": self.kwin.as_ref().map(|k| k.windows.len()).unwrap_or(0),
+                         "desktop": self.wm.name()},
                 "idle": {"ok": self.idle_version > 0, "protocol_version": self.idle_version, "error": self.idle_error},
                 "logind": {"ok": self.sys_conn.is_some()},
                 "browser_extension": self.ext.values().map(|c| json!({"browser_pid": c.pid,

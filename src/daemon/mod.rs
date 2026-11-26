@@ -5,6 +5,7 @@ pub mod tracker;
 
 use crate::config::Config;
 use crate::ipc::Request;
+use crate::sources::wm::Wm;
 use crate::sources::{browser, idle, kwin, media, session};
 use crate::store::Store;
 use crate::util;
@@ -111,6 +112,10 @@ async fn run_async() -> Result<()> {
         Err(e) => tracing::warn!("could not register the native messaging host: {e:#}"),
     }
 
+    // Windows: the KWin script and the GNOME extension push snapshots to this D-Bus service;
+    // Hyprland and Sway are read over their own sockets.
+    let wm = crate::sources::wm::detect();
+    tracing::info!("windows from {}", wm.name());
     let conn = zbus::connection::Builder::session()
         .method_timeout(util::DBUS_TIMEOUT)
         .name(kwin::BUS_NAME)
@@ -118,8 +123,15 @@ async fn run_async() -> Result<()> {
         .build()
         .await
         .context("connecting to the session bus")?;
-    if let Err(e) = kwin::load_script(&conn).await {
-        tracing::warn!("could not load the KWin script: {e:#}");
+    match &wm {
+        Wm::Kwin => {
+            if let Err(e) = kwin::load_script(&conn).await {
+                tracing::warn!("could not load the KWin script: {e:#}");
+            }
+        }
+        Wm::Hyprland(dir) => crate::sources::hyprland::spawn(dir.clone(), tx.clone()),
+        Wm::Sway(sock) => crate::sources::sway::spawn(sock.clone(), tx.clone()),
+        Wm::Gnome => {}
     }
 
     idle::spawn(tx.clone());
@@ -153,6 +165,7 @@ async fn run_async() -> Result<()> {
     };
 
     let mut tracker = Tracker::new(store, cfg.clone(), shared.clone(), conn.clone());
+    tracker.set_wm(wm.clone());
     tracker.set_config_error(cfg_error);
     tracker.start();
 
@@ -209,7 +222,9 @@ async fn run_async() -> Result<()> {
     }
     let _ = sd_notify::notify(&[sd_notify::NotifyState::Stopping]);
     tracker.shutdown();
-    kwin::unload_script(&conn).await;
+    if wm == Wm::Kwin {
+        kwin::unload_script(&conn).await;
+    }
     tracing::info!("arch-tracker daemon stopped");
     Ok(())
 }

@@ -44,6 +44,11 @@ All notable changes to this project are documented here. The format follows
   any other agent counts once it has gone quiet after working (20 seconds unless you change it).
   Clicking the notice brings its terminal forward: the kitty tab and pane, or the tmux pane, and
   the window, on whichever virtual desktop. Settings → Notifications switches it off.
+- Hyprland and Sway: windows come from their IPC sockets (found on their own, also when the session
+  didn't export its variables to systemd) as the same snapshots KWin gives, so focus, visible
+  windows, terminals, agents and browsers work as on Plasma; a click on an agent's notice raises its
+  window there too. `arch-tracker doctor` names the desktop and how to fix it, and CI runs the
+  tracker under a headless Sway with real windows.
 - `arch-tracker today`: the day in the terminal (screen time against your goal, categories against
   their limits, top apps and sites, projects, and each agent's work and cost); `--date` for another
   day or "yesterday", `--json` for scripts.

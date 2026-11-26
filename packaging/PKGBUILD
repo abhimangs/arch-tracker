@@ -5,7 +5,7 @@
 pkgname=arch-tracker
 pkgver=0.1.1
 pkgrel=1
-pkgdesc="Local screen-time and activity tracker for KDE Plasma on Wayland"
+pkgdesc="Local screen-time and activity tracker for KDE Plasma, Hyprland and Sway on Wayland"
 arch=('x86_64')
 license=('MIT')
 depends=('sqlite' 'gcc-libs' 'glibc')

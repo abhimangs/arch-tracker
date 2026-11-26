@@ -1,6 +1,6 @@
 .TH ARCH-TRACKER 1 "2026-11-23" "arch-tracker" "User Commands"
 .SH NAME
-arch-tracker \- local screen-time and activity tracker for KDE Plasma on Wayland
+arch-tracker \- local screen-time and activity tracker for KDE Plasma, Hyprland and Sway on Wayland
 .SH SYNOPSIS
 .B arch-tracker
 .I command
@@ -11,7 +11,8 @@ records which apps, sites, terminal programs and AI agents you use, and for how 
 without sending anything off the computer.
 A per-user daemon, started by the systemd user unit
 .BR arch-tracker.service ,
-watches KWin, idle time, the screen lock, media and the browser extension, and writes
+watches the windows (through KWin, Hyprland or Sway), idle time, the screen lock, media and the
+browser extension, and writes
 raw intervals to a local SQLite database.
 What counts as screen time is decided when you look at the data, so changing a setting
 re-classifies all history.
