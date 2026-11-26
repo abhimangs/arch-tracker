@@ -404,6 +404,9 @@
   --cat-x2: color-mix(in oklab, var(--p-blue) 50%, var(--p-violet));
   --cat-x3: color-mix(in oklab, var(--p-teal) 50%, var(--p-blue));
   --cat-x4: color-mix(in oklab, var(--p-red) 45%, var(--p-rose));
+  /* The current page in the sidebar: a flat fill a shade off black, no rim. */
+  --sel: color-mix(in oklab, var(--p-raise) 78%, var(--p-bg));
+  --sel-edge: none;
   /* Flat controls: no glass on black. */
   --glass-rim: transparent;
   --glass-sheen: linear-gradient(transparent, transparent);

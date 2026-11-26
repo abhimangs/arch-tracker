@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The sidebar lists its pages first and the Browsers and Agents groups after them; the current page
+  gets a flat, darker highlight and focus rings only show for the keyboard. Claude Code and Codex
+  show their own logos.
+- Cost per hour of work counts only days with both tracked work and cost, and a plan limit that has
+  reset since Codex last reported it shows 0%.
+
 ### Added
 
 - An Agents group in the sidebar, like Browsers: Claude Code and Codex (and Hermes once it is

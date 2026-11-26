@@ -94,7 +94,10 @@ h1 { font-size: clamp(1.55rem, 2.1vw, 1.95rem); font-weight: 650; letter-spacing
 h2 { font-size: var(--t-m); font-weight: 620; }
 code { font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace; font-size: 0.88em; background: var(--raise); padding: 1px 6px; border-radius: 5px; }
 
-:focus-visible { outline: 2px solid var(--shu); outline-offset: 2px; border-radius: 6px; }
+:focus-visible { outline: 2px solid color-mix(in oklab, var(--shu) 55%, transparent); outline-offset: 2px; border-radius: 6px; }
+/* The page area takes focus after each page change (for screen readers): no ring for that. */
+main:focus, main:focus-visible { outline: none; }
+.nav a:focus-visible, .nav-head:focus-visible { outline: none; box-shadow: inset 0 0 0 1px var(--line); }
 
 .skip { position: absolute; left: -9999px; }
 .skip:focus { left: 12px; top: 10px; background: var(--raise); padding: 8px 12px; z-index: 30; border-radius: 8px; }
@@ -183,8 +186,8 @@ code { font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace; font
   height: var(--glide-h, 38px);
   transform: translateY(var(--glide-y, 0px));
   border-radius: var(--radius-s);
-  background: var(--glass-sheen), color-mix(in oklab, var(--raise) 74%, var(--shu) 10%);
-  box-shadow: inset 0 1px 0 var(--glass-rim), inset 0 0 0 1px var(--hair), 0 1px 2px var(--glass-drop);
+  background: var(--sel, var(--glass-sheen), color-mix(in oklab, var(--raise) 74%, var(--shu) 10%));
+  box-shadow: var(--sel-edge, inset 0 1px 0 var(--glass-rim), inset 0 0 0 1px var(--hair), 0 1px 2px var(--glass-drop));
   opacity: var(--glide-o, 0);
 }
 .glide.ready { transition: transform 240ms var(--ease-out), height 240ms var(--ease-out); }
@@ -1053,6 +1056,8 @@ a.rh { color: inherit; text-decoration: none; cursor: pointer; }
 .bico.mono { font-size: 8.5px; font-weight: 720; letter-spacing: -0.01em; }
 .bico.mono.big { font-size: 12px; }
 .bico.mono.mini { font-size: 6.5px; }
+svg.bico.logo { fill: currentColor; color: var(--text); background: none; border-radius: 0; }
+svg.bico.logo[data-agent="claude"] { color: #d97757; }
 .bico.mono[data-agent="claude"] { background: color-mix(in oklab, #d97757 24%, var(--raise)); color: color-mix(in oklab, #d97757 72%, var(--text)); }
 .bico.mono[data-agent="codex"] { background: var(--text); color: var(--bg); }
 .bico.mono[data-agent="hermes"] { background: color-mix(in oklab, var(--warn) 24%, var(--raise)); color: color-mix(in oklab, var(--warn) 75%, var(--text)); }
@@ -1088,8 +1093,8 @@ a.rh { color: inherit; text-decoration: none; cursor: pointer; }
   .nav a[data-route="settings"] { margin-top: 0; }
   .glide { display: none; }
   .nav a[aria-current="page"] {
-    background: var(--glass-sheen), color-mix(in oklab, var(--raise) 74%, var(--shu) 10%);
-    box-shadow: inset 0 1px 0 var(--glass-rim), inset 0 0 0 1px var(--hair);
+    background: var(--sel, var(--glass-sheen), color-mix(in oklab, var(--raise) 74%, var(--shu) 10%));
+    box-shadow: var(--sel-edge, inset 0 1px 0 var(--glass-rim), inset 0 0 0 1px var(--hair));
   }
   .rail-foot { display: flex; }
   .nav { overflow-y: visible; }

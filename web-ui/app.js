@@ -1429,6 +1429,12 @@
   const AGENT_ALL = "all";
   const AGENT_MARK = { claude: "CC", codex: "CX", hermes: "H" };
   const AGENT_NAME = { claude: "Claude Code", codex: "Codex", hermes: "Hermes" };
+  // The marks of Claude Code and Codex, from Lobe Icons (MIT, © LobeHub). The marks belong to
+  // Anthropic and OpenAI. Hermes keeps a letter: its mark is a portrait that blurs at this size.
+  const AGENT_LOGO = {
+    claude: "M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z",
+    codex: "M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z",
+  };
   const ICON_AGENTS =
     '<svg class="ico %c" viewBox="0 0 24 24" aria-hidden="true"><rect x="4.5" y="8" width="15" height="11.5" rx="3.5"/><path d="M12 4v4M9.3 13.3h.01M14.7 13.3h.01M9.8 16.4h4.4"/></svg>';
   function agentName(id) {
@@ -1438,6 +1444,8 @@
   }
   function agentIcon(id, cls = "") {
     if (id === AGENT_ALL) return ICON_AGENTS.replace("%c", cls);
+    if (AGENT_LOGO[id])
+      return '<svg class="bico logo ' + cls + '" data-agent="' + esc(id) + '" viewBox="0 0 24 24" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="' + AGENT_LOGO[id] + '"/></svg>';
     const mark = AGENT_MARK[id] || (agentName(id).match(/[a-z0-9]/i) || ["?"])[0].toUpperCase();
     return '<span class="bico letter mono ' + cls + '" data-agent="' + esc(id) + '" aria-hidden="true">' + esc(mark) + "</span>";
   }
@@ -1592,12 +1600,14 @@
     const name = (m) => (m === 300 ? "5-hour limit" : m === 10080 ? "Weekly limit" : dur(m * 60) + " limit");
     const rows = l.windows
       .map((w) => {
-        const pct = Math.max(0, Math.min(100, w.used_percent));
-        const reset = w.resets_ms ? (w.resets_ms > Date.now() ? "resets " + whenLabel(w.resets_ms) : "has reset since") : "";
+        const past = w.resets_ms && w.resets_ms <= Date.now();
+        const pct = past ? 0 : Math.max(0, Math.min(100, w.used_percent));
+        const reset = w.resets_ms ? (past ? "reset " : "resets ") + whenLabel(w.resets_ms) : "";
         return '<li><span>' + esc(name(w.minutes)) + ' <span class="d">' + esc(reset) + "</span></span><span>" + Math.round(pct) + '% used</span><span class="rb" aria-hidden="true"><i style="--w:' + pct.toFixed(1) + "%;--c:" + (pct >= 90 ? "var(--bad)" : pct >= 70 ? "var(--warn)" : "var(--text)") + '"></i></span></li>';
       })
       .join("");
-    return '<ul class="plain costs limits">' + rows + '</ul><p class="sub">' + (l.plan ? esc(cap(l.plan)) + " plan, as" : "As") + " Codex reported it " + esc(whenLabel(l.at_ms)) + ".</p>";
+    const reset = l.windows.some((w) => w.resets_ms && w.resets_ms <= Date.now());
+    return '<ul class="plain costs limits">' + rows + '</ul><p class="sub">' + (l.plan ? esc(cap(l.plan)) + " plan, as" : "As") + " Codex last reported it, " + esc(whenLabel(l.at_ms)) + (reset ? "; a limit that has reset since starts again from 0%" : "") + ".</p>";
   }
 
   function agentSessionsHtml(list, gap) {
@@ -1700,10 +1710,24 @@
       const all = t.input + t.output + t.cache_write + t.cache_read;
       const context = t.input + t.cache_write + t.cache_read;
       const shortDate = (x) => dayLabel(x, { day: "numeric", month: "short", year: "numeric" });
+      // Cost per hour of work counts only days with both: the logs reach back before the tracker
+      // was installed (or saw the agent), and that cost has no work time to divide by.
+      const busyOn = new Map(days.map((x) => [x.date, x.busy]));
+      if (n === "1" && !busyOn.size) busyOn.set(to, r.busy);
+      let paid = 0;
+      let worked = 0;
+      for (const x of cc.days || []) {
+        const b = busyOn.get(x.date) || 0;
+        if (x.cost > 0 && b > 0) {
+          paid += x.cost;
+          worked += b;
+        }
+      }
+      const perHour = worked >= 600 && paid > 0 ? paid / (worked / 3600) : 0;
       costFigs =
         "<div><span>At API prices</span><b>" + money(cc.cost) + "</b></div>" +
         (cc.earlier ? "<div><span>With the estimate before " + esc(dayLabel(addDays(cc.earlier.until, 1), { day: "numeric", month: "short" })) + "</span><b>about " + money(cc.cost + cc.earlier.cost) + "</b></div>" : "") +
-        (r.busy >= 600 && cc.cost ? "<div><span>Per hour of work</span><b>" + money(cc.cost / (r.busy / 3600)) + "</b></div>" : "") +
+        (perHour ? '<div title="The cost on days the tracker saw it work, divided by that work"><span>Per hour of work</span><b>' + money(perHour) + "</b></div>" : "") +
         "<div><span>Tokens</span><b>" + tokens(all) + "</b></div>" +
         "<div><span>From the cache</span><b>" + (context ? Math.round((t.cache_read / context) * 100) : 0) + "%</b></div>";
       let bars;
