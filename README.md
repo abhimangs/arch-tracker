@@ -48,6 +48,10 @@ work, then shows it all in a local dashboard with a tray icon. It runs as a smal
   its stretches of work. Claude Code and Codex add what their requests would cost at API prices
   (by day, kind of token, model and project), and Codex its plan's 5-hour and weekly limits.
 - **Apps and sites** and **Trends** over a day, a week, a month or a year.
+- **Week**: a week against the one before, day by day, with categories, apps, sites, agents and
+  their cost; a notification on the first morning of each week sums up the last one.
+- **Alerts**: desktop notifications (with a sound) for category limits, your daily goal, breaks,
+  Codex's plan limits at the share you choose, and the weekly summary.
 
 ## How screen time is decided
 
@@ -78,6 +82,9 @@ Change a threshold in Settings and every past day is re-classified.
 </tr>
 <tr>
 <td colspan="2"><img src="docs/screenshots/agent.png" alt="An agent's page: the time Claude Code worked and you watched, per project and day, with what its requests would cost"></td>
+</tr>
+<tr>
+<td colspan="2"><img src="docs/screenshots/week.png" alt="Week: screen time day by day against the week before, with categories and top apps"></td>
 </tr>
 <tr>
 <td colspan="2"><img src="docs/screenshots/codex.png" alt="Codex: cost at OpenAI's list prices, part of it estimated from conversations whose logs Codex removed, and its plan's limits"></td>

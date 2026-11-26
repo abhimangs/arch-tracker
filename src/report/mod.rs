@@ -11,6 +11,7 @@
 pub mod agents;
 pub mod browsers;
 pub mod cost;
+pub mod week;
 
 use crate::config::{Category, Config};
 use crate::model::{Kind, Span, Subject};

@@ -2088,6 +2088,89 @@
     bindRange("trends");
   }
 
+  // ---------- week ----------
+
+  // A week against the one before (while it runs, against the same days of the week before).
+  function compareHtml(list, empty, cats) {
+    list = (list || []).filter((c) => c.cur + c.prev > 0);
+    if (!list.length) return '<p class="empty">' + esc(empty) + "</p>";
+    const top = Math.max(...list.map((c) => Math.max(c.cur, c.prev)), 1);
+    const w = (x) => ((x / top) * 100).toFixed(2) + "%";
+    return (
+      '<ul class="plain costs compare">' +
+      list
+        .map((c) => {
+          const d = c.cur - c.prev;
+          const delta = !c.prev ? "new" : !c.cur ? "none this week" : Math.abs(d) < 60 ? "about the same" : (d > 0 ? "+" : "−") + dur(Math.abs(d));
+          const col = cats ? safeColor(c.color, c.name) : "var(--text)";
+          return (
+            "<li><span>" + (cats ? '<i class="sw" style="--c:' + col + '"></i>' : "") + esc(c.name) + ' <span class="d">' + esc(delta) + "</span></span><span>" + dur(c.cur) + "</span>" +
+            '<span class="rb" aria-hidden="true"><i style="--w:' + w(c.cur) + ";--c:" + col + '"></i></span><span class="rb y" aria-hidden="true"><i style="--w:' + w(c.prev) + '"></i></span></li>'
+          );
+        })
+        .join("") +
+      "</ul>"
+    );
+  }
+
+  async function pageWeek(date, gen) {
+    paint(head("Week") + '<p class="empty">Loading…</p>');
+    let w;
+    try {
+      w = await get("/api/week?date=" + date);
+    } catch (e) {
+      if (!stale(gen)) paint(errorHtml(e));
+      return;
+    }
+    if (stale(gen)) return;
+    const short = (d) => dayLabel(d, { day: "numeric", month: "short" });
+    const before = w.partial ? "the same days the week before" : "the week before";
+    const change = (cur, prev) => {
+      if (!prev) return "";
+      const p = Math.round(((cur - prev) / prev) * 100);
+      return p === 0 ? "about the same as " + before : (p > 0 ? p + "% more" : -p + "% less") + " than " + before;
+    };
+    const tracked = w.this.days.filter((x) => x > 0).length;
+    const busiest = w.this.days.reduce((a, x, i) => (x > (a ? a.v : 0) ? { v: x, i } : a), null);
+    const prevStart = addDays(w.start, -7);
+    const nextStart = addDays(w.start, 7);
+    const nav =
+      '<button class="btn" type="button" data-week="' + prevStart + '">Previous</button>' +
+      '<button class="btn" type="button" data-week="' + nextStart + '"' + (nextStart > today() ? " disabled" : "") + ">Next</button>";
+    const labels = [...Array(7).keys()].map((i) => dayLabel(addDays(w.start, i), { weekday: "short" }));
+    const max = Math.max(...w.this.days, ...w.prev.days, 0);
+    const h = (v) => (v ? Math.max(2, (v / max) * 100).toFixed(1) : 0);
+    const bars = max
+      ? '<div class="dbars" aria-hidden="true">' +
+        labels
+          .map((l, i) => {
+            const cur = w.this.days[i];
+            const prev = w.prev.days[i];
+            return '<span title="' + esc(l) + ": " + (cur == null ? "to come" : dur(cur)) + ", the week before " + dur(prev || 0) + '"><i class="wk" style="--h:' + h(cur || 0) + '%"></i><i class="y" style="--h:' + h(prev || 0) + '%"></i></span>';
+          })
+          .join("") +
+        '</div><div class="cbars-x"><span>' + esc(labels[0]) + "</span><span>top " + dur(max) + "</span><span>" + esc(labels[6]) + '</span></div><div class="legend dlegend"><span><i class="key wk"></i>This week</span><span><i class="key y"></i>The week before</span></div>'
+      : '<p class="empty">Nothing recorded this week.</p>';
+    paint(
+      head("Week of " + esc(short(w.start)) + " to " + esc(short(w.end)), w.partial ? "So far" : "", nav) +
+        '<div class="figures">' +
+        "<div><span>On screen</span><b>" + dur(w.this.screen) + "</b><em>" + esc(change(w.this.screen, w.prev.screen)) + "</em></div>" +
+        "<div><span>A day, on average</span><b>" + dur(tracked ? w.this.screen / tracked : 0) + "</b><em>" + plural(tracked, "day") + " with screen time</em></div>" +
+        (busiest ? "<div><span>Busiest day</span><b>" + dur(busiest.v) + "</b><em>" + esc(dayLabel(addDays(w.start, busiest.i), { weekday: "long" })) + "</em></div>" : "") +
+        "<div><span>Agents worked</span><b>" + dur(w.this.agent_busy) + "</b><em>" + esc(change(w.this.agent_busy, w.prev.agent_busy)) + "</em></div>" +
+        (w.this.cost >= 0.01 || w.prev.cost >= 0.01 ? "<div><span>At API prices</span><b>" + money(w.this.cost) + "</b><em>" + money(w.prev.cost) + " the week before</em></div>" : "") +
+        "</div>" +
+        panel("Day by day", bars, { w: "w12" }) +
+        '<div class="grid">' +
+        panel("Categories", compareHtml(w.categories, "No screen time this week.", true), { w: "w6" }) +
+        panel("Top apps", compareHtml(w.apps, "No apps this week."), { w: "w6" }) +
+        panel("Top sites", compareHtml(w.sites, "No browsing this week."), { w: "w6" }) +
+        panel("Agents", compareHtml(w.agents, "No agent work this week."), { w: "w6", sub: "The time each worked; the lower bar is the week before." }) +
+        "</div>",
+    );
+    view.querySelectorAll("[data-week]").forEach((b) => b.addEventListener("click", () => (location.hash = "#/week/" + b.dataset.week)));
+  }
+
   // ---------- settings ----------
 
   const lines = (a) => (a || []).join("\n");
@@ -2176,7 +2259,7 @@
         ${field("Motion", "Animations when pages open and menus appear.", select("motion", d.motion, [["system", "Follow the system setting"], ["reduced", "Reduced"], ["full", "Full"]]))}
       `, "Everything in this section applies and saves as you change it.")}
       ${sec("dashboard", "Dashboard", `
-        ${field("Open on", "The page the dashboard shows first.", select("startpage", d.start_page, [["today", "Today"], ["now", "Now"], ["timeline", "Timeline"], ["apps", "Apps and sites"], ["projects", "Projects"], ["agents", "AI agents"], ["claude", "Claude Code"], ["trends", "Trends"]]))}
+        ${field("Open on", "The page the dashboard shows first.", select("startpage", d.start_page, [["today", "Today"], ["now", "Now"], ["timeline", "Timeline"], ["apps", "Apps and sites"], ["projects", "Projects"], ["agents", "AI agents"], ["claude", "Claude Code"], ["trends", "Trends"], ["week", "Week"]]))}
         ${field("Weeks start on", "Used by the year view in Trends.", select("weekstart", c.general.week_start, [["monday", "Monday"], ["sunday", "Sunday"]]))}
         ${field("Port", "The page moves to the new port after saving.", num("port", d.port, "", 1024, 65535))}
         ${field("Tray icon", "Shows today's screen time; click it to open this dashboard.", check("tray", d.tray, "Show the arch-tracker icon in the system tray"))}
@@ -3127,7 +3210,7 @@
 
   // ---------- router ----------
 
-  const PAGES = ["now", "today", "timeline", "apps", "projects", "trends", "settings"];
+  const PAGES = ["now", "today", "timeline", "apps", "projects", "trends", "week", "settings"];
   let navCurrent = "";
   function markNav() {
     document.querySelectorAll(".nav a").forEach((a) => {
@@ -3185,6 +3268,8 @@
         return pageProjects(valid(arg, RANGES) || "7", gen);
       case "trends":
         return pageTrends(valid(arg, RANGES.slice(1)) || "30", gen);
+      case "week":
+        return pageWeek(date, gen);
       case "settings":
         return pageSettings(gen);
       case "agent": {

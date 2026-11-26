@@ -47,6 +47,8 @@ const routes = [
   "#/trends/7",
   "#/trends/30",
   "#/trends/365",
+  "#/week",
+  `#/week/${new Date(Date.now() - 7 * 86_400_000).toLocaleDateString("sv-SE")}`,
   "#/settings",
   "#/browser/all/1",
   "#/browser/all/7",

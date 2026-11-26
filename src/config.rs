@@ -952,7 +952,15 @@ impl Config {
         }
         if !matches!(
             d.start_page.as_str(),
-            "now" | "today" | "timeline" | "apps" | "projects" | "agents" | "claude" | "trends"
+            "now"
+                | "today"
+                | "timeline"
+                | "apps"
+                | "projects"
+                | "agents"
+                | "claude"
+                | "trends"
+                | "week"
         ) {
             d.start_page = "today".into();
         }

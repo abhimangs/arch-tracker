@@ -153,6 +153,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/codex", get(api_codex))
         .route("/api/hermes", get(api_hermes))
         .route("/api/limits", get(api_limits))
+        .route("/api/week", get(api_week))
         .route("/api/settings", get(api_settings).put(api_settings_put))
         .route("/api/appearance", axum::routing::put(api_appearance))
         .route("/api/rule", post(api_rule))
@@ -805,6 +806,28 @@ async fn api_hermes(State(ctx): State<Ctx>, Params(q): Params<RangeQ>) -> Respon
     let path = ctx.web.db.clone();
     let viewer = ctx.web.viewer;
     blocking(move || report::cost::hermes(&db(&path, viewer)?, &cfg, &q.from, &q.to)).await
+}
+
+#[derive(Deserialize)]
+struct WeekQ {
+    /// Any day of the week wanted; today if left out.
+    date: Option<String>,
+}
+
+/// A week against the one before.
+async fn api_week(State(ctx): State<Ctx>, Params(q): Params<WeekQ>) -> Response {
+    let cfg = ctx.web.config();
+    let path = ctx.web.db.clone();
+    let viewer = ctx.web.viewer;
+    let today = util::local_date(util::now_ms());
+    let date = q
+        .date
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| today.clone());
+    blocking(move || {
+        report::week::week(&db(&path, viewer)?, &cfg, &date, &today, cache_mode(viewer))
+    })
+    .await
 }
 
 /// Codex's plan limits as it last reported them, and the levels the alerts use.

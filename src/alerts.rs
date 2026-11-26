@@ -325,11 +325,10 @@ pub fn due(cfg: &Config, d: &DayReport, now: i64, live: Live, book: &mut Book) -
 /// the database, so a restart does not repeat them.
 async fn lasting(db: &std::path::Path, cfg: &Config, now: i64, live: Live) -> Vec<Note> {
     let n = &cfg.notifications;
-    if !n.plan_limits {
+    if !n.plan_limits && !(n.weekly && !live.away) {
         return vec![];
     }
     let (db, cfg) = (db.to_path_buf(), cfg.clone());
-    let _ = live;
     tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Note>> {
         let conn = rusqlite::Connection::open_with_flags(
             &db,
@@ -339,8 +338,21 @@ async fn lasting(db: &std::path::Path, cfg: &Config, now: i64, live: Live) -> Ve
         let mut sent = load_sent(&conn);
         let before = sent.len();
         let mut out = vec![];
-        if let Some(l) = crate::sources::codex::load_limits(&conn)? {
+        if cfg.notifications.plan_limits
+            && let Some(l) = crate::sources::codex::load_limits(&conn)?
+        {
             out.extend(due_limits(&cfg, &l, now, &mut sent));
+        }
+        if cfg.notifications.weekly
+            && !live.away
+            && let Some(last) = weekly_due(&cfg, now, &sent)
+        {
+            let today = crate::util::local_date(now);
+            let w = report::week::week(&conn, &cfg, &last, &today, report::Cache::ReadWrite)?;
+            sent.insert(format!("weekly:{last}"), now);
+            if w.this.screen > 0 {
+                out.push(weekly_note(&w));
+            }
         }
         // Forget what is more than ten days old.
         sent.retain(|_, at| now - *at < 10 * 86_400_000);
@@ -368,6 +380,61 @@ fn load_sent(conn: &rusqlite::Connection) -> HashMap<String, i64> {
     .ok()
     .and_then(|v| serde_json::from_str(&v).ok())
     .unwrap_or_default()
+}
+
+/// The week to sum up, if it is time: from 9:00 on the first day of the week on, once per week.
+fn weekly_due(cfg: &Config, now: i64, sent: &HashMap<String, i64>) -> Option<String> {
+    let t = jiff::Timestamp::from_millisecond(now)
+        .ok()?
+        .to_zoned_datetime(jiff::tz::TimeZone::system());
+    let today = t.date().to_string();
+    let this = report::week::week_of(&today, &cfg.general.week_start).ok()?;
+    if today == this && t.hour() < 9 {
+        return None;
+    }
+    let (d, _, _) = report::parse_date(&this).ok()?;
+    let last = d.checked_sub(jiff::Span::new().days(7)).ok()?.to_string();
+    (!sent.contains_key(&format!("weekly:{last}"))).then_some(last)
+}
+
+/// The weekly summary: screen time against the week before, where it went, and the agents.
+pub fn weekly_note(w: &report::week::WeekReport) -> Note {
+    let dur = crate::tray::fmt_dur;
+    let (cur, prev) = (w.this.screen, w.prev.screen);
+    let mut body = vec![];
+    if prev > 0 {
+        let p = ((cur - prev) as f64 / prev as f64 * 100.0).round() as i64;
+        body.push(match p {
+            0 => "About the same as the week before.".to_string(),
+            p if p > 0 => format!("{p}% more than the week before."),
+            p => format!("{}% less than the week before.", -p),
+        });
+    }
+    let top: Vec<String> = w
+        .apps
+        .iter()
+        .filter(|a| a.cur > 0)
+        .take(2)
+        .map(|a| format!("{} ({})", a.name, dur(a.cur)))
+        .collect();
+    if !top.is_empty() {
+        body.push(format!("Most of it in {}.", top.join(" and ")));
+    }
+    if w.this.agent_busy > 0 {
+        let cost = if w.this.cost >= 0.01 {
+            format!("; ${:.2} at API prices", w.this.cost)
+        } else {
+            String::new()
+        };
+        body.push(format!("Agents worked {}{cost}.", dur(w.this.agent_busy)));
+    }
+    Note {
+        key: format!("weekly:{}", w.start),
+        family: "weekly".into(),
+        route: format!("week/{}", w.start),
+        summary: format!("Last week: {} on screen", dur(cur)),
+        body: body.join(" "),
+    }
 }
 
 /// A time as the dashboard shows it: "20:52" today, else "Nov 29, 18:38".
@@ -592,6 +659,58 @@ mod tests {
         v.iter()
             .map(|n| n.key.split(':').next().unwrap().to_string())
             .collect()
+    }
+
+    #[test]
+    fn the_weekly_note_sums_up_the_week() {
+        use report::week::{Compare, WeekReport, WeekSide};
+        let w = WeekReport {
+            start: "2026-11-16".into(),
+            this: WeekSide {
+                screen: 9 * 3600,
+                agent_busy: 2 * 3600,
+                cost: 12.5,
+                ..Default::default()
+            },
+            prev: WeekSide {
+                screen: 10 * 3600,
+                ..Default::default()
+            },
+            apps: vec![
+                Compare {
+                    name: "Zed".into(),
+                    cur: 4 * 3600,
+                    ..Default::default()
+                },
+                Compare {
+                    name: "Brave".into(),
+                    cur: 3 * 3600,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let n = weekly_note(&w);
+        assert_eq!(n.route, "week/2026-11-16");
+        assert!(n.summary.starts_with("Last week: 9"), "{}", n.summary);
+        assert!(
+            n.body.contains("10% less than the week before"),
+            "{}",
+            n.body
+        );
+        assert!(
+            n.body.contains("Zed") && n.body.contains("Brave"),
+            "{}",
+            n.body
+        );
+        assert!(n.body.contains("$12.50 at API prices"), "{}", n.body);
+        // Once per week: a week already summed up is not due again.
+        let mut sent = HashMap::new();
+        let c = cfg();
+        let now = 1_795_700_000_000; // a Thursday, well past 9:00 on Monday
+        let last = weekly_due(&c, now, &sent).unwrap();
+        sent.insert(format!("weekly:{last}"), now);
+        assert!(weekly_due(&c, now, &sent).is_none());
     }
 
     #[test]

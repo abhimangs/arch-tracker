@@ -36,6 +36,7 @@ await shot("trends", "#/trends/7", { height: 1100 });
 await shot("browsers", "#/browser/brave-browser/7", { height: 1250 });
 await shot("agent", "#/agent/claude/7", { height: 1200 });
 await shot("codex", "#/agent/codex/7", { height: 1300 });
+await shot("week", "#/week", { height: 1150 });
 await shot("today-light", "#/today", { height: 1000, theme: "light" });
 // Let the live timer run a little before showing Now.
 await sleep(Math.max(0, 74_000 - (Date.now() - focusedAt)));
