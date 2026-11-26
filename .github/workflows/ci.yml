@@ -81,6 +81,21 @@ jobs:
       - name: GNOME
         run: scripts/desktop-smoke.sh gnome
 
+  aur:
+    name: AUR packages
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install build tools
+        run: pacman -Syu --noconfirm --needed git rust sqlite namcap
+      - uses: actions/checkout@v7
+      - name: Build arch-tracker and arch-tracker-bin from this checkout
+        run: |
+          useradd -m builder
+          chown -R builder: "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          sudo -u builder bash -c 'git config --global --add safe.directory "$PWD" && scripts/aur-check.sh'
+
   package:
     name: Arch package
     runs-on: ubuntu-latest

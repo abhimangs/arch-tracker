@@ -98,7 +98,7 @@ Screenshots use made-up data (`arch-tracker demo`) in the OLED theme; `node scri
 
 ## Install
 
-Requires Arch Linux (or a derivative) with KDE Plasma 6, GNOME 45 or later, Hyprland or Sway on
+Requires Arch Linux (or a derivative) with KDE Plasma 6, GNOME 45 to 51, Hyprland or Sway on
 Wayland (see [GNOME](#gnome) and [Hyprland and Sway](#hyprland-and-sway) for what differs there).
 
 **From a release:** download `arch-tracker-<version>-1-x86_64.pkg.tar.zst` from
@@ -115,6 +115,9 @@ git clone https://github.com/abhimangs/arch-tracker.git
 cd arch-tracker/packaging
 makepkg -si
 ```
+
+AUR packages (`arch-tracker` and `arch-tracker-bin`) are ready in [packaging/aur](packaging/aur)
+for when they are published there.
 
 Then, as your own user:
 

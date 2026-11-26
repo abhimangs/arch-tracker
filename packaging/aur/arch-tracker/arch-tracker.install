@@ -1,0 +1,23 @@
+post_install() {
+  cat <<'EOF'
+arch-tracker installed. As your user (not root):
+  systemctl --user enable --now arch-tracker
+  arch-tracker setup        # registers the browser bridge, prints extension steps
+  arch-tracker doctor       # checks everything
+  arch-tracker open         # opens the dashboard (also: the tray icon)
+The dashboard is http://arch-tracker.localhost:7600/ (the port is in Settings).
+EOF
+}
+
+post_upgrade() {
+  echo "arch-tracker upgraded. Restart it: systemctl --user restart arch-tracker"
+}
+
+post_remove() {
+  cat <<'EOF'
+arch-tracker removed. Per-user leftovers, if you want them gone:
+  systemctl --user disable arch-tracker
+  ~/.local/share/arch-tracker and ~/.config/arch-tracker (your data and settings)
+  NativeMessagingHosts/dev.archtracker.native.json in each browser's profile folder
+EOF
+}

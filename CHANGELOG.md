@@ -44,7 +44,7 @@ All notable changes to this project are documented here. The format follows
   any other agent counts once it has gone quiet after working (20 seconds unless you change it).
   Clicking the notice brings its terminal forward: the kitty tab and pane, or the tmux pane, and
   the window, on whichever virtual desktop. Settings → Notifications switches it off.
-- GNOME (45 and later): a small Shell extension, installed with the package and switched on by
+- GNOME (45 to 51): a small Shell extension, installed with the package and switched on by
   `arch-tracker setup`, sends the daemon the same window snapshots as the KWin script, and raises
   an agent's window when you click its notice; idle time comes from GNOME's own idle monitor. CI
   runs the tracker under a headless GNOME Shell with the extension and real windows.
@@ -53,6 +53,11 @@ All notable changes to this project are documented here. The format follows
   windows, terminals, agents and browsers work as on Plasma; a click on an agent's notice raises its
   window there too. `arch-tracker doctor` names the desktop and how to fix it, and CI runs the
   tracker under a headless Sway with real windows.
+- AUR-ready packages in `packaging/aur`: `arch-tracker` (built from the release's source) and
+  `arch-tracker-bin` (its prebuilt binary), with `scripts/aur-bump.sh` to move them to a new
+  release. Every PKGBUILD installs through one script, CI builds both AUR packages on every commit
+  and checks their .SRCINFO, namcap and that they install the same files, and the release's binary
+  tarball now holds every file the package installs.
 - `arch-tracker today`: the day in the terminal (screen time against your goal, categories against
   their limits, top apps and sites, projects, and each agent's work and cost); `--date` for another
   day or "yesterday", `--json` for scripts.

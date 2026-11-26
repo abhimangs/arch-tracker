@@ -1,0 +1,22 @@
+pkgbase = arch-tracker
+	pkgdesc = Local screen-time and activity tracker for KDE Plasma, GNOME, Hyprland and Sway on Wayland
+	pkgver = 0.1.1
+	pkgrel = 1
+	url = https://github.com/abhimangs/arch-tracker
+	install = arch-tracker.install
+	arch = x86_64
+	license = MIT
+	makedepends = cargo
+	depends = sqlite
+	depends = gcc-libs
+	depends = glibc
+	optdepends = plasma-browser-integration: fallback for browser tabs when the extension is not loaded
+	optdepends = kitty: exact terminal tab tracking through remote control
+	optdepends = tmux: see inside tmux panes
+	optdepends = gnome-shell-extension-appindicator: the tray icon on GNOME
+	options = !lto
+	options = !debug
+	source = arch-tracker-0.1.1.tar.gz::https://github.com/abhimangs/arch-tracker/archive/v0.1.1.tar.gz
+	sha256sums = SKIP
+
+pkgname = arch-tracker

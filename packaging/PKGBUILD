@@ -12,7 +12,8 @@ depends=('sqlite' 'gcc-libs' 'glibc')
 makedepends=('cargo')
 optdepends=('plasma-browser-integration: fallback for browser tabs when the extension is not loaded'
             'kitty: exact terminal tab tracking through remote control'
-            'tmux: see inside tmux panes')
+            'tmux: see inside tmux panes'
+            'gnome-shell-extension-appindicator: the tray icon on GNOME')
 install=arch-tracker.install
 options=('!lto' '!debug')
 
@@ -38,18 +39,5 @@ check() {
 
 package() {
   _root
-  install -Dm755 "$srcdir/target/release/arch-tracker" "$pkgdir/usr/bin/arch-tracker"
-  install -Dm644 packaging/arch-tracker.service "$pkgdir/usr/lib/systemd/user/arch-tracker.service"
-  install -Dm644 extension/manifest.json "$pkgdir/usr/share/arch-tracker/extension/manifest.json"
-  install -Dm644 extension/background.js "$pkgdir/usr/share/arch-tracker/extension/background.js"
-  install -Dm644 extension/manifest.firefox.json "$pkgdir/usr/share/arch-tracker/extension-firefox/manifest.json"
-  install -Dm644 extension/background.js "$pkgdir/usr/share/arch-tracker/extension-firefox/background.js"
-  # Firefox, Zen, Floorp and Waterfox read this system-wide bridge; LibreWolf its own folder.
-  install -Dm644 packaging/dev.archtracker.native.firefox.json "$pkgdir/usr/lib/mozilla/native-messaging-hosts/dev.archtracker.native.json"
-  install -Dm644 packaging/dev.archtracker.native.firefox.json "$pkgdir/usr/lib/librewolf/native-messaging-hosts/dev.archtracker.native.json"
-  install -Dm644 packaging/arch-tracker.1 "$pkgdir/usr/share/man/man1/arch-tracker.1"
-  # GNOME Shell extension (arch-tracker setup switches it on).
-  install -Dm644 -t "$pkgdir/usr/share/gnome-shell/extensions/arch-tracker@archtracker.dev" \
-    gnome/arch-tracker@archtracker.dev/metadata.json gnome/arch-tracker@archtracker.dev/extension.js
-  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  sh packaging/install-files.sh . "$srcdir/target/release/arch-tracker" "$pkgdir" "$pkgname"
 }

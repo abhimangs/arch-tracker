@@ -30,12 +30,7 @@ jobs:
       - name: Assemble release files
         run: |
           v="${GITHUB_REF_NAME#v}"
-          name="arch-tracker-$v-x86_64-linux"
-          mkdir -p "dist/$name"
-          install -m755 packaging/src/target/release/arch-tracker "dist/$name/"
-          cp -r extension "dist/$name/"
-          cp packaging/arch-tracker.service README.md LICENSE CHANGELOG.md "dist/$name/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          scripts/dist.sh "$v" packaging/src/target/release/arch-tracker dist
           cp packaging/*.pkg.tar.zst dist/
           cd dist && sha256sum ./*.tar.gz ./*.pkg.tar.zst > SHA256SUMS && cat SHA256SUMS
       - name: Release notes from CHANGELOG.md
