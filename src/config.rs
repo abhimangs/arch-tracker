@@ -198,6 +198,9 @@ pub struct Agents {
     /// Read Hermes Agent's token counts from its own database (read-only) and show what they
     /// would cost at list prices.
     pub hermes_cost: bool,
+    /// Read opencode's token counts from its own database (read-only) and show what they would
+    /// cost at list prices.
+    pub opencode_cost: bool,
     /// The plan you pay for, per agent ("claude" = "max-20x"), to compare its API-equivalent cost
     /// against. Codex's is read from its logs unless set here. Ids are in PLANS.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -552,6 +555,7 @@ impl Default for Agents {
             claude_cost: true,
             codex_cost: true,
             hermes_cost: true,
+            opencode_cost: true,
             plans: Default::default(),
             prices: Default::default(),
         }

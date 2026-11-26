@@ -105,6 +105,9 @@ fn cost(conn: &Connection, cfg: &Config, from: &str, to: &str) -> f64 {
     if a.hermes_cost {
         c += super::cost::hermes(conn, cfg, from, to).map_or(0.0, |r| r.cost);
     }
+    if a.opencode_cost {
+        c += super::cost::opencode(conn, cfg, from, to).map_or(0.0, |r| r.cost);
+    }
     c
 }
 

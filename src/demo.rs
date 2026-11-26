@@ -47,6 +47,7 @@ enum Act {
     Nvim(&'static str),
     Claude(&'static str),
     Codex(&'static str),
+    Opencode(&'static str),
     Cargo(&'static str),
     Zed(&'static str, &'static str),
     Site(&'static str, &'static str),
@@ -106,6 +107,19 @@ impl Writer<'_> {
                          cache_1h, cache_read, web_search, fast, us_only)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, 0, 0, 0)",
                     params![id, t, model, folder, 6, out, fresh, context],
+                )?;
+            } else if tool == "opencode" {
+                // A free model most of the time, a cheap paid one now and then.
+                let model = if rng.next().is_multiple_of(3) {
+                    "deepseek/deepseek-v4-flash"
+                } else {
+                    "moonshotai/kimi-k2.6:free"
+                };
+                self.store.conn.execute(
+                    "INSERT INTO opencode_usage(key, start_ms, end_ms, model, project, calls, input,
+                         cached, cache_write, output, reasoning)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, 0, ?8, ?9)",
+                    params![id, t, t + 9_000, model, folder, fresh, context, out, out / 4],
                 )?;
             } else {
                 self.store.conn.execute(
@@ -167,6 +181,7 @@ fn subject_of(a: Act) -> Subject {
         Act::Nvim(p) => term("nvim", p),
         Act::Claude(p) => term("claude", p),
         Act::Codex(p) => term("codex", p),
+        Act::Opencode(p) => term("opencode", p),
         Act::Cargo(p) => term("cargo", p),
         Act::Zed(p, file) => Subject {
             title: format!("{p} — {file}"),
@@ -208,6 +223,7 @@ const WORK: &[(u32, Act)] = &[
     (4, Act::Claude("ember")),
     (5, Act::Codex("ember")),
     (3, Act::Codex("atlas")),
+    (3, Act::Opencode("notes-site")),
     (4, Act::Zed("notes-site", "content/now.md")),
     (
         7,
@@ -317,7 +333,7 @@ pub fn run(db: &Path, days: u32) -> Result<()> {
                 last = Some(act);
                 let len = match act {
                     Act::Nvim(_) | Act::Zed(..) => rng.mins(8, 34),
-                    Act::Claude(_) | Act::Codex(_) => rng.mins(5, 22),
+                    Act::Claude(_) | Act::Codex(_) | Act::Opencode(_) => rng.mins(5, 22),
                     Act::Video(..) => rng.mins(12, 32),
                     Act::Cargo(_) | Act::Files => rng.mins(1, 3),
                     Act::Slack => rng.mins(1, 6),
@@ -329,10 +345,11 @@ pub fn run(db: &Path, days: u32) -> Result<()> {
                 let id = w.subject(subject_of(act))?;
                 w.span(Kind::Focus, id, t, stop)?;
                 match act {
-                    Act::Claude(p) | Act::Codex(p) => {
+                    Act::Claude(p) | Act::Codex(p) | Act::Opencode(p) => {
                         // The agent keeps working after you look away.
                         let (tool, name) = match act {
                             Act::Claude(_) => ("claude", "Claude Code"),
+                            Act::Opencode(_) => ("opencode", "opencode"),
                             _ => ("codex", "Codex"),
                         };
                         let busy = w.subject(Subject {

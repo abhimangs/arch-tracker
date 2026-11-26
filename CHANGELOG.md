@@ -27,6 +27,11 @@ All notable changes to this project are documented here. The format follows
   database (~/.hermes/state.db and each profile's, read-only; prompts and replies are never read)
   and priced on its page. Models named through a router ("anthropic/claude-…") are priced as the
   model. Settings → AI agents switches it off.
+- opencode at list prices: each response's tokens are read from opencode's own database
+  (~/.local/share/opencode/opencode.db, read-only; prompts and replies are never read) and priced on
+  its page at the model maker's list price, whichever service ran it (DeepSeek and GLM models are
+  built in now, besides Claude and OpenAI). Free tiers and stealth models count their tokens and
+  show as free. Settings → AI agents switches it off.
 - Codex plan-limit alerts: a desktop notification when its 5-hour or weekly limit passes a share
   you choose in Settings → Notifications (70% unless you change it), once per limit, and a banner
   in the dashboard until the limit resets. Notifications can play a sound (on by default).

@@ -8,6 +8,7 @@ pub mod hermes;
 pub mod idle;
 pub mod kwin;
 pub mod media;
+pub mod opencode;
 pub mod running;
 pub mod session;
 pub mod terminal;

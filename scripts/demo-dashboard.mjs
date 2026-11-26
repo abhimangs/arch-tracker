@@ -68,6 +68,11 @@ export async function openDemo({ port: demoPort = 7690, days = 7 } = {}) {
   id = "codex"
   name = "Codex"
   matches = ["demo-codex-that-does-not-exist"]
+
+  [[agents.tools]]
+  id = "opencode"
+  name = "opencode"
+  matches = ["demo-opencode-that-does-not-exist"]
   `,
   );
   execFileSync(bin, ["demo", "--db", path.join(env.XDG_DATA_HOME, "arch-tracker/tracker.db"), "--days", String(days)], { env, stdio: "inherit" });

@@ -152,6 +152,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/api/claude", get(api_claude))
         .route("/api/codex", get(api_codex))
         .route("/api/hermes", get(api_hermes))
+        .route("/api/opencode", get(api_opencode))
         .route("/api/limits", get(api_limits))
         .route("/api/week", get(api_week))
         .route("/api/settings", get(api_settings).put(api_settings_put))
@@ -715,7 +716,7 @@ struct BrowserDayQ {
     date: Option<String>,
 }
 
-/// Agents for the menu: Claude Code, Codex and Hermes when installed or seen.
+/// Agents for the menu: Claude Code, Codex, Hermes and opencode when installed or seen.
 async fn api_agents(State(ctx): State<Ctx>) -> Response {
     let cfg = ctx.web.config();
     let path = ctx.web.db.clone();
@@ -806,6 +807,13 @@ async fn api_hermes(State(ctx): State<Ctx>, Params(q): Params<RangeQ>) -> Respon
     let path = ctx.web.db.clone();
     let viewer = ctx.web.viewer;
     blocking(move || report::cost::hermes(&db(&path, viewer)?, &cfg, &q.from, &q.to)).await
+}
+
+async fn api_opencode(State(ctx): State<Ctx>, Params(q): Params<RangeQ>) -> Response {
+    let cfg = ctx.web.config();
+    let path = ctx.web.db.clone();
+    let viewer = ctx.web.viewer;
+    blocking(move || report::cost::opencode(&db(&path, viewer)?, &cfg, &q.from, &q.to)).await
 }
 
 #[derive(Deserialize)]

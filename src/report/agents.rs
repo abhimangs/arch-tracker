@@ -14,7 +14,7 @@ use std::collections::HashMap;
 /// Every agent together.
 pub const ALL: &str = "all";
 /// The agents that get a page in the sidebar (any configured tool is still recorded).
-pub const LISTED: [&str; 3] = ["claude", "codex", "hermes"];
+pub const LISTED: [&str; 4] = ["claude", "codex", "hermes", "opencode"];
 const RECENT_DAYS: i64 = 30;
 
 /// One agent's day: your focus on its terminal and the time it worked, hour by hour.
@@ -75,7 +75,9 @@ fn installed(t: &Tool) -> bool {
     let dirs: Vec<&str> = path.split(':').filter(|d| !d.is_empty()).collect();
     let home = crate::util::home();
     let own = home.join(format!(".{}", t.id)).is_dir()
-        || (t.id == "codex" && crate::sources::codex::home().is_dir());
+        || (t.id == "codex" && crate::sources::codex::home().is_dir())
+        || (t.id == "opencode"
+            && crate::sources::opencode::database(&crate::sources::opencode::home()).is_some());
     own || t.matches.iter().any(|m| {
         !m.contains('/')
             && dirs
@@ -95,11 +97,11 @@ pub struct AgentEntry {
     pub today_busy: i64,
     /// Both over the last 30 days.
     pub recent: i64,
-    /// Which cost report it has ("claude" or "codex"), if it is switched on.
+    /// Which cost report it has ("claude", "codex", "hermes" or "opencode"), if it is switched on.
     pub cost: Option<&'static str>,
 }
 
-/// Claude Code, Codex and Hermes, when installed or seen running, in that order.
+/// Claude Code, Codex, Hermes and opencode, when installed or seen running, in that order.
 pub fn agent_list(
     conn: &Connection,
     cfg: &Config,
@@ -142,6 +144,7 @@ pub fn agent_list(
             "claude" if cfg.agents.claude_cost => Some("claude"),
             "codex" if cfg.agents.codex_cost => Some("codex"),
             "hermes" if cfg.agents.hermes_cost => Some("hermes"),
+            "opencode" if cfg.agents.opencode_cost => Some("opencode"),
             _ => None,
         };
         out.push(AgentEntry {

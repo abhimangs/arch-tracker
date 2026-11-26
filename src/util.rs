@@ -37,7 +37,7 @@ pub fn home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-fn xdg(var: &str, fallback: &str) -> PathBuf {
+pub(crate) fn xdg(var: &str, fallback: &str) -> PathBuf {
     match std::env::var_os(var) {
         Some(v) if !v.is_empty() => PathBuf::from(v),
         _ => home().join(fallback),

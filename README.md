@@ -22,6 +22,7 @@ work, then shows it all in a local dashboard with a tray icon. It runs as a smal
 | AI agents | Per tool and project: time you watched it, and time it was working | Claude Code, Codex, opencode, Antigravity, Cursor Agent, Hermes, Gemini CLI, Aider and more, matched by name |
 | Claude Code cost | What its requests would cost at Anthropic's API prices, per day, model and project, on its own page | Token counts from Claude Code's own transcripts and statistics, read-only: prompts and replies are never kept |
 | Hermes cost | The same for Hermes Agent, per model | Token counts per session and model from Hermes's own database, read-only |
+| opencode cost | The same for opencode, per response, model and project; free and stealth models show as free | Token counts per response from opencode's own database, read-only |
 | Codex cost | The same at OpenAI's list prices, plus its plan's limits | Token counts from Codex's session logs, and for conversations whose logs Codex has removed, the token totals in its own database (an estimate), read-only |
 | Idle | Gaps with no keyboard or mouse input | Wayland `ext-idle-notify` v2 |
 | Watching and calls | Video playing in a visible window; microphone open | MPRIS players, the browser extension, and the ALSA capture state |

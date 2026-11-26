@@ -112,6 +112,29 @@ const OPENAI_PRICES: &[(&str, Price)] = &[
     ("gpt-5.6-luna", openai(0.2, 1.2, 0.1)),
 ];
 
+/// When OTHER_PRICES was checked, against each maker's own price page.
+pub const OTHER_PRICES_AS_OF: &str = "2026-11-26";
+
+/// Other makers' list prices on their own APIs, for models run through opencode, Hermes or a
+/// router (the router's own price or a free tier is not used); cache reads are a share of input.
+const OTHER_PRICES: &[(&str, Price)] = &[
+    // DeepSeek: $0.14 input (cache miss), $0.0028 cache hit, $0.28 output.
+    ("deepseek-v4-flash", p(0.14, 0.28, 0.02)),
+    // Z.ai: $0.15 input, $0.03 cached input, $0.50 output.
+    ("glm-5.3-flash", p(0.15, 0.5, 0.2)),
+];
+
+/// A model that costs nothing to use: a free tier ("…:free", "…-free") or a stealth model under
+/// test. Its tokens are counted; it shows as free, not as unpriced.
+pub fn is_free(model: &str) -> bool {
+    model
+        .to_lowercase()
+        .split(['/', ':', '-', '_', ' '])
+        .any(|w| w == "free" || w == "stealth")
+}
+
+const FREE: Price = p(0.0, 0.0, 0.0);
+
 /// US-only inference (inference_geo "us") costs 1.1x on every token.
 const US_ONLY: f64 = 1.1;
 /// Web search: $10 per 1,000 searches. Web fetch costs only its tokens.
@@ -154,6 +177,7 @@ pub fn price_for(model: &str, own: &BTreeMap<String, ModelPrice>) -> Option<Pric
     PRICES
         .iter()
         .chain(OPENAI_PRICES)
+        .chain(OTHER_PRICES)
         .filter(|(k, _)| matches(&m, k))
         .max_by_key(|(k, _)| k.len())
         .map(|(_, p)| *p)
@@ -256,6 +280,9 @@ pub struct CostRow {
     pub tokens: TokenSums,
     /// False when some of its replies had no known price (their tokens are counted, not priced).
     pub priced: bool,
+    /// A free model (a free tier or a stealth model): priced, at nothing.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub free: bool,
 }
 
 #[derive(Serialize, Default, Clone, Debug)]
@@ -488,6 +515,7 @@ pub fn earlier(conn: &Connection, cfg: &Config, paths: &[PathBuf]) -> Result<Opt
                 cache_read: (m.cache_read_input_tokens as f64 * share) as u64,
             },
             priced: price.is_some(),
+            free: false,
         });
     }
     if out.models.is_empty() {
@@ -771,6 +799,27 @@ fn plan_value(out: &mut CostReport, cfg: &Config, agent: &str, detected: Option<
 /// What Hermes Agent's tokens would cost at list prices. Hermes counts tokens per session and
 /// model, so each count is spread over the time from its first to its last use, hour by hour.
 pub fn hermes(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<CostReport> {
+    stored_use(conn, cfg, "hermes_usage", false, from, to)
+}
+
+/// What opencode's tokens would cost at list prices, response by response. opencode counts
+/// reasoning apart from output; it is billed as output.
+pub fn opencode(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<CostReport> {
+    let mut out = stored_use(conn, cfg, "opencode_usage", true, from, to)?;
+    out.prices_as_of = OTHER_PRICES_AS_OF;
+    Ok(out)
+}
+
+/// Use stored with hermes_usage's columns, priced: per response (each row one, reasoning billed
+/// as output), or per session (each row spread over its hours).
+fn stored_use(
+    conn: &Connection,
+    cfg: &Config,
+    table: &str,
+    per_response: bool,
+    from: &str,
+    to: &str,
+) -> Result<CostReport> {
     let (ds, de_from, de, one_day) = range_bounds(from, to)?;
     let mut out = CostReport {
         from: from.into(),
@@ -778,14 +827,15 @@ pub fn hermes(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<C
         prices_as_of: PRICES_AS_OF,
         ..Default::default()
     };
-    if !has_table(conn, "hermes_usage") {
+    if !has_table(conn, table) {
         return Ok(out);
     }
     const HOUR: i64 = 3_600_000;
-    let mut st = conn.prepare(
-        "SELECT model, project, start_ms, end_ms, calls, input, cached, cache_write, output
-         FROM hermes_usage WHERE end_ms >= ?1 AND start_ms < ?2",
-    )?;
+    let mut st = conn.prepare(&format!(
+        "SELECT model, project, start_ms, end_ms, calls, input, cached, cache_write, output,
+                reasoning
+         FROM {table} WHERE end_ms >= ?1 AND start_ms < ?2"
+    ))?;
     let found = st.query_map([ds, de], |r| {
         let n = |i: usize| r.get::<_, i64>(i).map(|v| v.max(0) as u64);
         Ok((
@@ -793,12 +843,25 @@ pub fn hermes(conn: &Connection, cfg: &Config, from: &str, to: &str) -> Result<C
             r.get::<_, String>(1)?,
             r.get::<_, i64>(2)?,
             r.get::<_, i64>(3)?,
-            [n(4)?, n(5)?, n(6)?, n(7)?, n(8)?],
+            [n(4)?, n(5)?, n(6)?, n(7)?, n(8)?, n(9)?],
         ))
     })?;
     let mut rows: Vec<Row> = vec![];
     for f in found {
-        let (model, project, a, b, [calls, input, cached, write, output]) = f?;
+        let (model, project, a, b, [calls, input, cached, write, output, reasoning]) = f?;
+        if per_response {
+            if a >= ds && a < de {
+                let t = Tokens4 {
+                    input,
+                    output: output + reasoning,
+                    cache_5m: write,
+                    cache_read: cached,
+                    ..Default::default()
+                };
+                rows.push((model, project, a, t, calls));
+            }
+            continue;
+        }
         let span = b - a;
         let mut parts: Vec<(i64, f64)> = vec![];
         if span <= 0 {
@@ -957,9 +1020,13 @@ fn aggregate(
     }
     for row in rows {
         let (model, folder, at, t, n) = row?;
-        let price = *prices
-            .entry(model.clone())
-            .or_insert_with(|| price_for(&model, &cfg.agents.prices));
+        let price = *prices.entry(model.clone()).or_insert_with(|| {
+            if is_free(&model) {
+                Some(FREE)
+            } else {
+                price_for(&model, &cfg.agents.prices)
+            }
+        });
         let parts = price.map(|p| cost_parts(&p, &t)).unwrap_or_default();
         let c = parts.total();
         out.cost += c;
@@ -980,6 +1047,7 @@ fn aggregate(
             name: model_label(&mkey),
             key: mkey,
             priced: true,
+            free: is_free(&model),
             ..Default::default()
         });
         m.cost += c;
@@ -1143,6 +1211,85 @@ mod tests {
         // Opus 5.5: $4 in, $20 out; the long-context rate never applies to a session's sum.
         assert!(near(r.cost, 4.0 + 2.0), "{}", r.cost);
         assert!(near(r.hourly[10], 1.5) && near(r.hourly[11], 3.0) && near(r.hourly[12], 1.5));
+        drop(st);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opencode_responses_are_priced_one_by_one_and_free_models_show_as_free() {
+        let dir = std::env::temp_dir().join(format!("at-opencodecost-{}", std::process::id()));
+        let st = crate::store::Store::open(&dir.join("t.db")).unwrap();
+        let ds = crate::util::date_bounds("2026-11-20").unwrap().0;
+        let h = 3_600_000;
+        for (key, at, model, input, cached, output, reasoning) in [
+            // DeepSeek V4 Flash: 1M fresh input, 1M cached, 0.5M output + 0.5M reasoning.
+            (
+                1,
+                ds + 9 * h,
+                "deepseek/deepseek-v4-flash",
+                1_000_000,
+                1_000_000,
+                500_000,
+                500_000,
+            ),
+            (
+                2,
+                ds + 10 * h,
+                "moonshotai/kimi-k2.6:free",
+                2_000_000,
+                0,
+                10_000,
+                0,
+            ),
+            (
+                3,
+                ds + 10 * h,
+                "stealth/made-up-alpha",
+                3_000_000,
+                0,
+                10_000,
+                0,
+            ),
+            (
+                4,
+                ds + 11 * h,
+                "@cf/google/gemma-4-26b-a4b-it",
+                1_000,
+                0,
+                100,
+                0,
+            ),
+        ] {
+            st.conn
+                .execute(
+                    "INSERT INTO opencode_usage VALUES (?1, ?2, ?2, ?3, '', 1, ?4, ?5, 0, ?6, ?7)",
+                    rusqlite::params![key, at, model, input, cached, output, reasoning],
+                )
+                .unwrap();
+        }
+        let r = opencode(&st.conn, &Default::default(), "2026-11-20", "2026-11-20").unwrap();
+        assert_eq!(r.requests, 4);
+        assert_eq!(r.prices_as_of, OTHER_PRICES_AS_OF);
+        // $0.14 + $0.0028 + 1M output at $0.28; the free ones cost nothing.
+        assert!(near(r.cost, 0.14 + 0.0028 + 0.28), "{}", r.cost);
+        assert!(near(r.hourly[9], r.cost));
+        // No list price: counted, flagged. Free: priced at nothing, not flagged.
+        assert_eq!(r.unpriced, vec!["gemma-4-26b-a4b-it".to_string()]);
+        let free: Vec<&str> = r
+            .models
+            .iter()
+            .filter(|m| m.free)
+            .map(|m| m.key.as_str())
+            .collect();
+        assert_eq!(free.len(), 2, "{free:?}");
+        assert!(
+            r.models
+                .iter()
+                .filter(|m| m.free)
+                .all(|m| m.priced && m.cost == 0.0)
+        );
+        assert!(is_free("x-preview-f-free") && is_free("openrouter/stealth/ox-alpha"));
+        assert!(!is_free("glm-5.3-flash") && !is_free("freedom-1"));
         drop(st);
         let _ = std::fs::remove_dir_all(&dir);
     }

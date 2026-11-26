@@ -92,4 +92,4 @@ if (problems.length) {
   console.error(`\n${problems.length} problems in ${views} page views`);
   process.exit(1);
 }
-console.log(`ok: ${views} page views (${routes.length} pages, ${looks.length} looks), no errors`);
+console.log(`ok: ${views} page views (${routes.length} pages, ${looks.length} looks; browsers ${browsers.join(", ")}; agents ${agents.join(", ")}), no errors`);

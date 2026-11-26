@@ -116,7 +116,8 @@ pub struct Usage {
     pub reasoning: i64,
 }
 
-fn signature(p: &Path) -> String {
+/// A database's size and change time, with its write-ahead log's: unchanged means nothing new.
+pub(crate) fn signature(p: &Path) -> String {
     let mut s = String::new();
     for f in [p.to_path_buf(), {
         let mut w = p.as_os_str().to_os_string();
@@ -138,7 +139,7 @@ fn signature(p: &Path) -> String {
     s
 }
 
-fn columns(conn: &Connection, table: &str) -> rusqlite::Result<HashSet<String>> {
+pub(crate) fn columns(conn: &Connection, table: &str) -> rusqlite::Result<HashSet<String>> {
     let mut st = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
     st.query_map([table], |r| r.get(0))?.collect()
 }
@@ -167,50 +168,62 @@ pub fn scan(conn: &mut Connection, dbs: &[PathBuf], keep_from: i64) -> Result<us
             }
         };
         let tx = conn.transaction()?;
-        {
-            let mut up = tx.prepare(
-                "INSERT INTO hermes_usage(key, start_ms, end_ms, model, project, calls, input,
-                     cached, cache_write, output, reasoning)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                 ON CONFLICT(key) DO UPDATE SET
-                     start_ms = min(start_ms, excluded.start_ms),
-                     end_ms = max(end_ms, excluded.end_ms),
-                     project = excluded.project,
-                     calls = max(calls, excluded.calls),
-                     input = max(input, excluded.input),
-                     cached = max(cached, excluded.cached),
-                     cache_write = max(cache_write, excluded.cache_write),
-                     output = max(output, excluded.output),
-                     reasoning = max(reasoning, excluded.reasoning)",
-            )?;
-            for u in rows {
-                // Nothing from while tracking was paused, nor older than keep_days.
-                let in_pause = paused
-                    .iter()
-                    .any(|&(a, b)| u.start_ms >= a && u.end_ms <= b);
-                if in_pause || u.end_ms < keep_from {
-                    continue;
-                }
-                written += up.execute(params![
-                    u.key,
-                    u.start_ms,
-                    u.end_ms,
-                    u.model,
-                    u.project,
-                    u.calls,
-                    u.input,
-                    u.cached,
-                    u.cache_write,
-                    u.output,
-                    u.reasoning
-                ])?;
-            }
-            tx.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
-                params![key, sig],
-            )?;
-        }
+        written += store_usage(&tx, "hermes_usage", &rows, &paused, keep_from)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            params![key, sig],
+        )?;
         tx.commit()?;
+    }
+    Ok(written)
+}
+
+/// Stores use rows in a table with hermes_usage's columns, raising rows already there (never
+/// lowering or removing them). Nothing from while tracking was paused, nor older than keep_from.
+/// Returns the rows written.
+pub(crate) fn store_usage(
+    tx: &rusqlite::Transaction,
+    table: &str,
+    rows: &[Usage],
+    paused: &[(i64, i64)],
+    keep_from: i64,
+) -> Result<usize> {
+    let mut up = tx.prepare(&format!(
+        "INSERT INTO {table}(key, start_ms, end_ms, model, project, calls, input, cached,
+             cache_write, output, reasoning)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(key) DO UPDATE SET
+             start_ms = min(start_ms, excluded.start_ms),
+             end_ms = max(end_ms, excluded.end_ms),
+             project = excluded.project,
+             calls = max(calls, excluded.calls),
+             input = max(input, excluded.input),
+             cached = max(cached, excluded.cached),
+             cache_write = max(cache_write, excluded.cache_write),
+             output = max(output, excluded.output),
+             reasoning = max(reasoning, excluded.reasoning)"
+    ))?;
+    let mut written = 0;
+    for u in rows {
+        let in_pause = paused
+            .iter()
+            .any(|&(a, b)| u.start_ms >= a && u.end_ms <= b);
+        if in_pause || u.end_ms < keep_from {
+            continue;
+        }
+        written += up.execute(params![
+            u.key,
+            u.start_ms,
+            u.end_ms,
+            u.model,
+            u.project,
+            u.calls,
+            u.input,
+            u.cached,
+            u.cache_write,
+            u.output,
+            u.reasoning
+        ])?;
     }
     Ok(written)
 }
