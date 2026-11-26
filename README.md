@@ -78,6 +78,9 @@ Change a threshold in Settings and every past day is re-classified.
 <tr>
 <td colspan="2"><img src="docs/screenshots/agent.png" alt="An agent's page: the time Claude Code worked and you watched, per project and day, with what its requests would cost"></td>
 </tr>
+<tr>
+<td colspan="2"><img src="docs/screenshots/codex.png" alt="Codex: cost at OpenAI's list prices, part of it estimated from conversations whose logs Codex removed, and its plan's limits"></td>
+</tr>
 </table>
 
 Screenshots use made-up data (`arch-tracker demo`) in the OLED theme; `node scripts/screenshots.mjs` regenerates them.

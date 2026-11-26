@@ -1058,9 +1058,6 @@ a.rh { color: inherit; text-decoration: none; cursor: pointer; }
 .bico.mono.mini { font-size: 6.5px; }
 svg.bico.logo { fill: currentColor; color: var(--text); background: none; border-radius: 0; }
 svg.bico.logo[data-agent="claude"] { color: #d97757; }
-.bico.mono[data-agent="claude"] { background: color-mix(in oklab, #d97757 24%, var(--raise)); color: color-mix(in oklab, #d97757 72%, var(--text)); }
-.bico.mono[data-agent="codex"] { background: var(--text); color: var(--bg); }
-.bico.mono[data-agent="hermes"] { background: color-mix(in oklab, var(--warn) 24%, var(--raise)); color: color-mix(in oklab, var(--warn) 75%, var(--text)); }
 /* Worked and watched, side by side. */
 .dbars { display: flex; align-items: flex-end; gap: 3px; height: 150px; padding-top: 6px; }
 .dbars > span { flex: 1 1 0; min-width: 0; height: 100%; display: flex; align-items: flex-end; gap: 1px; }

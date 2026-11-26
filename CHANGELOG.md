@@ -21,7 +21,7 @@ All notable changes to this project are documented here. The format follows
 
 - The sidebar lists its pages first and the Browsers and Agents groups after them; the current page
   gets a flat, darker highlight and focus rings only show for the keyboard. Claude Code and Codex
-  show their own logos.
+  show their own logos, and so does Hermes.
 - CI opens every dashboard page on made-up data, at desktop and phone widths and in both themes,
   and fails on any script error, failed request, empty page or "NaN" on screen.
 - Cost per hour of work counts only days with both tracked work and cost, and a plan limit that has
