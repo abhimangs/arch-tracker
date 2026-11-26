@@ -86,7 +86,19 @@ pub fn spawn_ingest(tx: UnboundedSender<Event>) -> Result<()> {
             let conn = next_id;
             next_id += 1;
             let tx = tx.clone();
+            // The native host's parent is the browser. The socket says who the host is, so the
+            // connection is tied to its browser even when the host's own hello never arrives.
+            let browser_pid = stream
+                .peer_cred()
+                .ok()
+                .and_then(|c| c.pid())
+                .and_then(|p| u32::try_from(p).ok())
+                .and_then(parent_pid);
             tokio::spawn(async move {
+                if let Some(browser_pid) = browser_pid {
+                    let msg = ExtMsg::Hello { browser_pid };
+                    let _ = tx.send(Event::BrowserExt { conn, msg });
+                }
                 let mut reader = BufReader::new(stream);
                 let mut buf = Vec::new();
                 loop {
@@ -108,6 +120,22 @@ pub fn spawn_ingest(tx: UnboundedSender<Event>) -> Result<()> {
         }
     });
     Ok(())
+}
+
+/// The parent of a process (from /proc), if it has one.
+pub fn parent_pid(pid: u32) -> Option<u32> {
+    ppid_from_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// "1234 (name) S 42 ..." -> 42. The name can hold spaces and parentheses, so the fields are
+/// read after its last ')'.
+fn ppid_from_stat(stat: &str) -> Option<u32> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+        .filter(|p| *p > 0)
 }
 
 #[derive(Debug, PartialEq)]
@@ -192,6 +220,18 @@ mod tests {
         assert_eq!(
             lines(b"elevenbytes", 10).await,
             vec![(Line::TooLong, vec![])]
+        );
+    }
+
+    #[test]
+    fn parent_from_stat() {
+        assert_eq!(ppid_from_stat("1234 (brave) S 42 1234 1234 0"), Some(42));
+        assert_eq!(ppid_from_stat("7 (a (b) c) R 9 7 7"), Some(9));
+        assert_eq!(ppid_from_stat("1 (init) S 0 1 1"), None);
+        assert_eq!(ppid_from_stat("garbage"), None);
+        assert_eq!(
+            parent_pid(std::process::id()),
+            Some(unsafe { libc::getppid() } as u32)
         );
     }
 

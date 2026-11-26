@@ -131,6 +131,10 @@ pub fn strip_browser_suffix(caption: &str) -> String {
 /// One connected browser instance (through our extension).
 struct ExtConn {
     pid: u32,
+    /// The browser (app key, name), once one of its windows or its executable told.
+    app: Option<(String, String)>,
+    /// Its executable was looked up already (once per connection).
+    exe_tried: bool,
     last: i64,
     /// When the last window snapshot arrived.
     snap_at: i64,
@@ -339,6 +343,10 @@ pub struct Tracker {
     /// When running apps were last scanned (they change slowly; see RUNNING_EVERY).
     running_at: Option<Instant>,
     ext: HashMap<u64, ExtConn>,
+    /// Installed web app -> the browser that runs it (as stored).
+    web_apps: HashMap<String, String>,
+    /// Web apps whose browser could not be found this run (not looked up again).
+    web_apps_tried: HashSet<String>,
     pbi: Option<PbiState>,
     pbi_caption: String,
     snss: snss::Cache,
@@ -356,6 +364,7 @@ impl Tracker {
     fn build(store: Store, cfg: Config, shared: SharedRef, conn: Option<zbus::Connection>) -> Self {
         let now = now_ms();
         let paused = stored_pause(&store, now);
+        let web_apps = crate::store::web_apps(&store.conn).unwrap_or_default();
         if paused.is_some() {
             tracing::info!("still paused (until {:?})", paused.flatten());
         }
@@ -410,6 +419,8 @@ impl Tracker {
             running: vec![],
             running_at: None,
             ext: HashMap::new(),
+            web_apps,
+            web_apps_tried: HashSet::new(),
             pbi: None,
             pbi_caption: String::new(),
             snss: snss::Cache::default(),
@@ -451,6 +462,7 @@ impl Tracker {
                 self.kwin_backoff_ms = KWIN_RETRY_MIN_MS;
                 self.refresh_terminals(now, false, None).await;
                 self.refresh_pbi(now, false).await;
+                self.resolve_browsers(now);
             }
             Event::Idle {
                 input,
@@ -511,16 +523,23 @@ impl Tracker {
             Event::BrowserExt { conn, msg } => {
                 let c = self.ext.entry(conn).or_insert(ExtConn {
                     pid: 0,
+                    app: None,
+                    exe_tried: false,
                     last: now,
                     snap_at: 0,
                     windows: vec![],
                 });
                 c.last = now;
                 match msg {
-                    ExtMsg::Hello { browser_pid } => {
+                    // The ingest socket reports the browser first; the host's own hello repeats it.
+                    ExtMsg::Hello { browser_pid } if browser_pid != 0 && browser_pid != c.pid => {
                         tracing::info!("browser extension connected (browser pid {browser_pid})");
                         c.pid = browser_pid;
+                        c.app = None;
+                        c.exe_tried = false;
+                        self.resolve_browsers(now);
                     }
+                    ExtMsg::Hello { .. } => {}
                     ExtMsg::Snapshot { windows } => {
                         c.windows = windows;
                         c.snap_at = now;
@@ -528,8 +547,11 @@ impl Tracker {
                 }
             }
             Event::BrowserGone(conn) => {
-                if self.ext.remove(&conn).is_some() {
+                if let Some(c) = self.ext.remove(&conn) {
                     tracing::info!("browser extension disconnected");
+                    if let Some((app, name)) = &c.app {
+                        self.note_browser(app, name, now);
+                    }
                 }
             }
         }
@@ -628,6 +650,7 @@ impl Tracker {
         }
         if now >= self.prune_at {
             self.prune_at = now + 3_600_000;
+            self.note_live_browsers(now);
             let days = self.cfg.general.keep_days;
             if days > 0 {
                 // Saturating: a corrupt value must not wrap the cutoff into the future.
@@ -643,12 +666,14 @@ impl Tracker {
         if self.desktop_loaded.elapsed().as_secs() > 600 {
             self.desktop = DesktopIndex::load();
             self.desktop_loaded = Instant::now();
+            self.web_apps_tried.clear();
         }
         // One read of /proc per tick, shared by terminal inspection and the agent scan.
         let procs = (self.paused.is_none() && !self.suspended).then(ProcTable::read);
         self.refresh_terminals(now, true, procs.as_ref()).await;
         self.refresh_pbi(now, true).await;
-        self.ext.retain(|_, c| now - c.last < EXT_ALIVE_MS * 5);
+        self.forget_silent_tabs(now);
+        self.resolve_browsers(now);
         self.agents = match &procs {
             Some(p) => self
                 .agent_scanner
@@ -701,6 +726,117 @@ impl Tracker {
         let now = now_ms();
         self.ledger.close_all(now);
         self.flush(now);
+        self.note_live_browsers(now);
+    }
+
+    /// A connection that went silent (its browser, or the machine, asleep) keeps the browser it
+    /// belongs to until its socket closes; only its stale tab list goes.
+    fn forget_silent_tabs(&mut self, now: i64) {
+        for c in self.ext.values_mut() {
+            if now - c.last >= EXT_ALIVE_MS * 5 && !c.windows.is_empty() {
+                c.windows = Vec::new();
+            }
+        }
+    }
+
+    fn note_browser(&self, app: &str, name: &str, now: i64) {
+        if let Err(e) = self.store.note_browser(app, name, now) {
+            tracing::warn!("could not record the browser link: {e:#}");
+        }
+    }
+
+    /// Records that the browsers whose extension is connected are still linked.
+    fn note_live_browsers(&self, now: i64) {
+        for c in self.ext.values().filter(|c| now - c.last < EXT_ALIVE_MS) {
+            if let Some((app, name)) = &c.app {
+                self.note_browser(app, name, now);
+            }
+        }
+    }
+
+    /// Ties each extension connection, and each installed web app on screen, to its browser
+    /// (from the browser's windows, else its executable) and remembers both.
+    fn resolve_browsers(&mut self, now: i64) {
+        let mut found = vec![];
+        for (id, c) in &self.ext {
+            if c.app.is_some() || c.pid == 0 {
+                continue;
+            }
+            match self.browser_window_app(c.pid) {
+                Some(app) => found.push((*id, Some(app), false)),
+                None if !c.exe_tried => found.push((*id, self.browser_exe_app(c.pid), true)),
+                None => {}
+            }
+        }
+        for (id, app, from_exe) in found {
+            if let Some((key, name)) = &app {
+                tracing::info!("browser extension linked to {name}");
+                self.note_browser(key, name, now);
+            }
+            if let Some(c) = self.ext.get_mut(&id) {
+                c.exe_tried |= from_exe;
+                c.app = app;
+            }
+        }
+        let mut apps = vec![];
+        for w in self.kwin.iter().flat_map(|k| k.windows.iter()) {
+            let (app, _) = self.desktop.identify(&w.df, &w.cls, w.pid);
+            if self.kind_of(&app, &w.cls) != AppKind::WebApp
+                || self.web_apps.contains_key(&app)
+                || self.web_apps_tried.contains(&app)
+                || apps.iter().any(|(a, _)| *a == app)
+            {
+                continue;
+            }
+            let browser = self.browser_of_pid(w.pid as u32).map(|b| b.0);
+            apps.push((app, browser));
+        }
+        for (app, browser) in apps {
+            match browser {
+                Some(b) => {
+                    if let Err(e) = self.store.note_web_app(&app, &b) {
+                        tracing::warn!("could not record the web app's browser: {e:#}");
+                    }
+                    self.web_apps.insert(app, b);
+                }
+                None => {
+                    self.web_apps_tried.insert(app);
+                }
+            }
+        }
+    }
+
+    /// The browser app of one of a browser process's own windows (not its web app windows).
+    fn browser_window_app(&self, pid: u32) -> Option<(String, String)> {
+        let k = self.kwin.as_ref()?;
+        k.windows
+            .iter()
+            .filter(|w| {
+                w.pid as u32 == pid && pid != 0 && !w.cls.to_lowercase().starts_with("crx_")
+            })
+            .map(|w| self.desktop.identify(&w.df, &w.cls, w.pid))
+            .find(|(app, _)| self.kind_of(app, "") == AppKind::Browser)
+    }
+
+    /// The browser app a process's executable belongs to (no window needed).
+    fn browser_exe_app(&self, pid: u32) -> Option<(String, String)> {
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+        let e = self.desktop.by_exe(&exe)?;
+        (e.browser || app_kind(&e.id, &e.wm_class) == AppKind::Browser)
+            .then(|| (e.id.clone(), e.name.clone()))
+    }
+
+    /// The browser a process is: from its extension connection, a window, or its executable.
+    fn browser_of_pid(&self, pid: u32) -> Option<(String, String)> {
+        if pid == 0 {
+            return None;
+        }
+        self.ext
+            .values()
+            .find(|c| c.pid == pid && c.app.is_some())
+            .and_then(|c| c.app.clone())
+            .or_else(|| self.browser_window_app(pid))
+            .or_else(|| self.browser_exe_app(pid))
     }
 
     fn flush(&mut self, now: i64) {
@@ -1044,14 +1180,20 @@ impl Tracker {
 
     /// The browser app identity for a browser process (for tabs that are not on screen).
     fn browser_app(&self, pid: u32) -> (String, String) {
-        self.kwin
-            .as_ref()
-            .and_then(|k| {
-                k.windows
-                    .iter()
-                    .find(|w| w.pid as u32 == pid && !w.cls.starts_with("crx_"))
+        self.ext
+            .values()
+            .find(|c| c.pid == pid && pid != 0 && c.app.is_some())
+            .and_then(|c| c.app.clone())
+            .or_else(|| self.browser_window_app(pid))
+            .or_else(|| {
+                // A browser with no window open yet still has a main window class to go by.
+                self.kwin.as_ref().and_then(|k| {
+                    k.windows
+                        .iter()
+                        .find(|w| w.pid as u32 == pid && pid != 0 && !w.cls.starts_with("crx_"))
+                        .map(|w| self.desktop.identify(&w.df, &w.cls, w.pid))
+                })
             })
-            .map(|w| self.desktop.identify(&w.df, &w.cls, w.pid))
             .unwrap_or_else(|| ("browser".into(), "Browser".into()))
     }
 
@@ -1097,8 +1239,14 @@ impl Tracker {
                 .iter()
                 .find(|w| w.pid as u32 == p.pid && p.pid != 0)
         });
+        // The Plasma Browser Integration bridge runs in its own process: its browser is the one
+        // PBI last answered for.
+        let bridge_browser = (win.is_none() && p.is_browser_bridge())
+            .then(|| self.pbi.as_ref().and_then(|x| self.browser_of_pid(x.pid)))
+            .flatten();
         let (app, app_name) = match win {
             Some(w) => self.desktop.identify(&w.df, &w.cls, w.pid),
+            None if bridge_browser.is_some() => bridge_browser.unwrap_or_default(),
             None if !p.identity.is_empty() => (
                 p.bus
                     .trim_start_matches("org.mpris.MediaPlayer2.")
@@ -1182,7 +1330,7 @@ impl Tracker {
             .filter_map(|(_, _, p)| p.as_ref().and_then(|p| Some((p.conn?, p.tab_id?))))
             .collect();
         for (cid, c) in self.ext.iter().filter(|(_, c)| now - c.last < EXT_ALIVE_MS) {
-            let (app, app_name) = self.browser_app(c.pid);
+            let (app, app_name) = c.app.clone().unwrap_or_else(|| self.browser_app(c.pid));
             // Private windows count as time only: their audio is not recorded at all.
             for x in c.windows.iter().filter(|x| !x.incognito) {
                 for t in x.tabs.iter().filter(|t| t.audible && !t.muted) {
@@ -1412,7 +1560,12 @@ impl Tracker {
                 "idle": {"ok": self.idle_version > 0, "protocol_version": self.idle_version, "error": self.idle_error},
                 "logind": {"ok": self.sys_conn.is_some()},
                 "browser_extension": self.ext.values().map(|c| json!({"browser_pid": c.pid,
-                    "name": if c.pid == 0 { "Browser".to_string() } else { self.browser_app(c.pid).1 },
+                    "app": c.app.as_ref().map(|a| &a.0),
+                    "name": match (&c.app, c.pid) {
+                        (Some(a), _) => a.1.clone(),
+                        (None, 0) => "Browser".to_string(),
+                        (None, pid) => self.browser_app(pid).1,
+                    },
                     "alive": now - c.last < EXT_ALIVE_MS, "last_ms": c.last, "windows": c.windows.len(),
                     "tabs": c.windows.iter().map(|w| w.tabs.len()).sum::<usize>()})).collect::<Vec<_>>(),
                 "plasma_browser_integration": self.pbi.as_ref().map(|p| json!({"browser_pid": p.pid, "tabs": p.tabs.len(), "at_ms": p.at})),
@@ -1829,6 +1982,101 @@ mod tests {
         assert!(pick_ext(&wins, false, true, 2, "Alpha page", &norm).is_none());
         let p = pick_ext(&wins, false, true, 1, "Alpha page", &norm).unwrap();
         assert_eq!((p.host.as_str(), p.private), ("a.example.org", false));
+    }
+
+    fn browser_and_app_windows(pid: i64) -> Snapshot {
+        let win = |id: &str, cls: &str, cap: &str| Win {
+            id: id.into(),
+            pid,
+            cls: cls.into(),
+            cap: cap.into(),
+            w: 960,
+            h: 1200,
+            normal: true,
+            ..Default::default()
+        };
+        Snapshot {
+            active: Some("w1".into()),
+            screens: vec![Screen {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1200,
+            }],
+            windows: vec![
+                win("w1", "brave-origin-beta", "Docs - Brave Origin"),
+                win("w2", "crx_abcdefghijklmnopabcdefghijklmnop", "Music"),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn extension_links_and_web_apps_are_tied_to_their_browser() {
+        let mut t = test_tracker();
+        t.handle(Event::Kwin(Box::new(browser_and_app_windows(4242))))
+            .await;
+        let hello = ExtMsg::Hello { browser_pid: 4242 };
+        t.handle(Event::BrowserExt {
+            conn: 1,
+            msg: hello,
+        })
+        .await;
+        let app = t.ext[&1].app.clone().expect("linked to its browser").0;
+        assert_eq!(app, t.desktop.identify("", "brave-origin-beta", 4242).0);
+        let links = crate::store::browser_links(&t.store.conn).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].app, app);
+        assert_eq!(
+            t.status_json(now_ms())["sources"]["browser_extension"][0]["app"],
+            app
+        );
+        // The app window runs in the same process: it belongs to that browser.
+        t.handle(Event::Kwin(Box::new(browser_and_app_windows(4242))))
+            .await;
+        let stored = crate::store::web_apps(&t.store.conn).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored.values().next(), Some(&app));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_silent_connection_keeps_its_browser() {
+        let mut t = test_tracker();
+        let hello = ExtMsg::Hello { browser_pid: 4242 };
+        t.handle(Event::BrowserExt {
+            conn: 1,
+            msg: hello,
+        })
+        .await;
+        let snap = ExtMsg::Snapshot {
+            windows: vec![ext_win(1, true, false, "a.example.org", "Alpha page")],
+        };
+        t.handle(Event::BrowserExt {
+            conn: 1,
+            msg: snap.clone(),
+        })
+        .await;
+        // Asleep for an hour: the tabs are stale, the link is not.
+        let later = now_ms() + 3_600_000;
+        t.forget_silent_tabs(later);
+        assert!(t.ext[&1].windows.is_empty());
+        assert_eq!(t.ext[&1].pid, 4242);
+        t.handle(Event::BrowserExt { conn: 1, msg: snap }).await;
+        assert_eq!(
+            t.ext[&1].pid, 4242,
+            "a snapshot after the silence keeps the pid"
+        );
+        assert_eq!(t.ext[&1].windows.len(), 1);
+        // A repeated hello (the host's own, after the socket's) changes nothing.
+        let again = ExtMsg::Hello { browser_pid: 0 };
+        t.handle(Event::BrowserExt {
+            conn: 1,
+            msg: again,
+        })
+        .await;
+        assert_eq!(t.ext[&1].pid, 4242);
+        t.handle(Event::BrowserGone(1)).await;
+        assert!(t.ext.is_empty());
     }
 
     #[test]

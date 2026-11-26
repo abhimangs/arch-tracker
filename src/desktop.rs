@@ -12,6 +12,8 @@ pub struct Entry {
     /// Categories= lists TerminalEmulator / WebBrowser.
     pub terminal: bool,
     pub browser: bool,
+    /// The program Exec= starts (its first word), without the arguments.
+    pub exec: String,
 }
 
 #[derive(Default)]
@@ -99,6 +101,37 @@ impl DesktopIndex {
         Some((e.terminal, e.browser))
     }
 
+    /// The app a running executable belongs to: the one whose Exec= program is the same file
+    /// once links are followed, or a launcher in the same install folder
+    /// (/usr/bin/brave-origin-beta links to a script next to /opt/brave.com/brave-origin-beta/brave).
+    /// Web browsers win when several match; installed web apps (which start the browser
+    /// binary themselves) never do.
+    pub fn by_exe(&self, exe: &Path) -> Option<&Entry> {
+        let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+        let dir = exe.parent()?;
+        // In a shared folder (/usr/bin) only the same file says anything.
+        let shared = dir.ends_with("bin") || dir.ends_with("sbin");
+        let mut best: Option<(u8, &Entry)> = None;
+        for e in self.by_id.values() {
+            if is_web_app(&e.id, &e.wm_class) {
+                continue;
+            }
+            let Some(prog) = resolve_program(&e.exec) else {
+                continue;
+            };
+            let exact = prog == exe;
+            if !exact && (shared || prog.parent() != Some(dir)) {
+                continue;
+            }
+            let score = u8::from(e.browser) * 2 + u8::from(exact);
+            let better = best.is_none_or(|(s, b)| score > s || (score == s && e.id < b.id));
+            if better {
+                best = Some((score, e));
+            }
+        }
+        best.map(|(_, e)| e)
+    }
+
     /// (app key, display name) for a window.
     pub fn identify(&self, df: &str, cls: &str, pid: i64) -> (String, String) {
         let df = df.trim_end_matches(".desktop");
@@ -128,6 +161,45 @@ impl DesktopIndex {
     }
 }
 
+/// An installed web app's entry: Chromium names them after the app's 32-letter id and gives
+/// their windows the class crx_<id>.
+pub fn is_web_app(id: &str, wm_class: &str) -> bool {
+    wm_class.to_lowercase().starts_with("crx_")
+        || id
+            .split(['-', '_'])
+            .any(|w| w.len() == 32 && w.bytes().all(|b| (b'a'..=b'p').contains(&b)))
+}
+
+/// The program an Exec= line starts: its first word, past "env" and VAR=value settings.
+fn exec_program(exec: &str) -> String {
+    let mut words = exec.split_whitespace().map(|w| w.trim_matches(['"', '\'']));
+    let mut first = words.next().unwrap_or("");
+    if first == "env" || first.ends_with("/env") {
+        first = words
+            .find(|w| !w.contains('=') && !w.starts_with('-'))
+            .unwrap_or("");
+    }
+    first.to_string()
+}
+
+/// Where an Exec= program lives, links followed: as written when it is a path, else found
+/// on PATH.
+fn resolve_program(prog: &str) -> Option<PathBuf> {
+    if prog.is_empty() {
+        return None;
+    }
+    let path = if prog.contains('/') {
+        PathBuf::from(prog)
+    } else {
+        let dirs = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
+        dirs.split(':')
+            .filter(|d| !d.is_empty())
+            .map(|d| Path::new(d).join(prog))
+            .find(|p| p.is_file())?
+    };
+    Some(std::fs::canonicalize(&path).unwrap_or(path))
+}
+
 /// "com.notion.app.desktop.notion" -> "Notion", "brave-origin-beta" -> "Brave Origin Beta"
 pub fn pretty(id: &str) -> String {
     let last = if id.contains('.') {
@@ -152,6 +224,7 @@ fn parse_entry(path: &Path, id: &str) -> Option<Entry> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut in_main = false;
     let (mut name, mut wm) = (String::new(), String::new());
+    let mut exec = String::new();
     let (mut terminal, mut browser) = (false, false);
     let mut is_app = true;
     for line in text.lines() {
@@ -169,6 +242,7 @@ fn parse_entry(path: &Path, id: &str) -> Option<Entry> {
         match k.trim() {
             "Name" => name = v.trim().to_string(),
             "StartupWMClass" => wm = v.trim().to_string(),
+            "Exec" => exec = exec_program(v),
             "Type" => is_app = v.trim() == "Application",
             "Categories" => {
                 for c in v.split(';') {
@@ -191,6 +265,7 @@ fn parse_entry(path: &Path, id: &str) -> Option<Entry> {
         wm_class: wm,
         terminal,
         browser,
+        exec,
     })
 }
 
@@ -223,6 +298,87 @@ mod tests {
         let e = parse_entry(&path, "term").unwrap();
         std::fs::remove_file(&path).ok();
         assert!(e.terminal && !e.browser);
+    }
+
+    fn entry(id: &str, exec: &str, browser: bool) -> Entry {
+        Entry {
+            id: id.into(),
+            name: id.into(),
+            wm_class: String::new(),
+            terminal: false,
+            browser,
+            exec: exec.into(),
+        }
+    }
+
+    #[test]
+    fn exec_programs() {
+        assert_eq!(
+            exec_program("/usr/bin/brave-origin-beta %U"),
+            "/usr/bin/brave-origin-beta"
+        );
+        assert_eq!(
+            exec_program("env GDK_BACKEND=x11 \"/opt/a b\" --x"),
+            "/opt/a"
+        );
+        assert_eq!(
+            exec_program("/usr/bin/env FOO=1 helium-browser %U"),
+            "helium-browser"
+        );
+        assert_eq!(exec_program(""), "");
+    }
+
+    #[test]
+    fn executables_find_their_app() {
+        let dir = std::env::temp_dir().join(format!("at-exe-{}", std::process::id()));
+        let opt = dir.join("opt/browser-x");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&opt).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        for f in [opt.join("launcher"), opt.join("engine"), bin.join("tool")] {
+            std::fs::write(&f, "").unwrap();
+        }
+        let launcher = bin.join("browser-x");
+        let _ = std::fs::remove_file(&launcher);
+        std::os::unix::fs::symlink(opt.join("launcher"), &launcher).unwrap();
+        let p = |x: &Path| x.to_string_lossy().into_owned();
+        let mut idx = DesktopIndex::default();
+        for e in [
+            entry("browser-x", &p(&launcher), true),
+            // An installed web app starts the engine itself; it must not win.
+            entry(
+                "browser-x-abcdefghijklmnopabcdefghijklmnop-Default",
+                &p(&opt.join("engine")),
+                false,
+            ),
+            entry("tool", &p(&bin.join("tool")), false),
+        ] {
+            idx.by_id.insert(e.id.to_lowercase(), Arc::new(e));
+        }
+        assert_eq!(
+            idx.by_exe(&opt.join("engine")).map(|e| e.id.as_str()),
+            Some("browser-x")
+        );
+        assert_eq!(
+            idx.by_exe(&bin.join("tool")).map(|e| e.id.as_str()),
+            Some("tool")
+        );
+        std::fs::write(bin.join("other"), "").unwrap();
+        assert!(
+            idx.by_exe(&bin.join("other")).is_none(),
+            "a shared bin folder is no clue"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn web_app_entries() {
+        assert!(is_web_app(
+            "brave-abcdefghijklmnopabcdefghijklmnop-Default",
+            ""
+        ));
+        assert!(is_web_app("x", "crx_abc"));
+        assert!(!is_web_app("brave-origin-beta", "brave-origin-beta"));
     }
 
     #[test]

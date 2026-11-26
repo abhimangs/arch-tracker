@@ -169,6 +169,73 @@ impl Store {
     }
 }
 
+/// A browser the extension connected from.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct BrowserLink {
+    pub app: String,
+    pub name: String,
+    pub first_ms: i64,
+    pub last_ms: i64,
+}
+
+impl Store {
+    /// Remembers that the extension is connected from this browser now.
+    pub fn note_browser(&self, app: &str, name: &str, at: i64) -> Result<()> {
+        self.conn
+            .prepare_cached(
+                "INSERT INTO browsers(app, name, first_ms, last_ms) VALUES (?1, ?2, ?3, ?3)
+                 ON CONFLICT(app) DO UPDATE SET name = excluded.name,
+                    first_ms = MIN(first_ms, excluded.first_ms),
+                    last_ms = MAX(last_ms, excluded.last_ms)",
+            )?
+            .execute(params![app, name, at])?;
+        Ok(())
+    }
+
+    /// Remembers which browser runs an installed web app.
+    pub fn note_web_app(&self, app: &str, browser: &str) -> Result<()> {
+        self.conn
+            .prepare_cached("INSERT OR REPLACE INTO web_apps(app, browser) VALUES (?1, ?2)")?
+            .execute(params![app, browser])?;
+        Ok(())
+    }
+}
+
+/// A database written by an older version (opened read-only) can lack newer tables.
+fn has_table(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(conn
+        .prepare_cached("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?
+        .exists(params![name])?)
+}
+
+/// Every browser the extension has connected from.
+pub fn browser_links(conn: &Connection) -> Result<Vec<BrowserLink>> {
+    if !has_table(conn, "browsers")? {
+        return Ok(vec![]);
+    }
+    let mut stmt =
+        conn.prepare_cached("SELECT app, name, first_ms, last_ms FROM browsers ORDER BY app")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(BrowserLink {
+            app: r.get(0)?,
+            name: r.get(1)?,
+            first_ms: r.get(2)?,
+            last_ms: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Installed web app -> the browser that runs it.
+pub fn web_apps(conn: &Connection) -> Result<HashMap<String, String>> {
+    if !has_table(conn, "web_apps")? {
+        return Ok(HashMap::new());
+    }
+    let mut stmt = conn.prepare_cached("SELECT app, browser FROM web_apps")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 pub fn open_readonly(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         path,
@@ -209,7 +276,13 @@ fn migrate(conn: &Connection) -> Result<()> {
          -- How far each transcript has been read (key is a hash of its path).
          CREATE TABLE IF NOT EXISTS claude_files(
             key INTEGER PRIMARY KEY, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
-            offset INTEGER NOT NULL);",
+            offset INTEGER NOT NULL);
+         -- Browsers the extension connected from: first and last time.
+         CREATE TABLE IF NOT EXISTS browsers(
+            app TEXT PRIMARY KEY, name TEXT NOT NULL, first_ms INTEGER NOT NULL,
+            last_ms INTEGER NOT NULL);
+         -- Installed web apps (app windows of a browser) and the browser that runs them.
+         CREATE TABLE IF NOT EXISTS web_apps(app TEXT PRIMARY KEY, browser TEXT NOT NULL);",
     )?;
     let v: Option<String> = conn
         .query_row(
@@ -329,6 +402,39 @@ mod tests {
         assert_eq!(st.subject_id(&b).unwrap(), ib);
         let c = st.subject_id(&Subject::app("other", "Other")).unwrap();
         assert!(c > ia.max(ib));
+    }
+
+    #[test]
+    fn browser_links_keep_the_first_and_last_time() {
+        let st = Store::open(&path()).unwrap();
+        assert!(browser_links(&st.conn).unwrap().is_empty());
+        st.note_browser("browser-a", "Browser A", 5_000).unwrap();
+        st.note_browser("browser-a", "Browser A (beta)", 9_000)
+            .unwrap();
+        st.note_browser("browser-a", "Browser A (beta)", 7_000)
+            .unwrap();
+        st.note_browser("browser-b", "Browser B", 1_000).unwrap();
+        let links = browser_links(&st.conn).unwrap();
+        assert_eq!(
+            links[0],
+            BrowserLink {
+                app: "browser-a".into(),
+                name: "Browser A (beta)".into(),
+                first_ms: 5_000,
+                last_ms: 9_000,
+            }
+        );
+        assert_eq!(links[1].app, "browser-b");
+        st.note_web_app("browser-a-app", "browser-a").unwrap();
+        st.note_web_app("browser-a-app", "browser-b").unwrap();
+        assert_eq!(web_apps(&st.conn).unwrap()["browser-a-app"], "browser-b");
+    }
+
+    #[test]
+    fn missing_browser_tables_read_as_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(browser_links(&conn).unwrap().is_empty());
+        assert!(web_apps(&conn).unwrap().is_empty());
     }
 
     #[test]

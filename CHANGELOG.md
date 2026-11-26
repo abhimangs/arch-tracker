@@ -61,6 +61,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- An extension connection that went quiet for five minutes (the machine asleep) lost track of its
+  browser: background audio from it was filed under a generic "Browser", and with two browsers open
+  its tabs could be matched to the other one's windows. Each connection is now tied to its browser
+  by the socket itself, a window or the browser's program, and `arch-tracker doctor` lists every
+  browser the extension has connected from.
 - The Today page multiplied its refresh timer every minute.
 - Agent and running-app time kept counting while suspended or paused.
 - A failed database write could lose spans or overwrite another span's end.

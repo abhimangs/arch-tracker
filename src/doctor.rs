@@ -237,12 +237,28 @@ pub async fn run() -> anyhow::Result<()> {
         .map(|a| {
             a.iter()
                 .filter(|e| e["alive"].as_bool().unwrap_or(false))
-                .map(|e| process_label(e["browser_pid"].as_u64().unwrap_or(0)))
+                .map(|e| {
+                    let pid = e["browser_pid"].as_u64().unwrap_or(0);
+                    match (e["app"].as_str(), e["name"].as_str()) {
+                        (Some(_), Some(name)) => format!("{name} (pid {pid})"),
+                        _ => process_label(pid),
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default();
     let ext_alive = !connected.is_empty();
     browser_checks(&mut r, &connected);
+    if let Ok(conn) = crate::store::open_readonly(&util::db_path())
+        && let Ok(links) = crate::store::browser_links(&conn)
+        && !links.is_empty()
+    {
+        let names: Vec<&str> = links.iter().map(|l| l.name.as_str()).collect();
+        r.note(
+            "browsers the extension has connected from",
+            &names.join(", "),
+        );
+    }
     if !ext_alive {
         // Queried lazily (only when a browser window is on screen), so ask the bus directly.
         let pbi = sh(
