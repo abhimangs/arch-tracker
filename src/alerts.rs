@@ -1,7 +1,8 @@
 //! Desktop notifications: a heads-up before, and a notice at, each category's daily limit and the
 //! daily screen-time goal; a reminder to take a break after a long unbroken stretch; and a notice
 //! when Codex's 5-hour or weekly plan limit passes the share you chose (once per limit window,
-//! remembered in the database). Each can play a sound.
+//! remembered in the database); and, from agentwatch, when an AI agent you aren't looking at
+//! finishes or waits for you (a click takes you to its terminal). Each can play a sound.
 //!
 //! `[notifications] enabled = false` turns all of it off: no report is built, nothing is sent.
 //! The numbers come from the same day report as Today, so a notice never disagrees with the page.
@@ -24,6 +25,8 @@ use zbus::{Connection, MatchRule, MessageStream};
 const BUS: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 const CHECK_EVERY: Duration = Duration::from_secs(60);
+/// Agents are looked at more often: a finished turn should be announced within seconds.
+const AGENTS_EVERY: Duration = Duration::from_secs(3);
 
 /// Asks the notifier for something outside its schedule.
 pub enum Cmd {
@@ -95,8 +98,43 @@ async fn run(
     let mut signals = signal_stream(&conn).await;
     let mut tick = tokio::time::interval(CHECK_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut agent_tick = tokio::time::interval(AGENTS_EVERY);
+    agent_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut watch = Some(crate::agentwatch::Watch::new(crate::util::now_ms()));
     loop {
         tokio::select! {
+            _ = agent_tick.tick() => {
+                let (cfg, live) = snapshot(&shared);
+                let n = &cfg.notifications;
+                if !n.enabled || !n.agents || live.paused {
+                    watch = Some(crate::agentwatch::Watch::new(crate::util::now_ms()));
+                    continue;
+                }
+                let Some(mut w) = watch.take() else { continue };
+                let (agents, focus) = agent_status(&shared);
+                let sound = n.sound;
+                let r = tokio::task::spawn_blocking(move || {
+                    let looking = focus.as_ref().map(|(a, b)| (a.as_str(), b.as_str()));
+                    let notes = w.check(&cfg, &agents, looking, crate::util::now_ms());
+                    (w, notes)
+                })
+                .await;
+                let Ok((w, notes)) = r else {
+                    watch = Some(crate::agentwatch::Watch::new(crate::util::now_ms()));
+                    continue;
+                };
+                watch = Some(w);
+                for note in notes {
+                    let replaces = shown.get(&note.family).copied().unwrap_or(0);
+                    match notify(&conn, &note, replaces, sound).await {
+                        Ok(id) => {
+                            shown.insert(note.family.clone(), id);
+                            routes.insert(id, note.route.clone());
+                        }
+                        Err(e) => tracing::warn!("notification not shown: {e}"),
+                    }
+                }
+            }
             _ = tick.tick() => {
                 let (cfg, live) = snapshot(&shared);
                 if !cfg.notifications.enabled {
@@ -152,7 +190,16 @@ async fn run(
                     if shown.values().any(|v| *v == id) {
                         let route = routes.get(&id).filter(|r| !r.is_empty()).cloned();
                         let route = route.as_deref().unwrap_or("today");
-                        crate::tray::open_dashboard(&conn, &web, route, tokens.remove(&id)).await;
+                        let token = tokens.remove(&id);
+                        // An agent's notice: its terminal, else its page in the dashboard.
+                        if let Some(pid) = route.strip_prefix("focus:").and_then(|p| p.parse().ok()) {
+                            if let Err(e) = crate::focus::agent(&conn, pid).await {
+                                tracing::debug!("could not bring the agent forward: {e:#}");
+                                crate::tray::open_dashboard(&conn, &web, "agent/all/1", token).await;
+                            }
+                        } else {
+                            crate::tray::open_dashboard(&conn, &web, route, token).await;
+                        }
                     }
                 }
                 Signal::Closed(id) => {
@@ -163,6 +210,22 @@ async fn run(
             },
         }
     }
+}
+
+/// The agents running now and the agent and project in front of you, from the live status.
+fn agent_status(shared: &SharedRef) -> (Vec<crate::agentwatch::Live>, Option<(String, String)>) {
+    let Ok(s) = shared.lock() else {
+        return (vec![], None);
+    };
+    let agents = serde_json::from_value(s.status["agents"].clone()).unwrap_or_default();
+    let f = &s.status["focus"];
+    let focus = f["program"].as_str().filter(|p| !p.is_empty()).map(|p| {
+        (
+            p.to_string(),
+            f["project"].as_str().unwrap_or("").to_string(),
+        )
+    });
+    (agents, focus)
 }
 
 fn snapshot(shared: &SharedRef) -> (Config, Live) {
@@ -532,6 +595,7 @@ async fn notify(conn: &Connection, n: &Note, replaces: u32, sound: bool) -> zbus
     let open = match n.route.as_str() {
         "" | "today" => "Open Today",
         r if r.starts_with("agent/") => "Open the agent",
+        r if r.starts_with("focus:") => "Go to it",
         r if r.starts_with("week") => "Open the week",
         _ => "Open",
     };

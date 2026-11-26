@@ -64,7 +64,7 @@ fn describe(
 }
 
 /// Runs tmux, giving up (and killing it) after a second so a stuck server cannot stall us.
-async fn tmux(args: &[&str]) -> Option<std::process::Output> {
+pub(crate) async fn tmux(args: &[&str]) -> Option<std::process::Output> {
     let out = tokio::process::Command::new("tmux")
         .args(args)
         .stdin(std::process::Stdio::null())

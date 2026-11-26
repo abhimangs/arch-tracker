@@ -29,6 +29,8 @@ pub struct Tab {
 #[derive(Debug, Deserialize, Clone)]
 pub struct KWindow {
     #[serde(default)]
+    pub id: u64,
+    #[serde(default)]
     pub is_active: bool,
     #[serde(default)]
     pub title: String,
@@ -90,9 +92,26 @@ fn has_pid_suffix(name: &str) -> bool {
 
 /// "kitty @ ls" over the socket.
 pub async fn ls(sock: &Path) -> Result<Vec<OsWindow>> {
+    let data = command(sock, "ls", serde_json::json!({})).await?;
+    Ok(serde_json::from_str(data.as_deref().unwrap_or("[]"))?)
+}
+
+/// "kitty @ focus-window --match id:<id>": shows that pane, its tab and its OS window.
+pub async fn focus_window(sock: &Path, id: u64) -> Result<()> {
+    command(
+        sock,
+        "focus-window",
+        serde_json::json!({"match": format!("id:{id}")}),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// One remote-control command; its answer's data.
+async fn command(sock: &Path, cmd: &str, payload: serde_json::Value) -> Result<Option<String>> {
     let fut = async {
         let mut s = UnixStream::connect(sock).await?;
-        let cmd = serde_json::json!({"cmd": "ls", "version": [0, 26, 0], "no_response": false, "payload": {}});
+        let cmd = serde_json::json!({"cmd": cmd, "version": [0, 26, 0], "no_response": false, "payload": payload});
         s.write_all(format!("\x1bP@kitty-cmd{cmd}\x1b\\").as_bytes())
             .await?;
         let mut buf = Vec::with_capacity(16 * 1024);
@@ -131,7 +150,7 @@ pub async fn ls(sock: &Path) -> Result<Vec<OsWindow>> {
     if !r.ok {
         bail!("kitty refused: {}", r.error.unwrap_or_default());
     }
-    Ok(serde_json::from_str(r.data.as_deref().unwrap_or("[]"))?)
+    Ok(r.data)
 }
 
 /// The kitty window (pane) a KWin window shows: the focused OS window if focused, otherwise the

@@ -140,6 +140,10 @@ pub struct Notifications {
     pub sound: bool,
     /// On the first morning of the week, a summary of the week before.
     pub weekly: bool,
+    /// When an AI agent you aren't looking at finishes its turn or waits for your answer.
+    pub agents: bool,
+    /// ...or, for an agent whose records don't say, has been quiet this long after working.
+    pub agent_quiet_secs: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -499,6 +503,8 @@ impl Default for Notifications {
             limit_week_percent: 70,
             sound: true,
             weekly: true,
+            agents: true,
+            agent_quiet_secs: 20,
         }
     }
 }
@@ -944,6 +950,7 @@ impl Config {
         self.notifications.break_after_mins = self.notifications.break_after_mins.clamp(5, 480);
         self.notifications.limit_5h_percent = self.notifications.limit_5h_percent.clamp(1, 100);
         self.notifications.limit_week_percent = self.notifications.limit_week_percent.clamp(1, 100);
+        self.notifications.agent_quiet_secs = self.notifications.agent_quiet_secs.clamp(5, 600);
         if self.dashboard.port < 1024 {
             self.dashboard.port = 7600;
         }
@@ -1153,6 +1160,13 @@ impl Config {
             1,
             100,
             "Weekly limit alert (percent)",
+        )?;
+        whole(
+            "notifications.agent_quiet_secs",
+            nt.agent_quiet_secs,
+            5,
+            600,
+            "Agent quiet for (seconds)",
         )?;
         for line in &self.projects.aliases {
             let ok = line

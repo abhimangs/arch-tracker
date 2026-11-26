@@ -2286,6 +2286,7 @@
         ${field("Daily goal", "When today's screen time reaches your daily goal.", check("ngoal", nt.goal, "Tell me when I reach my goal"))}
         ${field("Heads-up", "A notice this long before a limit or the goal. 0 for none.", num("nwarn", nt.warn_mins, "minutes before", 0, 240))}
         ${field("Codex limits", "When Codex's 5-hour or weekly limit passes this share. Codex reports its limits while it works; a notice comes once per limit, and the dashboard shows a banner until it resets.", `${check("nplan", nt.plan_limits !== false, "Tell me when a limit runs low")}${num("n5h", nt.limit_5h_percent ?? 70, "% of the 5-hour limit", 1, 100)}${num("nweek", nt.limit_week_percent ?? 70, "% of the weekly limit", 1, 100)}`)}
+        ${field("Agents", "When Claude Code, Codex, opencode or another agent finishes its turn or waits for your answer while you look at something else. Claude Code, Codex and opencode say so in their own logs; any other agent counts once it has been quiet this long after working. Clicking the notice brings its terminal tab forward.", `${check("nagents", nt.agents !== false, "Tell me when an agent needs me")}${num("nagentq", nt.agent_quiet_secs ?? 20, "seconds quiet", 5, 600)}`)}
         ${field("Weekly summary", "On the first morning of the week: last week's screen time, top apps and sites, and what your agents did and would cost, against the week before.", check("nweekly", nt.weekly !== false, "Send me a summary every week"))}
         ${field("Sound", "A short sound with each notice.", check("nsound", nt.sound !== false, "Play a sound"))}
         ${field("Breaks", `A reminder after a long stretch on screen. Locking the screen, or stepping away for ${plural(Math.ceil(Math.max(c.idle.threshold_secs, c.insights.session_gap_secs) / 60), "minute")}, starts a new one. It waits until a call or a video ends.`, `${check("nbreak", nt.breaks, "Remind me to take a break")}${num("nbreakmins", nt.break_after_mins, "minutes without a break", 5, 480)}`)}
@@ -2536,6 +2537,8 @@
         limit_week_percent: n("nweek"),
         weekly: $("nweekly").checked,
         sound: $("nsound").checked,
+        agents: $("nagents").checked,
+        agent_quiet_secs: n("nagentq"),
       };
       next.categories = cats.filter((x) => x.name);
       // Browsers not listed here (no longer seen) keep what they had.
@@ -2602,6 +2605,7 @@
     "notifications.break_after_mins": "nbreakmins",
     "notifications.limit_5h_percent": "n5h",
     "notifications.limit_week_percent": "nweek",
+    "notifications.agent_quiet_secs": "nagentq",
     "projects.aliases": "aliases",
     "projects.folders": "pfolders",
     "projects.include": "pinclude",

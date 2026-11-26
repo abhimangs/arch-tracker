@@ -1,3 +1,4 @@
+mod agentwatch;
 mod alerts;
 mod config;
 mod daemon;
@@ -5,6 +6,7 @@ mod demo;
 mod desktop;
 mod doctor;
 mod export;
+mod focus;
 mod ipc;
 mod model;
 mod native_host;

@@ -52,7 +52,9 @@ work, then shows it all in a local dashboard with a tray icon. It runs as a smal
 - **Week**: a week against the one before, day by day, with categories, apps, sites, agents and
   their cost; a notification on the first morning of each week sums up the last one.
 - **Alerts**: desktop notifications (with a sound) for category limits, your daily goal, breaks,
-  Codex's plan limits at the share you choose, and the weekly summary.
+  Codex's plan limits at the share you choose, and the weekly summary; and when an AI agent you
+  aren't looking at finishes or waits for your answer, with a click that takes you back to its
+  terminal tab.
 
 ## How screen time is decided
 
@@ -194,7 +196,8 @@ are picked up live. You can change:
 - a daily screen-time goal, per-category daily limits, what counts as a session and as deep work
 - desktop notifications: a heads-up before and a notice at each category limit and the daily goal,
   and a reminder to take a break after a long stretch on screen (it waits until a call or a video
-  ends). One switch turns all of them off, and Settings can send a test notice
+  ends), and agents that finish or wait for you. One switch turns all of them off, and Settings
+  can send a test notice
 - which apps are code editors, project renames, and which folders are projects: parent folders
   (every folder inside one is a project) and single project folders, git repository or not, picked
   from a folder browser that also suggests the folders you worked in; and folders that aren't

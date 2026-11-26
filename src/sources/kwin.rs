@@ -278,6 +278,46 @@ pub async fn unload_script(conn: &Connection) {
     let _ = scripting(conn, "unloadScript", &(SCRIPT_NAME,)).await;
 }
 
+const ACTIVATE_NAME: &str = "arch-tracker-activate";
+
+/// Brings forward the window of the nearest process in `pids` (a process, then its parents) that
+/// has one, preferring one titled `caption`. A one-off KWin script does it, so focus-stealing
+/// prevention doesn't hold it back; KWin switches virtual desktops for it if it has to.
+pub async fn activate(conn: &Connection, pids: &[u32], caption: Option<&str>) -> Result<()> {
+    let path = util::runtime_dir().join("kwin-activate.js");
+    std::fs::write(&path, activate_script(pids, caption))?;
+    let path_s = path.to_string_lossy().to_string();
+    let _ = scripting(conn, "unloadScript", &(ACTIVATE_NAME,)).await;
+    scripting(conn, "loadScript", &(path_s.as_str(), ACTIVATE_NAME)).await?;
+    scripting(conn, "start", &()).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let _ = scripting(conn, "unloadScript", &(ACTIVATE_NAME,)).await;
+    Ok(())
+}
+
+fn activate_script(pids: &[u32], caption: Option<&str>) -> String {
+    let pids = serde_json::to_string(pids).unwrap_or_else(|_| "[]".into());
+    let caption = serde_json::to_string(&caption).unwrap_or_else(|_| "null".into());
+    format!(
+        "(function () {{
+    var pids = {pids};
+    var caption = {caption};
+    var best = null, rank = 1e9;
+    workspace.windowList().forEach(function (w) {{
+        var i = pids.indexOf(w.pid);
+        if (i < 0 || !w.normalWindow) return;
+        var r = i * 2 + (caption !== null && w.caption !== caption ? 1 : 0);
+        if (r < rank) {{ best = w; rank = r; }}
+    }});
+    if (best) {{
+        if (best.minimized) best.minimized = false;
+        workspace.activeWindow = best;
+    }}
+}})();
+"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +385,17 @@ mod tests {
             vec![m, win("s", 0, 0, 1000, 1200), win("t", 10, 0, 1910, 1200)],
         );
         assert!(s.visible(0.05, 40_000).is_empty());
+    }
+
+    #[test]
+    fn the_activation_script_names_the_processes_and_the_title() {
+        let js = activate_script(&[950, 900], Some("a \"quoted\" title"));
+        assert!(js.contains("var pids = [950,900];"), "{js}");
+        assert!(
+            js.contains(r#"var caption = "a \"quoted\" title";"#),
+            "{js}"
+        );
+        assert!(activate_script(&[1], None).contains("var caption = null;"));
     }
 
     #[test]

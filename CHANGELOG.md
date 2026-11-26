@@ -38,6 +38,12 @@ All notable changes to this project are documented here. The format follows
 - Plan value on Claude Code's and Codex's pages: pick the plan you pay for (Codex's is read from
   its logs) and see its monthly list price for the period next to the API-equivalent cost, and how
   many times over the plan pays for itself.
+- Agent needs you: a notification when an AI agent you aren't looking at finishes its turn or
+  waits for your answer. Claude Code's transcripts, Codex's logs and opencode's database say when a
+  turn ends or a tool waits for approval (only the kind and time of their last entries are read);
+  any other agent counts once it has gone quiet after working (20 seconds unless you change it).
+  Clicking the notice brings its terminal forward: the kitty tab and pane, or the tmux pane, and
+  the window, on whichever virtual desktop. Settings → Notifications switches it off.
 - A Week page: screen time day by day, categories, top apps and sites, and agent work and cost,
   each against the week before (while a week runs, against the same days of the week before).
   On the first morning of each week a notification sums up the week before and opens it.
