@@ -44,6 +44,10 @@ All notable changes to this project are documented here. The format follows
   any other agent counts once it has gone quiet after working (20 seconds unless you change it).
   Clicking the notice brings its terminal forward: the kitty tab and pane, or the tmux pane, and
   the window, on whichever virtual desktop. Settings → Notifications switches it off.
+- GNOME (45 and later): a small Shell extension, installed with the package and switched on by
+  `arch-tracker setup`, sends the daemon the same window snapshots as the KWin script, and raises
+  an agent's window when you click its notice; idle time comes from GNOME's own idle monitor. CI
+  runs the tracker under a headless GNOME Shell with the extension and real windows.
 - Hyprland and Sway: windows come from their IPC sockets (found on their own, also when the session
   didn't export its variables to systemd) as the same snapshots KWin gives, so focus, visible
   windows, terminals, agents and browsers work as on Plasma; a click on an agent's notice raises its

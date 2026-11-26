@@ -1,6 +1,7 @@
 //! Wayland ext-idle-notify-v1. Version 2's input-idle notification ignores inhibitors, so we get
 //! raw "no input" gaps; the classic notification respects inhibitors (video, calls), so the
-//! difference tells us when something is keeping the session awake.
+//! difference tells us when something is keeping the session awake. On GNOME, Mutter's idle
+//! monitor over D-Bus instead.
 
 use crate::daemon::Event;
 use crate::util::now_ms;
@@ -115,6 +116,72 @@ pub fn spawn(tx: UnboundedSender<Event>) {
                 delay = (delay * 2).min(RETRY_MAX);
             }
         });
+}
+
+/// GNOME: Mutter's idle monitor on D-Bus instead (an idle watch, then a watch for the input that
+/// ends it). Its idle time counts keyboard and mouse only, like ext-idle-notify v2's input idle.
+pub fn spawn_mutter(conn: zbus::Connection, tx: UnboundedSender<Event>) {
+    tokio::spawn(async move {
+        let mut delay = RETRY_MIN;
+        loop {
+            let started = std::time::Instant::now();
+            let e = match mutter(&conn, &tx).await {
+                Ok(()) => return,
+                Err(e) => format!("{e:#}"),
+            };
+            tracing::warn!("idle detection unavailable: {e}");
+            if tx.send(Event::IdleUnavailable(e)).is_err() {
+                return;
+            }
+            if started.elapsed() > RETRY_MAX {
+                delay = RETRY_MIN;
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(RETRY_MAX);
+        }
+    });
+}
+
+async fn mutter(conn: &zbus::Connection, tx: &UnboundedSender<Event>) -> Result<()> {
+    use futures_util::StreamExt;
+    let proxy = zbus::Proxy::new(
+        conn,
+        "org.gnome.Mutter.IdleMonitor",
+        "/org/gnome/Mutter/IdleMonitor/Core",
+        "org.gnome.Mutter.IdleMonitor",
+    )
+    .await?;
+    let mut fired = proxy.receive_signal("WatchFired").await?;
+    let idle_watch: u32 = proxy
+        .call("AddIdleWatch", &(GAP_MS as u64,))
+        .await
+        .context("Mutter's idle monitor (org.gnome.Mutter.IdleMonitor)")?;
+    let mut active_watch = 0u32;
+    let _ = tx.send(Event::IdleReady { version: 1 });
+    tracing::info!("idle from Mutter's idle monitor");
+    while let Some(msg) = fired.next().await {
+        let (id,): (u32,) = msg.body().deserialize()?;
+        let idle = if id == idle_watch {
+            // The watch for input fires once: set it again for each idle stretch.
+            active_watch = proxy.call("AddUserActiveWatch", &()).await?;
+            true
+        } else if id == active_watch && id != 0 {
+            false
+        } else {
+            continue;
+        };
+        if tx
+            .send(Event::Idle {
+                input: true,
+                idle,
+                at: now_ms(),
+            })
+            .is_err()
+        {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("Mutter's idle monitor went away")
 }
 
 const RETRY_MIN: std::time::Duration = std::time::Duration::from_secs(5);

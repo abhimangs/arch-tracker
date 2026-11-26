@@ -112,8 +112,8 @@ async fn run_async() -> Result<()> {
         Err(e) => tracing::warn!("could not register the native messaging host: {e:#}"),
     }
 
-    // Windows: the KWin script and the GNOME extension push snapshots to this D-Bus service;
-    // Hyprland and Sway are read over their own sockets.
+    // Windows: the KWin script and the GNOME Shell extension push snapshots to this D-Bus
+    // service; Hyprland and Sway are read over their own sockets.
     let wm = crate::sources::wm::detect();
     tracing::info!("windows from {}", wm.name());
     let conn = zbus::connection::Builder::session()
@@ -134,7 +134,11 @@ async fn run_async() -> Result<()> {
         Wm::Gnome => {}
     }
 
-    idle::spawn(tx.clone());
+    if wm == Wm::Gnome {
+        idle::spawn_mutter(conn.clone(), tx.clone());
+    } else {
+        idle::spawn(tx.clone());
+    }
     session::spawn(conn.clone(), tx.clone()).await;
     media::spawn(conn.clone(), tx.clone()).await;
 

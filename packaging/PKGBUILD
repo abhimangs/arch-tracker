@@ -5,7 +5,7 @@
 pkgname=arch-tracker
 pkgver=0.1.1
 pkgrel=1
-pkgdesc="Local screen-time and activity tracker for KDE Plasma, Hyprland and Sway on Wayland"
+pkgdesc="Local screen-time and activity tracker for KDE Plasma, GNOME, Hyprland and Sway on Wayland"
 arch=('x86_64')
 license=('MIT')
 depends=('sqlite' 'gcc-libs' 'glibc')
@@ -48,5 +48,8 @@ package() {
   install -Dm644 packaging/dev.archtracker.native.firefox.json "$pkgdir/usr/lib/mozilla/native-messaging-hosts/dev.archtracker.native.json"
   install -Dm644 packaging/dev.archtracker.native.firefox.json "$pkgdir/usr/lib/librewolf/native-messaging-hosts/dev.archtracker.native.json"
   install -Dm644 packaging/arch-tracker.1 "$pkgdir/usr/share/man/man1/arch-tracker.1"
+  # GNOME Shell extension (arch-tracker setup switches it on).
+  install -Dm644 -t "$pkgdir/usr/share/gnome-shell/extensions/arch-tracker@archtracker.dev" \
+    gnome/arch-tracker@archtracker.dev/metadata.json gnome/arch-tracker@archtracker.dev/extension.js
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

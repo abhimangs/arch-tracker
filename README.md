@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/abhimangs/arch-tracker)](https://github.com/abhimangs/arch-tracker/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Screen time for KDE Plasma, Hyprland and Sway on Wayland. arch-tracker records which app has your focus, which sites
+Screen time for KDE Plasma, GNOME, Hyprland and Sway on Wayland. arch-tracker records which app has your focus, which sites
 you use (with subdomains kept apart), what runs in your terminal, and how long your AI coding agents
 work, then shows it all in a local dashboard with a tray icon. It runs as a small user service (about
 12 MB of memory, close to 0 % CPU) and nothing leaves your computer.
@@ -15,7 +15,7 @@ work, then shows it all in a local dashboard with a tray icon. It runs as a smal
 
 | Source | What you get | How |
 | --- | --- | --- |
-| Windows | The focused app and window title, to the second; windows that sit visible beside it | On Plasma a KWin script, loaded at runtime (your `kwinrc` is not touched); on Hyprland and Sway their IPC sockets |
+| Windows | The focused app and window title, to the second; windows that sit visible beside it | On Plasma a KWin script, loaded at runtime (your `kwinrc` is not touched); on GNOME a small Shell extension; on Hyprland and Sway their IPC sockets |
 | Browser | The active tab's host and page title; each subdomain separate | A small extension for Chromium-based browsers (Brave, Chrome, Chromium, Helium, Vivaldi, Edge, Opera…) and Firefox-based ones (Firefox, Zen, LibreWolf, Floorp, Waterfox), over native messaging. Plasma Browser Integration and Chromium's session file are fallbacks |
 | Incognito | Time only, counted as "Private browsing" | Hosts and titles from private windows are never stored |
 | Terminals | The program in front of you and its project (git root) | kitty remote control (exact tab); `/proc` for ghostty and others; tmux panes |
@@ -98,8 +98,8 @@ Screenshots use made-up data (`arch-tracker demo`) in the OLED theme; `node scri
 
 ## Install
 
-Requires Arch Linux (or a derivative) with KDE Plasma 6, Hyprland or Sway on Wayland (see
-[Hyprland and Sway](#hyprland-and-sway) for what differs there).
+Requires Arch Linux (or a derivative) with KDE Plasma 6, GNOME 45 or later, Hyprland or Sway on
+Wayland (see [GNOME](#gnome) and [Hyprland and Sway](#hyprland-and-sway) for what differs there).
 
 **From a release:** download `arch-tracker-<version>-1-x86_64.pkg.tar.zst` from
 [Releases](https://github.com/abhimangs/arch-tracker/releases) and install it:
@@ -158,6 +158,15 @@ works until the browser restarts.
 Flatpak and Snap browsers can't start the bridge from their sandbox; their windows are still tracked
 through the fallbacks. Without the extension, tabs are matched by window title through Plasma
 Browser Integration, which can mix up two tabs with the same title.
+
+### GNOME
+
+`arch-tracker setup` switches on the arch-tracker Shell extension (the package installs it to
+`/usr/share/gnome-shell/extensions`). GNOME on Wayland loads new extensions at login, so log out
+and back in once. The extension only tells the daemon on this computer which windows there are and
+which has focus, the same as the KWin script does on Plasma. Idle time comes from GNOME's own idle
+monitor. The tray icon needs the AppIndicator extension (`gnome-shell-extension-appindicator`),
+and Plasma Browser Integration is Plasma's only.
 
 ### Hyprland and Sway
 
@@ -260,8 +269,9 @@ systemd unit caps memory at 64 MB.
 One Rust binary runs as a systemd user service. Event sources (the window manager, Wayland idle,
 logind, MPRIS, the browser bridge, terminals) feed a single tracker that opens and closes intervals
 in SQLite, writing in batches every 30 seconds. The dashboard is served by the same process from
-embedded files. Windows come from whichever desktop runs: a KWin script on Plasma, or Hyprland's
-and Sway's IPC sockets; each becomes the same snapshot of windows, so everything after it is shared.
+embedded files. Windows come from whichever desktop runs: a KWin script on Plasma, a Shell extension
+on GNOME, or Hyprland's and Sway's IPC sockets; each becomes the same snapshot of windows, so
+everything after it is shared.
 
 ## Contributing
 

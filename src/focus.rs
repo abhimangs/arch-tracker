@@ -50,7 +50,7 @@ pub async fn agent(conn: &Connection, pid: u32) -> Result<()> {
             crate::sources::hyprland::focus(&dir, &chain, caption.as_deref()).await
         }
         Wm::Sway(sock) => crate::sources::sway::focus(&sock, &chain, caption.as_deref()).await,
-        Wm::Gnome => bail!("windows can't be raised on GNOME yet"),
+        Wm::Gnome => crate::sources::gnome::activate(conn, &chain, caption.as_deref()).await,
     }
 }
 

@@ -617,6 +617,21 @@ pub fn run() -> Result<()> {
             );
         }
     }
+    if crate::sources::wm::detect() == crate::sources::wm::Wm::Gnome {
+        println!();
+        match crate::sources::gnome::install() {
+            Ok(dir) => {
+                println!(
+                    "GNOME: the arch-tracker Shell extension is on ({}).",
+                    util::abbreviate_home(&dir)
+                );
+                println!(
+                    "  GNOME on Wayland loads new extensions at login: log out and back in once."
+                );
+            }
+            Err(e) => println!("GNOME: could not switch the Shell extension on: {e:#}"),
+        }
+    }
     let chromium = !chromium_browsers().is_empty();
     let firefox = !firefox_browsers().is_empty();
     println!();

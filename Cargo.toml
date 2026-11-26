@@ -2,7 +2,7 @@
 name = "arch-tracker"
 version = "0.1.1"
 edition = "2024"
-description = "Local screen-time and activity tracker for KDE Plasma, Hyprland and Sway on Wayland"
+description = "Local screen-time and activity tracker for KDE Plasma, GNOME, Hyprland and Sway on Wayland"
 license = "MIT"
 repository = "https://github.com/abhimangs/arch-tracker"
 readme = "README.md"

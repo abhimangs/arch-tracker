@@ -1,0 +1,7 @@
+{
+  "uuid": "arch-tracker@archtracker.dev",
+  "name": "arch-tracker",
+  "description": "Tells the arch-tracker daemon on this computer which window has focus and which windows are on screen, for its screen-time tracking. Nothing leaves the computer.",
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "url": "https://github.com/abhimangs/arch-tracker"
+}

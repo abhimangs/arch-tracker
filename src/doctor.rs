@@ -239,10 +239,14 @@ pub async fn run() -> anyhow::Result<()> {
     );
     r.line(
         src["idle"]["ok"].as_bool().unwrap_or(false),
-        &format!(
-            "idle detection (ext-idle-notify v{})",
-            src["idle"]["protocol_version"]
-        ),
+        &if desktop == "GNOME" {
+            "idle detection (GNOME's idle monitor)".to_string()
+        } else {
+            format!(
+                "idle detection (ext-idle-notify v{})",
+                src["idle"]["protocol_version"]
+            )
+        },
         &format!(
             "Error: {}",
             src["idle"]["error"].as_str().unwrap_or("unknown")

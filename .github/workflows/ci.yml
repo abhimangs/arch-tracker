@@ -35,7 +35,11 @@ jobs:
       - name: Test
         run: cargo test --locked
       - name: Check dashboard and helper scripts
-        run: for f in web-ui/app.js scripts/*.mjs; do node --check "$f"; done
+        run: |
+          for f in web-ui/app.js scripts/*.mjs; do node --check "$f"; done
+          cp gnome/arch-tracker@archtracker.dev/extension.js "$RUNNER_TEMP/gnome-extension.mjs"
+          node --check "$RUNNER_TEMP/gnome-extension.mjs"
+          for f in scripts/*.sh; do bash -n "$f"; done
       - name: Test the browser extension
         run: node scripts/test-extension.mjs
       - name: Lint the Firefox build
@@ -59,7 +63,7 @@ jobs:
         run: CHROME="$(command -v google-chrome || command -v chromium)" node scripts/smoke-dashboard.mjs
 
   desktops:
-    name: Window tracking on Sway
+    name: Window tracking on Sway and GNOME
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -68,11 +72,14 @@ jobs:
       - name: Install compositors, a terminal and D-Bus
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libsqlite3-dev dbus jq sway foot fonts-dejavu-core
+          sudo apt-get install -y --no-install-recommends libsqlite3-dev dbus jq sway foot fonts-dejavu-core \
+            gnome-shell dconf-service dconf-gsettings-backend libglib2.0-bin
       - name: Build
         run: cargo build --locked
       - name: Sway
         run: scripts/desktop-smoke.sh sway
+      - name: GNOME
+        run: scripts/desktop-smoke.sh gnome
 
   package:
     name: Arch package

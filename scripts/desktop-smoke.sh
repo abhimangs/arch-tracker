@@ -3,12 +3,12 @@
 # records: that it finds the desktop on its own, which window has focus, and that focus changes
 # are followed. Everything runs on a private D-Bus session with throwaway folders.
 #
-#   cargo build && scripts/desktop-smoke.sh sway
+#   cargo build && scripts/desktop-smoke.sh sway    (or gnome)
 #
 # Environment: ARCH_TRACKER_BIN (default target/debug/arch-tracker).
 set -euo pipefail
 
-desk=${1:?usage: desktop-smoke.sh sway}
+desk=${1:?usage: desktop-smoke.sh sway|gnome}
 bin=$(realpath "${ARCH_TRACKER_BIN:-target/debug/arch-tracker}")
 root=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d)
@@ -77,6 +77,31 @@ EOF
     wait_for ".focus.program == \"cat\"" "focus follows a new window"
     swaymsg -q "focus left"
     wait_for ".focus.program == \"sleep\"" "focus follows swaymsg"
+  '
+  ;;
+gnome)
+  ext="$XDG_DATA_HOME/gnome-shell/extensions/arch-tracker@archtracker.dev"
+  mkdir -p "$ext"
+  cp "$root"/gnome/arch-tracker@archtracker.dev/* "$ext/"
+  dbus-run-session -- bash -c "$HELPERS"'
+    set -euo pipefail
+    gsettings set org.gnome.shell enabled-extensions "[\"arch-tracker@archtracker.dev\"]"
+    gsettings set org.gnome.shell disable-user-extensions false
+    XDG_SESSION_TYPE=wayland gnome-shell --headless --wayland --virtual-monitor 1280x800 \
+      >"$TMP/gnome.log" 2>&1 &
+    export WAYLAND_DISPLAY=$(wayland_socket)
+    XDG_CURRENT_DESKTOP=GNOME "$BIN" daemon >"$TMP/daemon.log" 2>&1 &
+    foot sleep 600 >"$TMP/foot1.log" 2>&1 &
+    first=$!
+    wait_for ".sources.kwin.desktop == \"GNOME\" and .sources.kwin.ok" "the extension sends GNOME'"'"'s windows"
+    wait_for ".focus.app == \"foot\" and .focus.program == \"sleep\"" "focus on the terminal and what runs in it"
+    foot cat >"$TMP/foot2.log" 2>&1 &
+    wait_for ".focus.program == \"cat\"" "focus follows a new window"
+    # What a click on an agent'"'"'s notice does: the extension raises the first window.
+    gdbus call --session --dest org.gnome.Shell --object-path /dev/archtracker/Gnome \
+      --method dev.archtracker.Gnome1.Activate "[uint32 $first]" "" >/dev/null
+    wait_for ".focus.program == \"sleep\"" "the extension raises a window when asked"
+    wait_for ".sources.idle.ok" "idle time from Mutter'"'"'s idle monitor"
   '
   ;;
 *)
