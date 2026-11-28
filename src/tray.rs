@@ -178,48 +178,71 @@ fn clock(ms: i64) -> Option<String> {
 
 // ---------- icon ----------
 
-#[derive(Clone, Copy)]
-struct Shape {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    r: f32,
-    rgb: u32,
-}
+// The app icon (web-ui/icon.svg) in its 32-unit grid: the day as an arch, the time so far white,
+// the rest of the day dim and now a red dot. Paused: the arch greys out and the dot goes.
+const ARCH_R: f32 = 7.5;
+const ARCH_W: f32 = 4.4;
+/// Centre of the crown; the legs run straight down from here to the base.
+const ARCH_TOP: f32 = 15.0;
+const ARCH_BASE: f32 = 27.0;
+const NOW: (f32, f32) = (21.5, 9.9);
 
-/// The app icon (web-ui/icon.svg), in its 32-unit grid. Paused: grey bars, no "now" line.
-fn shapes(paused: bool) -> Vec<Shape> {
-    let s = |x, y, w, h, r, rgb| Shape { x, y, w, h, r, rgb };
-    let bar = |rgb: u32| if paused { 0x6b7392 } else { rgb };
-    let mut v = vec![
-        s(0.0, 0.0, 32.0, 32.0, 7.0, 0x121a33),
-        s(5.0, 17.0, 3.0, 9.0, 1.0, bar(0x6f9ee8)),
-        s(10.0, 11.0, 3.0, 15.0, 1.0, bar(0x6f9ee8)),
-        s(15.0, 14.0, 3.0, 12.0, 1.0, bar(0xb49be8)),
-        s(20.0, 8.0, 3.0, 18.0, 1.0, bar(0xef6f5e)),
-        s(25.0, 19.0, 3.0, 7.0, 1.0, bar(0x7cc59a)),
-    ];
-    if !paused {
-        v.push(s(18.6, 4.0, 1.2, 24.0, 0.0, 0xe5533d));
-    }
-    v
-}
-
-fn inside(sh: &Shape, px: f32, py: f32) -> bool {
-    if px < sh.x || py < sh.y || px > sh.x + sh.w || py > sh.y + sh.h {
+fn in_round_rect(px: f32, py: f32, (x, y, w, h, r): (f32, f32, f32, f32, f32)) -> bool {
+    if px < x || py < y || px > x + w || py > y + h {
         return false;
     }
-    let r = sh.r.min(sh.w / 2.0).min(sh.h / 2.0);
-    let cx = px.clamp(sh.x + r, sh.x + sh.w - r);
-    let cy = py.clamp(sh.y + r, sh.y + sh.h - r);
+    let cx = px.clamp(x + r, x + w - r);
+    let cy = py.clamp(y + r, y + h - r);
     (px - cx).powi(2) + (py - cy).powi(2) <= r * r
+}
+
+/// Whether (px, py) is on the arch's stroke, and if so whether it lies before now.
+fn on_arch(px: f32, py: f32) -> Option<bool> {
+    use std::f32::consts::PI;
+    let half = ARCH_W / 2.0;
+    if py > ARCH_BASE {
+        return None;
+    }
+    if py >= ARCH_TOP {
+        if (px - (16.0 - ARCH_R)).abs() <= half {
+            return Some(true);
+        }
+        return ((px - (16.0 + ARCH_R)).abs() <= half).then_some(false);
+    }
+    let (dx, dy) = (px - 16.0, ARCH_TOP - py);
+    if ((dx * dx + dy * dy).sqrt() - ARCH_R).abs() > half {
+        return None;
+    }
+    // Angle from the left leg (0) over the crown to the right leg (pi).
+    let now = PI - (ARCH_TOP - NOW.1).atan2(NOW.0 - 16.0);
+    Some(PI - dy.atan2(dx) <= now)
+}
+
+fn icon_pixel(px: f32, py: f32, paused: bool) -> Option<u32> {
+    const BG: u32 = 0x0a0a0a;
+    let near_now = |r: f32| (px - NOW.0).powi(2) + (py - NOW.1).powi(2) <= r * r;
+    if !paused && near_now(2.5) {
+        return Some(0xe5533d);
+    }
+    if !paused && near_now(3.6) {
+        return Some(BG);
+    }
+    if let Some(past) = on_arch(px, py) {
+        return Some(match (paused, past) {
+            (false, true) => 0xededed,
+            (true, true) => 0x6b6b6b,
+            (_, false) => 0x333333,
+        });
+    }
+    if in_round_rect(px, py, (0.6, 0.6, 30.8, 30.8, 6.9)) {
+        return Some(BG);
+    }
+    in_round_rect(px, py, (0.0, 0.0, 32.0, 32.0, 7.5)).then_some(0x2a2a2a)
 }
 
 /// ARGB32 in network byte order, as StatusNotifierItem wants; 4x4 supersampled.
 fn render(size: i32, paused: bool) -> Pixmap {
     const SS: i32 = 4;
-    let shapes = shapes(paused);
     let scale = 32.0 / size as f32;
     let mut out = Vec::with_capacity((size * size * 4) as usize);
     for y in 0..size {
@@ -229,11 +252,11 @@ fn render(size: i32, paused: bool) -> Pixmap {
                 for sx in 0..SS {
                     let px = (x as f32 + (sx as f32 + 0.5) / SS as f32) * scale;
                     let py = (y as f32 + (sy as f32 + 0.5) / SS as f32) * scale;
-                    if let Some(sh) = shapes.iter().rev().find(|sh| inside(sh, px, py)) {
+                    if let Some(rgb) = icon_pixel(px, py, paused) {
                         a += 1.0;
-                        r += ((sh.rgb >> 16) & 0xff) as f32;
-                        g += ((sh.rgb >> 8) & 0xff) as f32;
-                        b += (sh.rgb & 0xff) as f32;
+                        r += ((rgb >> 16) & 0xff) as f32;
+                        g += ((rgb >> 8) & 0xff) as f32;
+                        b += (rgb & 0xff) as f32;
                     }
                 }
             }
@@ -768,6 +791,37 @@ mod tests {
         assert_eq!(px[0], 0);
         let mid = ((11 * 22 + 11) * 4) as usize;
         assert_eq!(px[mid], 255);
+    }
+
+    #[test]
+    fn icon_matches_the_svg() {
+        // Left leg: time so far; right leg: the rest of the day; now: the red dot.
+        assert_eq!(icon_pixel(8.5, 22.0, false), Some(0xededed));
+        assert_eq!(icon_pixel(23.5, 22.0, false), Some(0x333333));
+        assert_eq!(icon_pixel(NOW.0, NOW.1, false), Some(0xe5533d));
+        // The crown before now is white, the inside of the arch is background.
+        assert_eq!(icon_pixel(16.0, 7.5, false), Some(0xededed));
+        assert_eq!(icon_pixel(16.0, 20.0, false), Some(0x0a0a0a));
+        // Paused: no red anywhere, the time so far greys out.
+        assert_eq!(icon_pixel(NOW.0, NOW.1, true), Some(0x6b6b6b));
+        assert_eq!(icon_pixel(8.5, 22.0, true), Some(0x6b6b6b));
+        let svg = include_str!("../web-ui/icon.svg");
+        assert!(svg.contains(&format!("cx=\"{}\" cy=\"{}\"", NOW.0, NOW.1)));
+    }
+
+    #[test]
+    #[ignore = "writes the tray icon as PPM files for a visual check"]
+    fn dump_icon() {
+        let dir = std::env::var("ICON_DUMP").unwrap();
+        for paused in [false, true] {
+            let (w, h, px) = render(64, paused);
+            let mut ppm = format!("P6 {w} {h} 255\n").into_bytes();
+            for p in px.chunks(4) {
+                let a = p[0] as u32;
+                ppm.extend(p[1..].iter().map(|&c| (c as u32 * a / 255) as u8));
+            }
+            std::fs::write(format!("{dir}/tray-{paused}.ppm"), ppm).unwrap();
+        }
     }
 
     #[test]

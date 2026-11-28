@@ -1,4 +1,4 @@
-# arch-tracker
+# <img src="web-ui/icon.svg" width="40" align="top" alt=""> arch-tracker
 
 [![CI](https://github.com/abhimangs/arch-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/abhimangs/arch-tracker/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/abhimangs/arch-tracker)](https://github.com/abhimangs/arch-tracker/releases)
@@ -6,8 +6,8 @@
 
 Screen time for KDE Plasma, GNOME, Hyprland and Sway on Wayland. arch-tracker records which app has your focus, which sites
 you use (with subdomains kept apart), what runs in your terminal, and how long your AI coding agents
-work, then shows it all in a local dashboard with a tray icon. It runs as a small user service (about
-12 MB of memory, close to 0 % CPU) and nothing leaves your computer.
+work, then shows it all in a local dashboard with a tray icon. It runs as a small user service (under
+20 MB of memory, close to 0 % CPU) and nothing leaves your computer.
 
 ![Now: the focused window with a live timer, the windows beside it, agents, media and the tracker's health](docs/screenshots/now.png)
 
@@ -262,8 +262,9 @@ See [SECURITY.md](SECURITY.md) for the threat model and how to report a problem.
 
 ## Resource use
 
-Measured on a running daemon: about 11.5 MB resident, of which about 2 MB is its own memory (the
-rest is the shared executable), and about 0.1 % of one core. The dashboard server idles inside the
+Measured on a running daemon after three hours: about 18 MB resident, of which about 6 MB is its own
+memory (the rest is the executable and the system libraries it maps, shared with other programs), and
+about 0.1 % of one core (16 seconds of CPU in those three hours). The dashboard server idles inside the
 same process at no measurable cost, and the tray icon uses the existing D-Bus connection. The
 systemd unit caps memory at 64 MB.
 
