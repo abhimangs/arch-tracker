@@ -4,7 +4,7 @@
 
 pkgname=arch-tracker-bin
 _name=arch-tracker
-pkgver=0.1.1
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Local screen-time and activity tracker for KDE Plasma, GNOME, Hyprland and Sway on Wayland (prebuilt)"
 arch=('x86_64')
@@ -20,7 +20,7 @@ conflicts=("$_name")
 install=arch-tracker.install
 options=('!debug' '!strip')
 source=("$url/releases/download/v$pkgver/$_name-$pkgver-x86_64-linux.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('313e7ed98837a8d26fab90782768ea4acfbba529d640d09e9de27089f96a7343')
 
 package() {
   cd "$_name-$pkgver-x86_64-linux"

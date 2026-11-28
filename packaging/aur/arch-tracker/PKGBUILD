@@ -3,7 +3,7 @@
 # after each release; packaging/install-files.sh (in the source) installs the files.
 
 pkgname=arch-tracker
-pkgver=0.1.1
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Local screen-time and activity tracker for KDE Plasma, GNOME, Hyprland and Sway on Wayland"
 arch=('x86_64')
@@ -18,7 +18,7 @@ optdepends=('plasma-browser-integration: fallback for browser tabs when the exte
 install=arch-tracker.install
 options=('!lto' '!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('d105a93eab507d01f2dfb975292f31b313765c4834e9cc37536dc8e4d88ea397')
 
 prepare() {
   cd "$pkgname-$pkgver"
