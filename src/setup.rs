@@ -13,6 +13,8 @@ pub const GECKO_ID: &str = "arch-tracker@abhimangs.github.io";
 const MANIFEST: &str = include_str!("../extension/manifest.json");
 const FIREFOX_MANIFEST: &str = include_str!("../extension/manifest.firefox.json");
 const BACKGROUND: &str = include_str!("../extension/background.js");
+/// The extension's icon: web-ui/icon.svg at 128 px (rsvg-convert -w 128 -h 128).
+const ICON: &[u8] = include_bytes!("../extension/icon.png");
 /// Where the package installs both unpacked builds (see packaging/PKGBUILD).
 const PACKAGED: &str = "/usr/share/arch-tracker";
 pub const RELEASES: &str = "https://github.com/abhimangs/arch-tracker/releases";
@@ -359,7 +361,11 @@ pub fn write_extension() -> Result<Extensions> {
     if !chromium.starts_with(PACKAGED) {
         write_files(
             &chromium,
-            &[("manifest.json", MANIFEST), ("background.js", BACKGROUND)],
+            &[
+                ("manifest.json", MANIFEST.as_bytes()),
+                ("background.js", BACKGROUND.as_bytes()),
+                ("icon.png", ICON),
+            ],
         )?;
     }
     let firefox = firefox_extension_dir();
@@ -367,8 +373,9 @@ pub fn write_extension() -> Result<Extensions> {
         write_files(
             &firefox,
             &[
-                ("manifest.json", FIREFOX_MANIFEST),
-                ("background.js", BACKGROUND),
+                ("manifest.json", FIREFOX_MANIFEST.as_bytes()),
+                ("background.js", BACKGROUND.as_bytes()),
+                ("icon.png", ICON),
             ],
         )?;
     }
@@ -376,6 +383,7 @@ pub fn write_extension() -> Result<Extensions> {
     let xpi = zip_store(&[
         ("manifest.json", FIREFOX_MANIFEST.as_bytes()),
         ("background.js", BACKGROUND.as_bytes()),
+        ("icon.png", ICON),
     ]);
     if let Some(d) = firefox_xpi.parent() {
         std::fs::create_dir_all(d)?;
@@ -389,7 +397,7 @@ pub fn write_extension() -> Result<Extensions> {
     })
 }
 
-fn write_files(dir: &Path, files: &[(&str, &str)]) -> Result<()> {
+fn write_files(dir: &Path, files: &[(&str, &[u8])]) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     for (name, text) in files {
         std::fs::write(dir.join(name), text)
@@ -398,7 +406,7 @@ fn write_files(dir: &Path, files: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-/// A zip archive (an .xpi) of `files`, stored uncompressed: two small text files.
+/// A zip archive (an .xpi) of `files`, stored uncompressed: a few small files.
 fn zip_store(files: &[(&str, &[u8])]) -> Vec<u8> {
     const DOS_DATE: u16 = (1 << 5) | 1; // 1980-01-01, midnight: no build-time noise
     let mut out = vec![];
@@ -818,6 +826,17 @@ mod tests {
             "the key fixes the extension ID"
         );
         assert!(firefox.get("key").is_none());
+    }
+
+    #[test]
+    fn extension_icon_is_a_128px_png_both_manifests_use() {
+        assert_eq!(&ICON[..8], b"\x89PNG\r\n\x1a\n");
+        let be32 = |i: usize| u32::from_be_bytes(ICON[i..i + 4].try_into().unwrap());
+        assert_eq!((be32(16), be32(20)), (128, 128));
+        for m in [MANIFEST, FIREFOX_MANIFEST] {
+            let v: serde_json::Value = serde_json::from_str(m).unwrap();
+            assert_eq!(v["icons"]["128"], "icon.png");
+        }
     }
 
     #[test]

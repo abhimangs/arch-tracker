@@ -1,6 +1,7 @@
 #!/bin/sh
 # Installs arch-tracker's files into a package: the binary, the systemd user unit, both browser
-# extensions and the Firefox bridge, the GNOME Shell extension, the man page and the license.
+# extensions and the Firefox bridge, the GNOME Shell extension, the app icon, the man page and the
+# license.
 # Every PKGBUILD calls it (packaging/ and packaging/aur/*), so they all install the same files.
 #
 #   install-files.sh <source tree> <binary> <pkgdir> <pkgname>
@@ -11,8 +12,12 @@ install -Dm755 "$bin" "$pkg/usr/bin/arch-tracker"
 install -Dm644 "$src/packaging/arch-tracker.service" "$pkg/usr/lib/systemd/user/arch-tracker.service"
 install -Dm644 "$src/extension/manifest.json" "$pkg/usr/share/arch-tracker/extension/manifest.json"
 install -Dm644 "$src/extension/background.js" "$pkg/usr/share/arch-tracker/extension/background.js"
+install -Dm644 "$src/extension/icon.png" "$pkg/usr/share/arch-tracker/extension/icon.png"
 install -Dm644 "$src/extension/manifest.firefox.json" "$pkg/usr/share/arch-tracker/extension-firefox/manifest.json"
 install -Dm644 "$src/extension/background.js" "$pkg/usr/share/arch-tracker/extension-firefox/background.js"
+install -Dm644 "$src/extension/icon.png" "$pkg/usr/share/arch-tracker/extension-firefox/icon.png"
+# The app icon, for notifications and anything else that looks it up by name.
+install -Dm644 "$src/web-ui/icon.svg" "$pkg/usr/share/icons/hicolor/scalable/apps/arch-tracker.svg"
 # Firefox, Zen, Floorp and Waterfox read this system-wide bridge; LibreWolf its own folder.
 install -Dm644 "$src/packaging/dev.archtracker.native.firefox.json" "$pkg/usr/lib/mozilla/native-messaging-hosts/dev.archtracker.native.json"
 install -Dm644 "$src/packaging/dev.archtracker.native.firefox.json" "$pkg/usr/lib/librewolf/native-messaging-hosts/dev.archtracker.native.json"

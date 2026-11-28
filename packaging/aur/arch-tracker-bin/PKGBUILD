@@ -10,7 +10,7 @@ pkgdesc="Local screen-time and activity tracker for KDE Plasma, GNOME, Hyprland 
 arch=('x86_64')
 url="https://github.com/abhimangs/arch-tracker"
 license=('MIT')
-depends=('sqlite' 'gcc-libs' 'glibc')
+depends=('sqlite' 'gcc-libs' 'glibc' 'hicolor-icon-theme')
 optdepends=('plasma-browser-integration: fallback for browser tabs when the extension is not loaded'
             'kitty: exact terminal tab tracking through remote control'
             'tmux: see inside tmux panes'

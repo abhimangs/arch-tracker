@@ -13,9 +13,10 @@ name="arch-tracker-$v-x86_64-linux"
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 d="$stage/$name"
-mkdir -p "$d/packaging" "$d/extension" "$d/gnome/arch-tracker@archtracker.dev"
+mkdir -p "$d/packaging" "$d/extension" "$d/web-ui" "$d/gnome/arch-tracker@archtracker.dev"
 install -m755 "$bin" "$d/arch-tracker"
-cp "$root"/extension/{manifest.json,manifest.firefox.json,background.js} "$d/extension/"
+cp "$root"/extension/{manifest.json,manifest.firefox.json,background.js,icon.png} "$d/extension/"
+cp "$root"/web-ui/icon.svg "$d/web-ui/"
 cp "$root"/gnome/arch-tracker@archtracker.dev/{metadata.json,extension.js} "$d/gnome/arch-tracker@archtracker.dev/"
 cp "$root"/packaging/{arch-tracker.service,arch-tracker.1,arch-tracker.install,dev.archtracker.native.firefox.json,install-files.sh} "$d/packaging/"
 cp "$root"/{README.md,LICENSE,CHANGELOG.md} "$d/"

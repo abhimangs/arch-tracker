@@ -15,7 +15,7 @@ use crate::report::{self, DayReport};
 use crate::web::Web;
 use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -586,6 +586,23 @@ fn stretch(d: &DayReport, gap: i64) -> Option<(i64, i64)> {
     cur
 }
 
+/// The app's own icon when the package installed it, else a theme icon every desktop has.
+fn app_icon() -> &'static str {
+    static ICON: std::sync::OnceLock<&str> = std::sync::OnceLock::new();
+    ICON.get_or_init(|| {
+        let installed = ["/usr/share", "/usr/local/share"].iter().any(|d| {
+            Path::new(d)
+                .join("icons/hicolor/scalable/apps/arch-tracker.svg")
+                .exists()
+        });
+        if installed {
+            "arch-tracker"
+        } else {
+            "appointment-soon"
+        }
+    })
+}
+
 async fn notify(conn: &Connection, n: &Note, replaces: u32, sound: bool) -> zbus::Result<u32> {
     let mut hints: HashMap<&str, Variant<'_>> = HashMap::new();
     hints.insert("urgency", Variant::from(1u8));
@@ -608,7 +625,7 @@ async fn notify(conn: &Connection, n: &Note, replaces: u32, sound: bool) -> zbus
             &(
                 "arch-tracker",
                 replaces,
-                "appointment-soon",
+                app_icon(),
                 n.summary.as_str(),
                 n.body.as_str(),
                 vec!["default", open],

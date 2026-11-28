@@ -10,6 +10,7 @@ pkgbase = arch-tracker
 	depends = sqlite
 	depends = gcc-libs
 	depends = glibc
+	depends = hicolor-icon-theme
 	optdepends = plasma-browser-integration: fallback for browser tabs when the extension is not loaded
 	optdepends = kitty: exact terminal tab tracking through remote control
 	optdepends = tmux: see inside tmux panes
