@@ -24,6 +24,9 @@ pub struct DesktopIndex {
     by_wmclass: HashMap<String, Arc<Entry>>,
 }
 
+/// Folders below applications/ that are searched (vendor subfolders nest one or two deep).
+const MAX_DEPTH: usize = 6;
+
 fn data_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![];
     match std::env::var("XDG_DATA_HOME") {
@@ -42,28 +45,34 @@ impl DesktopIndex {
     pub fn load() -> DesktopIndex {
         let mut idx = DesktopIndex::default();
         for d in data_dirs() {
-            idx.scan(&d.join("applications"), &d.join("applications"));
+            idx.scan(&d.join("applications"), &d.join("applications"), 0);
         }
         // Autostart entries (scripts like copyq-start.sh) only fill gaps.
         idx.scan(
             &crate::util::home().join(".config/autostart"),
             &crate::util::home().join(".config/autostart"),
+            0,
         );
         idx.scan(
             Path::new("/etc/xdg/autostart"),
             Path::new("/etc/xdg/autostart"),
+            0,
         );
         idx
     }
 
-    fn scan(&mut self, dir: &Path, root: &Path) {
+    fn scan(&mut self, dir: &Path, root: &Path, depth: usize) {
         let Ok(rd) = std::fs::read_dir(dir) else {
             return;
         };
         for ent in rd.flatten() {
             let p = ent.path();
             if p.is_dir() {
-                self.scan(&p, root);
+                // Linked folders are followed (some installers link theirs in), so a link
+                // back up would recurse forever: entries are never nested this deep.
+                if depth < MAX_DEPTH {
+                    self.scan(&p, root, depth + 1);
+                }
                 continue;
             }
             if p.extension().and_then(|e| e.to_str()) != Some("desktop") {
@@ -376,6 +385,30 @@ fn parse_entry(path: &Path, id: &str) -> Option<Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_linked_to_itself_is_not_followed_forever() {
+        let dir = std::env::temp_dir().join(format!(
+            "at-desktop-loop-{}-{}",
+            std::process::id(),
+            crate::util::now_ms()
+        ));
+        let apps = dir.join("applications");
+        std::fs::create_dir_all(apps.join("vendor")).unwrap();
+        std::fs::write(
+            apps.join("vendor/example-notes.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Notes\nExec=notes\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&apps, apps.join("vendor/again")).unwrap();
+        let mut idx = DesktopIndex::default();
+        idx.scan(&apps, &apps, 0);
+        assert_eq!(
+            idx.by_id("vendor-example-notes").map(|e| e.name.as_str()),
+            Some("Notes")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn pretty_names() {

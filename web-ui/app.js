@@ -2258,6 +2258,9 @@
     const d = c.dashboard;
     const nt = c.notifications || s.defaults.notifications;
     let cats = c.categories.map((x) => ({ ...x }));
+    // The deep-work checklist is drawn from the categories as loaded: this finds each edited
+    // category's row there, so a category renamed in this form keeps its tick.
+    const origOf = new Map(cats.map((x, i) => [x, i]));
     const tools = c.agents.tools.map((t) => `${t.id} | ${t.name} | ${t.matches.join(", ")}`).join("\n");
     const t0 = today();
     const sec = (id, title, body, sub = "") => `<fieldset id="s-${id}"><legend>${esc(title)}</legend>${sub ? `<p class="sub">${esc(sub)}</p>` : ""}${body}</fieldset>`;
@@ -2529,7 +2532,7 @@
         daily_goal_mins: Math.round(n("goal") * 60),
         session_gap_secs: n("sgap"),
         deep_work_mins: n("deep"),
-        deep_work_categories: c.categories.filter((_, i) => $("dwc" + i)?.checked).map((k) => k.name),
+        deep_work_categories: cats.filter((x) => x.name && origOf.has(x) && $("dwc" + origOf.get(x))?.checked).map((x) => x.name),
       };
       next.projects = {
         editors: unlines($("editors").value),
