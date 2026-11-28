@@ -255,6 +255,10 @@ async fn sleep_until_opt(t: Option<tokio::time::Instant>) {
     }
 }
 
+/// A save shows up as a burst of file events (an editor's truncate and write, our own rename):
+/// the file is read once the burst has been quiet this long.
+const CONFIG_SETTLE: Duration = Duration::from_millis(300);
+
 /// Reloads config.toml when it changes on disk (hand edits and dashboard saves).
 fn watch_config(tx: mpsc::UnboundedSender<Event>) -> Result<notify::RecommendedWatcher> {
     use notify::Watcher;
@@ -263,25 +267,43 @@ fn watch_config(tx: mpsc::UnboundedSender<Event>) -> Result<notify::RecommendedW
         .parent()
         .context("config path has no directory")?
         .to_path_buf();
+    let (ping, mut pings) = mpsc::unbounded_channel::<()>();
     let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         let Ok(ev) = res else { return };
         if !ev.paths.iter().any(|p| p.file_name() == path.file_name()) {
             return;
         }
-        if !(ev.kind.is_modify() || ev.kind.is_create()) {
-            return;
-        }
-        match Config::load() {
-            Ok(c) => {
-                let _ = tx.send(Event::ConfigChanged(Box::new(c)));
-            }
-            Err(e) => {
-                tracing::warn!("config.toml has an error, keeping the previous settings: {e:#}");
-                let _ = tx.send(Event::ConfigError(format!("{e:#}")));
-            }
+        if ev.kind.is_modify() || ev.kind.is_create() {
+            let _ = ping.send(());
         }
     })?;
     w.watch(&dir, notify::RecursiveMode::NonRecursive)?;
+    tokio::spawn(async move {
+        while pings.recv().await.is_some() {
+            // Wait for the burst to end, so a half-written file is never read.
+            loop {
+                tokio::time::sleep(CONFIG_SETTLE).await;
+                let mut more = false;
+                while pings.try_recv().is_ok() {
+                    more = true;
+                }
+                if !more {
+                    break;
+                }
+            }
+            match Config::load() {
+                Ok(c) => {
+                    let _ = tx.send(Event::ConfigChanged(Box::new(c)));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "config.toml has an error, keeping the previous settings: {e:#}"
+                    );
+                    let _ = tx.send(Event::ConfigError(format!("{e:#}")));
+                }
+            }
+        }
+    });
     Ok(w)
 }
 

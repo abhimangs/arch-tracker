@@ -451,9 +451,12 @@ impl Tracker {
                 let _ = reply.send(resp);
             }
             Event::ConfigChanged(cfg) => {
-                tracing::info!("config reloaded");
                 self.config_error = None;
-                self.set_config(*cfg);
+                // A save is seen more than once (the dashboard's own notice, then the file
+                // watcher): only a real change is a reload.
+                if self.set_config(*cfg) {
+                    tracing::info!("config reloaded");
+                }
             }
             Event::ConfigError(e) => self.config_error = Some(e),
             Event::Kwin(snap) => {
@@ -504,10 +507,15 @@ impl Tracker {
                 self.ledger.set_flag(Kind::InputIdle, false, now);
             }
             Event::Locked(l) => {
-                tracing::info!("screen {}", if l { "locked" } else { "unlocked" });
+                // KDE signals a lock on two object paths, and the first query at start repeats
+                // what is already known: only a change is news.
+                let was = self.locked();
                 self.screensaver_locked = l;
                 if !l {
                     self.logind_locked = false;
+                }
+                if self.locked() != was {
+                    tracing::info!("screen {}", if l { "locked" } else { "unlocked" });
                 }
             }
             Event::Sleep { going, done } => {
@@ -611,9 +619,10 @@ impl Tracker {
         self.cfg.general.sample_interval_secs
     }
 
-    fn set_config(&mut self, cfg: Config) {
+    /// Applies new settings; false when nothing changed.
+    fn set_config(&mut self, cfg: Config) -> bool {
         if cfg == self.cfg {
-            return;
+            return false;
         }
         self.title_res = cfg.title_regexes();
         let vis_changed = cfg.visibility != self.cfg.visibility;
@@ -624,6 +633,7 @@ impl Tracker {
         if let Ok(mut s) = self.shared.lock() {
             s.config = self.cfg.clone();
         }
+        true
     }
 
     /// Periodic work: pause expiry, clock jumps, sampling, flushing (the ledger splits spans at
@@ -882,7 +892,9 @@ impl Tracker {
             Request::Reload => match crate::config::Config::load() {
                 Ok(c) => {
                     self.config_error = None;
-                    self.set_config(c);
+                    if self.set_config(c) {
+                        tracing::info!("config reloaded");
+                    }
                     json!({"ok": true})
                 }
                 Err(e) => {
@@ -1405,6 +1417,9 @@ impl Tracker {
         self.ledger
             .set_flag(Kind::Locked, locked && !suspended, now);
         self.ledger.set_flag(Kind::Suspended, suspended, now);
+        // Normally opened (back-dated) by the idle notification itself; this reopens a gap that a
+        // clock jump closed, so the rest of it is not counted as screen time.
+        self.ledger.set_flag(Kind::InputIdle, self.input_idle, now);
         self.ledger
             .set_flag(Kind::Inhibited, self.inhibited() && !suspended, now);
         self.ledger
@@ -1750,6 +1765,40 @@ mod tests {
         let idle = kinds_in_db(&t, Kind::InputIdle);
         assert_eq!(idle.len(), 1);
         assert!(idle[0].1 <= now_ms(), "the idle span was closed");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_clock_jump_keeps_an_idle_gap_open() {
+        let mut t = test_tracker();
+        let at = now_ms();
+        t.handle(Event::Idle {
+            input: true,
+            idle: true,
+            at,
+        })
+        .await;
+        // What tick() does when the wall clock jumps: every open span ends there.
+        t.ledger.close_all(at + 1_000);
+        t.reconcile(at + 1_000);
+        t.flush(at + 60_000);
+        let idle = kinds_in_db(&t, Kind::InputIdle);
+        assert_eq!(idle.len(), 2, "{idle:?}");
+        assert_eq!(
+            idle[1],
+            (at + 1_000, at + 60_000),
+            "the gap goes on after the jump"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn repeated_lock_signals_change_nothing() {
+        let mut t = test_tracker();
+        t.handle(Event::Locked(true)).await;
+        t.handle(Event::Locked(true)).await;
+        assert!(t.locked());
+        t.logind_locked = true;
+        t.handle(Event::Locked(false)).await;
+        assert!(!t.locked(), "an unlock clears logind's hint too");
     }
 
     #[tokio::test(flavor = "current_thread")]
