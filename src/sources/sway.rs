@@ -82,6 +82,22 @@ async fn run(sock: &Path, tx: &UnboundedSender<Event>) -> Result<()> {
     if !String::from_utf8_lossy(&ok).contains("true") {
         bail!("sway refused the subscription");
     }
+    // Events are read by a task of their own: read_msg is not cancel-safe, and dropping it
+    // halfway through a message (when the settle timer wins the select) would lose its start
+    // and leave every later read out of step.
+    let (seen, mut changes) = tokio::sync::mpsc::channel::<()>(1);
+    let mut reader = tokio::spawn(async move {
+        loop {
+            if let Err(e) = read_msg(&mut events).await {
+                return e;
+            }
+            // A change is already waiting: one more says nothing new.
+            if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = seen.try_send(()) {
+                return anyhow::anyhow!("stopped");
+            }
+        }
+    });
+    let _stop = AbortOnDrop(reader.abort_handle());
     send(sock, tx).await?;
     tracing::info!("Sway window tracking started");
     let mut due: Option<tokio::time::Instant> = None;
@@ -95,8 +111,11 @@ async fn run(sock: &Path, tx: &UnboundedSender<Event>) -> Result<()> {
             }
         };
         tokio::select! {
-            m = read_msg(&mut events) => {
-                m?;
+            m = changes.recv() => {
+                if m.is_none() {
+                    let e = (&mut reader).await.unwrap_or_else(|e| anyhow::anyhow!("{e}"));
+                    return Err(e.context("reading sway's events"));
+                }
                 if due.is_none() {
                     due = Some(tokio::time::Instant::now() + SETTLE);
                 }
@@ -110,6 +129,15 @@ async fn run(sock: &Path, tx: &UnboundedSender<Event>) -> Result<()> {
         if tx.is_closed() {
             return Ok(());
         }
+    }
+}
+
+/// Stops the event reader when run() returns, whichever way.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

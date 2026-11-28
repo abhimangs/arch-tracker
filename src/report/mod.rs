@@ -637,7 +637,7 @@ pub fn classify(spans: &[Span], ds: i64, de: i64, r: &Rules) -> Vec<State> {
     let mut state = vec![State::Active; n];
     let mut gaps: Vec<(i64, i64)> = vec![];
     for s in spans {
-        let (a, b) = (sec(s.start), sec(s.end));
+        let (a, b) = (sec(s.start), sec(s.end.max(s.start)));
         match s.kind {
             Kind::MediaVisible => media[a..b].fill(true),
             Kind::Mic => mic[a..b].fill(true),
@@ -670,7 +670,7 @@ pub fn classify(spans: &[Span], ds: i64, de: i64, r: &Rules) -> Vec<State> {
     }
     for s in spans {
         if matches!(s.kind, Kind::Locked | Kind::Suspended | Kind::Paused) {
-            state[sec(s.start)..sec(s.end)].fill(State::Excluded);
+            state[sec(s.start)..sec(s.end.max(s.start))].fill(State::Excluded);
         }
     }
     state
@@ -881,12 +881,9 @@ fn compute_in(
 
     for s in spans {
         let Some(subj) = subjects.get(&s.subject) else {
-            if s.kind != Kind::Focus {
-                continue;
-            }
             continue;
         };
-        let (a, b) = (sec(s.start), sec(s.end));
+        let (a, b) = (sec(s.start), sec(s.end.max(s.start)));
         match s.kind {
             Kind::Focus => {
                 let mut t = Times::default();
@@ -2082,6 +2079,27 @@ mod tests {
 
     fn count(st: &[State], want: State) -> i64 {
         st.iter().filter(|s| **s == want).count() as i64
+    }
+
+    #[test]
+    fn a_span_that_ends_before_it_starts_is_empty() {
+        let spans = vec![
+            sp(Kind::Mic, 0, 10 * M, 5 * M),
+            sp(Kind::Locked, 0, 20 * M, 19 * M),
+            sp(Kind::Visible, 1, 30 * M, 29 * M),
+        ];
+        let st = classify(&spans, DS, DS + H, &rules());
+        assert_eq!(count(&st, State::Active), 3600);
+        let subjects = HashMap::from([(1, Subject::app("editor", "Editor"))]);
+        let r = compute(
+            &Config::default(),
+            "2001-09-09",
+            DS,
+            DS + H,
+            &spans,
+            &subjects,
+        );
+        assert_eq!(r.totals.visible, 0);
     }
 
     #[test]

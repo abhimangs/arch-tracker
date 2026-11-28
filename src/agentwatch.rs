@@ -241,7 +241,8 @@ fn note(a: &Live, what: What, work_ms: i64) -> Note {
 
 /// The end of a log, whole lines only: more of it when the end holds only large records.
 fn tail(path: &Path) -> Option<String> {
-    let mut f = std::fs::File::open(path).ok()?;
+    // Read-only like every other reader of these logs: no link followed, no access time changed.
+    let mut f = crate::sources::claude::open_read_only(path).ok()?;
     let len = f.metadata().ok()?.len();
     for want in [TAIL, TAIL_MORE] {
         let from = len.saturating_sub(want);
@@ -374,7 +375,7 @@ fn codex_rollout(pid: u32, cwd: &Path) -> Option<PathBuf> {
         // The first line names the folder the session runs in.
         let mut first = String::new();
         let _ = std::io::BufRead::read_line(
-            &mut std::io::BufReader::new(match std::fs::File::open(p) {
+            &mut std::io::BufReader::new(match crate::sources::claude::open_read_only(p) {
                 Ok(f) => f.take(64 * 1024),
                 Err(_) => return false,
             }),

@@ -403,7 +403,9 @@ pub fn spans_in(conn: &Connection, from: i64, to: i64) -> Result<Vec<Span>> {
                 kind,
                 subject,
                 start,
-                end: end.min(to),
+                // A row that ends before it starts (a clock that ran backwards, a hand edit)
+                // is empty, never negative.
+                end: end.min(to).max(start),
             });
         }
     }

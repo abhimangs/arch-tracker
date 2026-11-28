@@ -27,8 +27,8 @@ fn parse_stat(pid: u32, s: &str) -> Option<Stat> {
     // comm may contain spaces and parens: it ends at the last ')'.
     let open = s.find('(')?;
     let close = s.rfind(')')?;
-    let comm = s[open + 1..close].to_string();
-    let f: Vec<&str> = s[close + 2..].split(' ').collect();
+    let comm = s.get(open + 1..close)?.to_string();
+    let f: Vec<&str> = s.get(close + 2..)?.split(' ').collect();
     // f[0] = state (field 3), so field N is f[N - 3].
     let g = |n: usize| f.get(n - 3).copied().unwrap_or("0");
     Some(Stat {
