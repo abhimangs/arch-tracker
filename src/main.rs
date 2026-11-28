@@ -162,7 +162,9 @@ fn real_main() -> Result<()> {
             let until_ms = match duration.as_deref() {
                 None => None,
                 Some(d) => match util::parse_duration(d) {
-                    Some(ms) => Some(util::now_ms() + ms),
+                    // A pause of nothing would end before it began.
+                    Some(ms) if ms > 0 => Some(util::now_ms().saturating_add(ms)),
+                    Some(_) => bail!("a pause needs a length above zero (try 30m, 1h, 1h30m)"),
                     None => bail!("can't read duration {d:?} (try 30m, 1h, 1h30m)"),
                 },
             };
@@ -288,13 +290,19 @@ fn print_status(v: &serde_json::Value) {
     }
     println!("Sources");
     let src = |p: &str| v.pointer(&format!("/sources/{p}"));
-    let kwin = if flag("/sources/kwin/ok") {
+    let desktop = src("kwin/desktop")
+        .and_then(|d| d.as_str())
+        .unwrap_or("KDE Plasma");
+    let windows = if flag("/sources/kwin/ok") {
         let n = num("/sources/kwin/windows").unwrap_or(0);
-        format!("ok, {n} windows")
+        format!("ok, {n} from {desktop}")
+    } else if desktop == "KDE Plasma" {
+        "not reporting windows (the tracker reloads its KWin script; see arch-tracker doctor)"
+            .into()
     } else {
-        "not reporting windows (the tracker reloads its script; see arch-tracker doctor)".into()
+        format!("{desktop} is not reporting windows (see arch-tracker doctor)")
     };
-    println!("  kwin       {kwin}");
+    println!("  windows    {windows}");
     let idle = if flag("/sources/idle/ok") {
         let v = num("/sources/idle/protocol_version").unwrap_or(0);
         format!("ok, ext-idle-notify v{v}")

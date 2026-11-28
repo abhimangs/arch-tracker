@@ -338,13 +338,9 @@ pub async fn run() -> anyhow::Result<()> {
         );
     }
 
-    let rss = sh("ps", &["-o", "rss=", "-C", "arch-tracker"])
-        .and_then(|o| {
-            o.lines()
-                .map(|l| l.trim().parse::<u64>().unwrap_or(0))
-                .max()
-        })
-        .unwrap_or(0);
+    // The daemon measures itself; every arch-tracker process (this one, browser bridges) shares
+    // its name, so ps would not tell them apart.
+    let rss = s["usage"]["rss_bytes"].as_u64().unwrap_or(0) / 1024;
     if rss > 0 {
         r.line(
             // The target is under 15 MB; about 9 MB of that is the shared executable.

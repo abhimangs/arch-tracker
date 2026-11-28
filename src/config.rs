@@ -432,6 +432,11 @@ fn is_zero(v: &u64) -> bool {
     *v == 0
 }
 
+/// v, or the default when v is NaN or infinite (TOML allows both).
+fn finite_or(v: f64, default: f64) -> f64 {
+    if v.is_finite() { v } else { default }
+}
+
 impl Default for General {
     fn default() -> Self {
         General {
@@ -957,6 +962,22 @@ impl Config {
         self.notifications.limit_5h_percent = self.notifications.limit_5h_percent.clamp(1, 100);
         self.notifications.limit_week_percent = self.notifications.limit_week_percent.clamp(1, 100);
         self.notifications.agent_quiet_secs = self.notifications.agent_quiet_secs.clamp(5, 600);
+        // The rest of what validate() checks, so a hand-edited value never leaves the dashboard
+        // unable to save Settings.
+        let ins = &mut self.insights;
+        ins.session_gap_secs = ins.session_gap_secs.clamp(5, 3600);
+        ins.deep_work_mins = ins.deep_work_mins.clamp(5, 480);
+        ins.daily_goal_mins = ins.daily_goal_mins.min(24 * 60);
+        let vis = &mut self.visibility;
+        vis.min_fraction =
+            finite_or(vis.min_fraction, Visibility::default().min_fraction).clamp(0.01, 1.0);
+        vis.min_pixels = vis.min_pixels.max(0);
+        let ag = &mut self.agents;
+        let d = Agents::default();
+        ag.busy_cpu_percent = finite_or(ag.busy_cpu_percent, d.busy_cpu_percent).clamp(0.1, 400.0);
+        ag.busy_child_cpu_percent =
+            finite_or(ag.busy_child_cpu_percent, d.busy_child_cpu_percent).clamp(0.1, 1600.0);
+        ag.busy_write_bytes = ag.busy_write_bytes.min(10_000_000);
         if self.dashboard.port < 1024 {
             self.dashboard.port = 7600;
         }
@@ -1506,6 +1527,20 @@ mod tests {
         assert_eq!(cfg.sanitized().dashboard.start_page, "now");
         let cfg: Config = toml::from_str("[dashboard]\nstart_page = \"nope\"\n").unwrap();
         assert_eq!(cfg.sanitized().dashboard.start_page, "today");
+    }
+
+    #[test]
+    fn hand_edited_values_still_pass_validation() {
+        let cfg: Config = toml::from_str(
+            "[insights]\nsession_gap_secs = 0\ndeep_work_mins = 9999\n\
+             [visibility]\nmin_fraction = nan\n[agents]\nbusy_cpu_percent = -3.0\n",
+        )
+        .unwrap();
+        assert!(cfg.validate().is_err());
+        let cfg = cfg.sanitized();
+        assert_eq!(cfg.validate(), Ok(()));
+        assert_eq!(cfg.insights.session_gap_secs, 5);
+        assert_eq!(cfg.visibility.min_fraction, 0.05);
     }
 
     #[test]

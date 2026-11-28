@@ -2742,7 +2742,12 @@
       out.push(`<div class="notice"><p>Idle detection isn't working, so idle time is being counted. ${esc(s.sources.idle.error || "")}</p></div>`);
     }
     if (s.sources.kwin && !s.sources.kwin.ok) {
-      out.push('<div class="notice"><p>KWin hasn\'t reported windows for a few minutes. The tracker reloads its KWin script automatically; if this stays, restart it with systemctl --user restart arch-tracker.</p></div>');
+      const desk = s.sources.kwin.desktop || "KDE Plasma";
+      const fix = {
+        "KDE Plasma": "The tracker reloads its KWin script automatically; if this stays, restart it with systemctl --user restart arch-tracker.",
+        GNOME: "Check that the arch-tracker GNOME Shell extension is on (gnome-extensions enable arch-tracker@archtracker.dev), then log out and back in.",
+      }[desk] || "The tracker keeps reconnecting; arch-tracker doctor says what it needs.";
+      out.push(`<div class="notice"><p>${esc(desk === "KDE Plasma" ? "KWin" : desk)} hasn't reported windows for a few minutes. ${esc(fix)}</p></div>`);
     }
     for (const w of limitWarnings()) {
       out.push(
@@ -2757,6 +2762,11 @@
 
   // Codex's plan limits past the level chosen in Settings (/api/limits, every few minutes).
   let limitInfo = null;
+  // "Hide until it resets" is remembered per limit window; forget windows long past.
+  for (const k of Object.keys(localStorage)) {
+    const at = Number(k.startsWith("hide-limit:") ? k.split(":").pop() : NaN);
+    if (at && at < Date.now() - 8 * 86400000) localStorage.removeItem(k);
+  }
   async function loadLimits() {
     try {
       limitInfo = await get("/api/limits");

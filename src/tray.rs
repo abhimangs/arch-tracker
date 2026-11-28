@@ -101,8 +101,12 @@ impl State {
             Some(s) => format!("{} on screen today", fmt_dur(s)),
             None => "arch-tracker".into(),
         };
+        let h12 = self
+            .shared
+            .lock()
+            .is_ok_and(|s| s.config.dashboard.time_format == "12h");
         if paused {
-            match until.and_then(clock) {
+            match until.and_then(|t| clock(t, h12)) {
                 Some(t) => format!("{today} · paused until {t}"),
                 None => format!("{today} · paused"),
             }
@@ -179,14 +183,15 @@ pub(crate) fn fmt_dur(secs: i64) -> String {
     }
 }
 
-/// Local "HH:MM" for a unix-ms time.
-fn clock(ms: i64) -> Option<String> {
+/// Local "14:30", or "2:30 pm" with the 12-hour clock chosen in Settings.
+fn clock(ms: i64, h12: bool) -> Option<String> {
     let ts = jiff::Timestamp::from_millisecond(ms).ok()?;
-    Some(
-        ts.to_zoned_datetime(jiff::tz::TimeZone::system())
-            .strftime("%H:%M")
-            .to_string(),
-    )
+    let t = ts.to_zoned_datetime(jiff::tz::TimeZone::system());
+    Some(if h12 {
+        t.strftime("%-I:%M %P").to_string()
+    } else {
+        t.strftime("%H:%M").to_string()
+    })
 }
 
 // ---------- icon ----------

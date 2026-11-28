@@ -89,7 +89,7 @@ pub fn parse_duration(s: &str) -> Option<i64> {
         return None;
     }
     if let Ok(mins) = s.parse::<i64>() {
-        return Some(mins * 60_000);
+        return mins.checked_mul(60_000);
     }
     let mut total = 0i64;
     let mut num = String::new();
@@ -100,13 +100,15 @@ pub fn parse_duration(s: &str) -> Option<i64> {
         }
         let n: i64 = num.parse().ok()?;
         num.clear();
-        total += n * match c {
+        let unit = match c {
             's' => 1_000,
             'm' => 60_000,
             'h' => 3_600_000,
             'd' => 86_400_000,
             _ => return None,
         };
+        // A number too big for the clock is no duration (it would wrap into the past).
+        total = total.checked_add(n.checked_mul(unit)?)?;
     }
     if !num.is_empty() {
         return None;
@@ -325,6 +327,8 @@ mod tests {
         assert_eq!(parse_duration("2d"), Some(2 * 86_400_000));
         assert_eq!(parse_duration("1x"), None);
         assert_eq!(parse_duration("1h3"), None);
+        assert_eq!(parse_duration("99999999999999999d"), None);
+        assert_eq!(parse_duration("9223372036854775807"), None);
     }
 
     #[test]
