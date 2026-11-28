@@ -149,6 +149,9 @@ async fn run(
                 if wants_report(&cfg)
                     && let Some(day) = today(&db, &cfg).await
                 {
+                    if let Ok(mut s) = shared.lock() {
+                        s.today_screen = Some((now, day.date.clone(), day.totals.screen));
+                    }
                     notes.extend(due(&cfg, &day, now, live, &mut book));
                 }
                 notes.extend(lasting(&db, &cfg, now, live).await);

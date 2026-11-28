@@ -57,6 +57,9 @@ pub struct Shared {
     pub alerts: Option<mpsc::UnboundedSender<crate::alerts::Cmd>>,
     /// How far Claude Code's transcripts have been read; None until the first pass ends.
     pub claude_scan: Option<crate::sources::claude::Progress>,
+    /// Today's screen time as the notifier last counted it: (when, date, seconds). The tray's
+    /// tooltip reuses it instead of building the same day report again.
+    pub today_screen: Option<(i64, String, i64)>,
 }
 
 impl Default for Shared {
@@ -67,6 +70,7 @@ impl Default for Shared {
             live: tokio::sync::watch::channel(0).0,
             alerts: None,
             claude_scan: None,
+            today_screen: None,
         }
     }
 }
@@ -74,6 +78,7 @@ impl Default for Shared {
 pub type SharedRef = Arc<Mutex<Shared>>;
 
 pub fn run() -> Result<()> {
+    limit_malloc_arenas();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -305,6 +310,17 @@ fn watch_config(tx: mpsc::UnboundedSender<Event>) -> Result<notify::RecommendedW
         }
     });
     Ok(w)
+}
+
+/// glibc gives every thread that allocates (the blocking pool's report and transcript jobs) a
+/// malloc arena of its own, and each keeps its high-water mark: four or five of them held ~35 MB
+/// between jobs. One shared heap is trimmed back after each job (util::trim_heap).
+fn limit_malloc_arenas() {
+    #[cfg(target_env = "gnu")]
+    // SAFETY: mallopt only changes allocator tuning; called before any other thread exists.
+    unsafe {
+        libc::mallopt(libc::M_ARENA_MAX, 1);
+    }
 }
 
 fn set_mode_700(p: &std::path::Path) {

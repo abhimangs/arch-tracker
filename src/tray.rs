@@ -62,16 +62,29 @@ impl State {
         {
             return t.1;
         }
-        let cfg = self
+        let date = crate::util::local_date(now);
+        // The notifier builds today's report every minute anyway: use its total when fresh.
+        let (cfg, counted) = self
             .shared
             .lock()
-            .map(|s| s.config.clone())
+            .map(|s| (s.config.clone(), s.today_screen.clone()))
             .unwrap_or_default();
+        if let Some((at, day, secs)) = counted
+            && day == date
+            && now - at < TODAY_TTL_MS + 30_000
+        {
+            if let Ok(mut t) = self.today.lock() {
+                *t = (now, Some(secs));
+            }
+            return Some(secs);
+        }
         let db = self.db.clone();
         let secs = tokio::task::spawn_blocking(move || -> Result<i64> {
             let conn = crate::store::open_readonly(&db)?;
-            let date = crate::util::local_date(crate::util::now_ms());
-            Ok(crate::report::build_day(&conn, &cfg, &date)?.totals.screen)
+            let secs = crate::report::build_day(&conn, &cfg, &date)?.totals.screen;
+            drop(conn);
+            crate::util::trim_heap();
+            Ok(secs)
         })
         .await
         .ok()

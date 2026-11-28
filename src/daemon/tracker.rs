@@ -685,6 +685,8 @@ impl Tracker {
             self.desktop = DesktopIndex::load();
             self.desktop_loaded = Instant::now();
             self.web_apps_tried.clear();
+            // The old index (every desktop entry) was just freed: give the pages back.
+            util::trim_heap();
         }
         // One read of /proc per tick, shared by terminal inspection and the agent scan.
         let procs = (self.paused.is_none() && !self.suspended).then(ProcTable::read);
