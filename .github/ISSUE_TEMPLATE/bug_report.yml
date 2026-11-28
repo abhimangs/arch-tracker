@@ -40,6 +40,6 @@ body:
     id: versions
     attributes:
       label: Versions
-      placeholder: "arch-tracker 0.1.1, Plasma 6.8.3, Brave 1.101"
+      placeholder: "arch-tracker 0.2.0, Plasma 6.8.3, Brave 1.101"
     validations:
       required: true

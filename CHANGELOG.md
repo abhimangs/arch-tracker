@@ -6,26 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed
-
-- Deep work counted any long stretch on screen, videos included, so it came out close to the
-  whole day. It now counts only time in the focus categories (Development, AI, Productivity and
-  Learning unless you pick others in Settings → Goals and sessions); a detour elsewhere shorter
-  than a session break doesn't end a stretch but isn't counted, and a longer one does.
-- Now no longer shows a wall of empty cards: terminals, agents, media and browsers with nothing
-  to show fold into one line at the bottom.
-- The headline figures on a browser's or an agent's page are evenly spaced.
-- The database's write-ahead log is cut back to 1 MB after each checkpoint instead of staying at
-  its largest size.
-
-- Codex's use counted far too low: Codex moves older conversations into its own database and
-  removes their logs, so only the newest few were read. Its database is now read too (read-only;
-  titles and prompts are never read): a conversation's tokens beyond the responses in the logs are
-  estimated, split like your logged responses and spread over its turns, and say so on the page.
-  Usage already read is kept for good, whatever Codex later removes.
-- Every model Codex has run is priced at OpenAI's list price (standard tier, no batch,
-  promotional or other discounts): gpt-5.6 Luna, Terra and Sol, gpt-6 Astra, Sol and Luna,
-  gpt-6.1 Terra and Sol, and gpt-6.2 Astra and Sol.
+## [0.2.0] - 2026-11-28
 
 ### Added
 
@@ -77,18 +58,6 @@ All notable changes to this project are documented here. The format follows
 - A Week page: screen time day by day, categories, top apps and sites, and agent work and cost,
   each against the week before (while a week runs, against the same days of the week before).
   On the first morning of each week a notification sums up the week before and opens it.
-
-### Changed
-
-- The sidebar lists its pages first and the Browsers and Agents groups after them; the current page
-  gets a flat, darker highlight and focus rings only show for the keyboard. Claude Code and Codex
-  show their own logos, and so does Hermes.
-- CI opens every dashboard page on made-up data, at desktop and phone widths and in both themes,
-  and fails on any script error, failed request, empty page or "NaN" on screen.
-- Cost per hour of work counts only days with both tracked work and cost, and a plan limit that has
-  reset since Codex last reported it shows 0%.
-
-### Added
 
 - An Agents group in the sidebar, like Browsers: Claude Code and Codex (and Hermes once it is
   installed), each with its icon, the time it worked today and a dot while it runs, plus All agents.
@@ -147,6 +116,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The sidebar lists its pages first and the Browsers and Agents groups after them; the current page
+  gets a flat, darker highlight and focus rings only show for the keyboard. Claude Code and Codex
+  show their own logos, and so does Hermes.
+- CI opens every dashboard page on made-up data, at desktop and phone widths and in both themes,
+  and fails on any script error, failed request, empty page or "NaN" on screen.
+- Cost per hour of work counts only days with both tracked work and cost, and a plan limit that has
+  reset since Codex last reported it shows 0%.
+
 - A calmer look on every page: headline numbers without boxes, solid bars instead of hatched and
   dotted ones, neutral charts, tighter headings, a wider sidebar whose times are never cut off, and a
   content width limit on very wide screens.
@@ -165,6 +142,25 @@ All notable changes to this project are documented here. The format follows
 - `arch-tracker status` prints a readable summary (`--json` for the raw status).
 
 ### Fixed
+
+- Deep work counted any long stretch on screen, videos included, so it came out close to the
+  whole day. It now counts only time in the focus categories (Development, AI, Productivity and
+  Learning unless you pick others in Settings → Goals and sessions); a detour elsewhere shorter
+  than a session break doesn't end a stretch but isn't counted, and a longer one does.
+- Now no longer shows a wall of empty cards: terminals, agents, media and browsers with nothing
+  to show fold into one line at the bottom.
+- The headline figures on a browser's or an agent's page are evenly spaced.
+- The database's write-ahead log is cut back to 1 MB after each checkpoint instead of staying at
+  its largest size.
+
+- Codex's use counted far too low: Codex moves older conversations into its own database and
+  removes their logs, so only the newest few were read. Its database is now read too (read-only;
+  titles and prompts are never read): a conversation's tokens beyond the responses in the logs are
+  estimated, split like your logged responses and spread over its turns, and say so on the page.
+  Usage already read is kept for good, whatever Codex later removes.
+- Every model Codex has run is priced at OpenAI's list price (standard tier, no batch,
+  promotional or other discounts): gpt-5.6 Luna, Terra and Sol, gpt-6 Astra, Sol and Luna,
+  gpt-6.1 Terra and Sol, and gpt-6.2 Astra and Sol.
 
 - An extension connection that went quiet for five minutes (the machine asleep) lost track of its
   browser: background audio from it was filed under a generic "Browser", and with two browsers open
@@ -240,6 +236,7 @@ All notable changes to this project are documented here. The format follows
 - Command line: `status`, `pause`, `resume`, `setup`, `doctor` and `export`.
 - Arch PKGBUILD and a systemd user unit.
 
-[Unreleased]: https://github.com/abhimangs/arch-tracker/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/abhimangs/arch-tracker/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/abhimangs/arch-tracker/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/abhimangs/arch-tracker/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/abhimangs/arch-tracker/tree/v0.1.0

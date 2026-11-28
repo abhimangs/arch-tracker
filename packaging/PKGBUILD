@@ -3,7 +3,7 @@
 # For the AUR later, replace the "$startdir/.." source with a release tarball.
 
 pkgname=arch-tracker
-pkgver=0.1.1
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Local screen-time and activity tracker for KDE Plasma, GNOME, Hyprland and Sway on Wayland"
 arch=('x86_64')
