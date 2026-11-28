@@ -223,7 +223,7 @@ pub struct DayStats {
     pub longest_app: String,
     pub avg_session: i64,
     /// Unbroken stretches of screen time (any apps; a break of session_gap ends one).
-    /// Time in sessions of at least insights.deep_work_mins, and how many.
+    /// Time in deep-work stretches (see deep_work()), and how many.
     pub deep_work: i64,
     pub deep_sessions: usize,
     /// First and last counted moment of the day.
@@ -1285,7 +1285,6 @@ fn sessions_and_stats(
             .map(|(title, _)| title)
             .unwrap_or_default();
     }
-    let deep = cfg.insights.deep_work_mins as i64 * 60;
     let mut st = DayStats {
         switches: out.windows(2).filter(|w| w[0].app != w[1].app).count(),
         first_ms: out.first().map(|s| s.start_ms),
@@ -1322,11 +1321,8 @@ fn sessions_and_stats(
                 .map(|(l, _)| l.clone())
                 .unwrap_or_default();
         }
-        if *counted >= deep {
-            st.deep_work += counted;
-            st.deep_sessions += 1;
-        }
     }
+    (st.deep_work, st.deep_sessions) = deep_work(&out, cfg, gap);
     let total: i64 = blocks.iter().map(|b| b.1).sum();
     st.avg_session = if blocks.is_empty() {
         0
@@ -1811,6 +1807,42 @@ pub fn settings_hash(cfg: &Config) -> String {
     format!("{h:016x}")
 }
 
+/// Deep work: unbroken stretches of time in the focus categories (insights.deep_work_categories)
+/// that add up to at least insights.deep_work_mins. A break of a session gap ends a stretch, and so
+/// does time elsewhere that lasts longer than one; a shorter detour (a glance at chat) neither ends
+/// the stretch nor counts in it.
+fn deep_work(sessions: &[Session], cfg: &Config, gap_ms: i64) -> (i64, usize) {
+    let focus = &cfg.insights.deep_work_categories;
+    let deep = cfg.insights.deep_work_mins as i64 * 60;
+    let (mut total, mut count) = (0, 0);
+    // The stretch so far: where it ends and the focus seconds in it.
+    let mut run: Option<(i64, i64)> = None;
+    let mut close = |run: &mut Option<(i64, i64)>| {
+        if let Some((_, secs)) = run.take()
+            && secs >= deep
+        {
+            total += secs;
+            count += 1;
+        }
+    };
+    for s in sessions.iter().filter(|s| s.counted > 0) {
+        if run.is_some_and(|(end, _)| s.start_ms - end > gap_ms) {
+            close(&mut run);
+        }
+        if focus.is_empty() || focus.contains(&s.category) {
+            let (end, secs) = run.get_or_insert((s.end_ms, 0));
+            *end = (*end).max(s.end_ms);
+            *secs += s.counted;
+        } else if s.counted * 1000 > gap_ms {
+            close(&mut run);
+        } else if let Some((end, _)) = run.as_mut() {
+            *end = (*end).max(s.end_ms);
+        }
+    }
+    close(&mut run);
+    (total, count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2278,6 +2310,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.insights.session_gap_secs = 120;
         cfg.insights.deep_work_mins = 45;
+        cfg.insights.deep_work_categories = vec![];
         let r = compute(&cfg, "x", DS, DS + 2 * H, &spans, &subjects);
         assert_eq!(r.stats.sessions, 2);
         assert_eq!(
@@ -2288,6 +2321,28 @@ mod tests {
         assert_eq!(r.stats.deep_work, 50 * 60);
         assert_eq!(r.stats.deep_sessions, 1);
         assert!(r.sessions.len() > 2, "the Timeline still lists each app");
+    }
+
+    #[test]
+    fn deep_work_is_focus_time_only() {
+        let mut subjects = HashMap::new();
+        subjects.insert(1, Subject::app("kitty", "kitty"));
+        subjects.insert(2, Subject::app("other", "Other"));
+        let spans = vec![
+            // 20 minutes of work, a one-minute detour, 10 more: one 30-minute stretch.
+            sp(Kind::Focus, 1, 0, 20 * M),
+            sp(Kind::Focus, 2, 20 * M, 21 * M),
+            sp(Kind::Focus, 1, 21 * M, 31 * M),
+            // Ten minutes elsewhere end it; the 20 minutes after are too short.
+            sp(Kind::Focus, 2, 31 * M, 41 * M),
+            sp(Kind::Focus, 1, 41 * M, 61 * M),
+        ];
+        let mut cfg = Config::default();
+        cfg.insights.session_gap_secs = 120;
+        let r = compute(&cfg, "x", DS, DS + 2 * H, &spans, &subjects);
+        assert_eq!(r.stats.sessions, 1, "no break, so one session");
+        assert_eq!(r.stats.deep_work, 30 * 60, "the detour is not counted");
+        assert_eq!(r.stats.deep_sessions, 1);
     }
 
     #[test]

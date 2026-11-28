@@ -10,6 +10,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { openDemo, root, sleep } from "./demo-dashboard.mjs";
 
+// The demo writes activity up to "now", so a morning run shows a mostly empty day. Unless TZ is
+// set, run the demo tracker and Chromium in the whole-hour zone where it is about 21:40 now, so
+// every run shows a full day.
+if (!process.env.TZ) {
+  const utc = new Date();
+  let o = (((Math.round(21.7 - utc.getUTCHours() - utc.getUTCMinutes() / 60) % 24) + 24) % 24);
+  if (o > 14) o -= 24;
+  process.env.TZ = o === 0 ? "Etc/GMT" : `Etc/GMT${o > 0 ? "-" : "+"}${Math.abs(o)}`;
+}
+
 const out = path.resolve(process.env.OUT || path.join(root, "docs/screenshots"));
 const { cdp, js, login, close, focusedAt } = await openDemo({ port: 7690 });
 await login("today");

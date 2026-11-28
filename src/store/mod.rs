@@ -28,6 +28,8 @@ impl Store {
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // A checkpoint leaves the WAL file at its largest size; cut it back to 1 MB after one.
+        conn.pragma_update(None, "journal_size_limit", 1 << 20)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&conn)?;
         let max: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM subjects", [], |r| {

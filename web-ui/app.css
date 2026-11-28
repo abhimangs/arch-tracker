@@ -418,6 +418,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 [aria-invalid="true"] { border-color: var(--bad, var(--shu)) !important; }
 .inline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .check { display: flex; align-items: center; gap: 10px; }
+.checklist { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px 16px; }
 .unit { color: var(--mist); font-size: var(--t-s); }
 
 /* ---------- panels ---------- */
@@ -441,6 +442,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 .panel.w7 { grid-column: span 7; }
 .panel.w8 { grid-column: span 8; }
 .panel.w12 { grid-column: 1 / -1; }
+.grid > .quiet { grid-column: 1 / -1; margin: 0; padding: 0 4px; color: var(--mist); font-size: var(--t-s); }
 .panel > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .panel > header .aside { color: var(--mist); font-size: var(--t-s); }
 .panel > header a.aside { text-decoration: none; }
@@ -476,7 +478,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 
 /* Headline numbers: no boxes, just the figure over its label, left-aligned in a loose row. */
 .figures { display: flex; flex-wrap: wrap; gap: 18px clamp(28px, 4vw, 56px); padding: 6px 2px 10px; }
-.figures > div { flex: 0 1 auto; min-width: 110px; display: grid; gap: 2px; align-content: start; }
+.figures > div { flex: 0 1 auto; display: grid; gap: 2px; align-content: start; }
 /* Six or more figures: closer together, so they stay on one line on a wide screen. */
 .figures:has(> div:nth-child(6)) { column-gap: clamp(22px, 2.4vw, 36px); }
 .figures span { color: var(--mist); font-size: var(--t-s); order: 2; }

@@ -110,8 +110,11 @@ pub struct Projects {
 pub struct Insights {
     /// A break shorter than this does not end a session (seconds).
     pub session_gap_secs: u64,
-    /// A session at least this long counts as deep work (minutes).
+    /// A stretch of focus-category time at least this long counts as deep work (minutes).
     pub deep_work_mins: u64,
+    /// Categories whose time counts as deep work. Time in any other category ends a stretch
+    /// once it lasts longer than a session break. Empty: every category counts.
+    pub deep_work_categories: Vec<String>,
     /// Daily screen-time goal in minutes (0 = none).
     pub daily_goal_mins: u64,
 }
@@ -484,6 +487,9 @@ impl Default for Insights {
         Insights {
             session_gap_secs: 60,
             deep_work_mins: 25,
+            deep_work_categories: ["Development", "AI", "Productivity", "Learning"]
+                .map(String::from)
+                .to_vec(),
             daily_goal_mins: 0,
         }
     }

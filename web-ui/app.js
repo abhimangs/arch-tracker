@@ -618,15 +618,26 @@
       <dt>Started</dt><dd>${s.started_ms ? esc(hm(s.started_ms)) : "–"}</dd>
       <dt>Version</dt><dd>${esc(s.version || "")}</dd>
     </dl>`;
+    // Panels with nothing to show fold into one quiet line at the bottom, so the page shows
+    // what is going on instead of a wall of empty cards.
+    const cards = [
+      ["Beside it", visible, { w: "w4", aside: `${(s.visible || []).length} visible`, sub: "Other windows you can see. Visible time, not screen time." }],
+      ["Terminals", terms, { w: "w4" }],
+      ["AI agents", agents, { w: "w4" }],
+      ["Media", media, { w: "w4" }],
+      ["Input and session", facts, { w: "w4" }],
+      ["Browsers", browsers, { w: "w4", sub: "Where tab names and sites come from." }],
+    ];
+    const isEmpty = (body) => body.startsWith('<p class="empty">');
+    const quiet = cards.filter(([, b]) => isEmpty(b)).map(([, b]) => b.replace(/<[^>]+>/g, "").replace(/\.$/, ""));
+    const shown = cards.filter(([, b]) => !isEmpty(b));
+    shown.push(["Tracker", health, { w: "w4", sub: "The tracker itself." }]);
+    // Three small cards to a row; Running apps takes what the last row leaves, or a row of its own.
+    const left = (3 - (shown.length % 3)) % 3;
     return [
-      panel("Beside it", visible, { w: "w4", aside: `${(s.visible || []).length} visible`, sub: "Other windows you can see. Visible time, not screen time." }),
-      panel("Terminals", terms, { w: "w4" }),
-      panel("AI agents", agents, { w: "w4" }),
-      panel("Media", media, { w: "w4" }),
-      panel("Input and session", facts, { w: "w4" }),
-      panel("Browsers", browsers, { w: "w4", sub: "Where tab names and sites come from." }),
-      panel("Running apps", running, { w: "w8", aside: `${(s.running || []).length} open`, sub: "Open, even in the tray. Never counted as use." }),
-      panel("Tracker", health, { w: "w4", sub: "The tracker itself." }),
+      ...shown.map(([t, b, o]) => panel(t, b, o)),
+      panel("Running apps", running, { w: left ? `w${left * 4}` : "w12", aside: `${(s.running || []).length} open`, sub: "Open, even in the tray. Never counted as use." }),
+      quiet.length ? `<p class="quiet">${quiet.map(esc).join(" · ")}</p>` : "",
     ].join("");
   }
 
@@ -713,7 +724,7 @@
       <div class="kpi"><span>Watching</span><b>${dur(t.passive)}</b></div>
       <div class="kpi"><span>Calls</span><b>${dur(t.call)}</b></div>
       <div class="kpi"><span>Sessions</span><b>${st.sessions ?? 0}</b><em>${st.switches ?? 0} app switches</em></div>
-      <div class="kpi"><span>Deep work</span><b>${dur(st.deep_work)}</b><em>${st.deep_sessions ?? 0} long sessions</em></div>
+      <div class="kpi"><span>Deep work</span><b>${dur(st.deep_work)}</b><em>${st.deep_sessions ?? 0} ${st.deep_sessions === 1 ? "stretch" : "stretches"}</em></div>
       <div class="kpi"><span>First activity</span><b>${first}</b><em>${last}</em></div>
     </div>`;
   }
@@ -2277,7 +2288,8 @@
       ${sec("goals", "Goals and sessions", `
         ${field("Daily goal", "Screen time you aim to stay under; Today shows how close you are. 0 turns it off.", num("goal", (c.insights.daily_goal_mins || 0) / 60, "hours", 0, 24, "any"))}
         ${field("Session break", "A pause shorter than this doesn't end a session. Switching apps never does.", num("sgap", c.insights.session_gap_secs, "seconds", 5, 3600))}
-        ${field("Deep work", "An unbroken session at least this long counts as deep work.", num("deep", c.insights.deep_work_mins, "minutes", 5, 480))}
+        ${field("Deep work", "A stretch of time in the categories below at least this long counts as deep work.", num("deep", c.insights.deep_work_mins, "minutes", 5, 480))}
+        ${field("Counts as deep work", "Time elsewhere shorter than a session break (a glance at chat) doesn't end a stretch, but isn't counted. None ticked: every category counts.", `<div class="checklist">${c.categories.map((k, i) => check("dwc" + i, (c.insights.deep_work_categories || []).includes(k.name), k.name)).join("")}</div>`)}
       `, "Per-category limits are in Categories below.")}
       ${sec("notify", "Notifications", `
         ${field("Notifications", "Off turns every notice below off: nothing is checked or sent.", check("nall", nt.enabled, "Send desktop notifications"))}
@@ -2517,6 +2529,7 @@
         daily_goal_mins: Math.round(n("goal") * 60),
         session_gap_secs: n("sgap"),
         deep_work_mins: n("deep"),
+        deep_work_categories: c.categories.filter((_, i) => $("dwc" + i)?.checked).map((k) => k.name),
       };
       next.projects = {
         editors: unlines($("editors").value),

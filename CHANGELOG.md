@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Deep work counted any long stretch on screen, videos included, so it came out close to the
+  whole day. It now counts only time in the focus categories (Development, AI, Productivity and
+  Learning unless you pick others in Settings → Goals and sessions); a detour elsewhere shorter
+  than a session break doesn't end a stretch but isn't counted, and a longer one does.
+- Now no longer shows a wall of empty cards: terminals, agents, media and browsers with nothing
+  to show fold into one line at the bottom.
+- The headline figures on a browser's or an agent's page are evenly spaced.
+- The database's write-ahead log is cut back to 1 MB after each checkpoint instead of staying at
+  its largest size.
+
 - Codex's use counted far too low: Codex moves older conversations into its own database and
   removes their logs, so only the newest few were read. Its database is now read too (read-only;
   titles and prompts are never read): a conversation's tokens beyond the responses in the logs are
