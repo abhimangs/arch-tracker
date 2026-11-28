@@ -32,7 +32,6 @@ All notable changes to this project are documented here. The format follows
 - A new logo, the day drawn as an arch, everywhere: the dashboard, the tray icon (grey while
   paused), desktop notifications (the package installs it as the `arch-tracker` icon), the
   browser extension in both browser families, and the README and GitHub preview image.
-
 - Codex's page shows how long its turns ran, from Codex's own records (back to its first use,
   runs inside VS Code included), beside the time the tracker saw it working, per day or hour.
   Cost per hour of work uses the turns.

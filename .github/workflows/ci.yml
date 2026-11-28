@@ -87,7 +87,7 @@ jobs:
     container: archlinux:base-devel
     steps:
       - name: Install build tools
-        run: pacman -Syu --noconfirm --needed git rust sqlite namcap
+        run: pacman -Syu --noconfirm --needed git rust sqlite hicolor-icon-theme namcap
       - uses: actions/checkout@v7
       - name: Build arch-tracker and arch-tracker-bin from this checkout
         run: |
@@ -102,7 +102,7 @@ jobs:
     container: archlinux:base-devel
     steps:
       - name: Install build tools
-        run: pacman -Syu --noconfirm --needed git rust sqlite
+        run: pacman -Syu --noconfirm --needed git rust sqlite hicolor-icon-theme
       - uses: actions/checkout@v7
       - name: Build with makepkg
         run: |

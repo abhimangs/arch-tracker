@@ -14,7 +14,7 @@ jobs:
     container: archlinux:base-devel
     steps:
       - name: Install build tools
-        run: pacman -Syu --noconfirm --needed git rust sqlite github-cli
+        run: pacman -Syu --noconfirm --needed git rust sqlite hicolor-icon-theme github-cli
       - uses: actions/checkout@v7
       - name: Check that versions match the tag
         run: |
